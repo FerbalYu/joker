@@ -90,8 +90,6 @@ jobs:
     timeout-minutes: 60
     env:
       CI: true
-      JOKER_SIGNED_REPORT_DIR: ${{ runner.temp }}/joker-signed-release
-      GNUPGHOME: ${{ runner.temp }}/joker-gnupg
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -106,6 +104,7 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+          GNUPGHOME: ${{ runner.temp }}/joker-gnupg
         run: |
           set -euo pipefail
           if [ -n "${GNUPGHOME:-}" ]; then mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"; fi
@@ -121,6 +120,7 @@ jobs:
           esac
       - name: Run sign and verify qualification
         env:
+          JOKER_SIGNED_REPORT_DIR: ${{ runner.temp }}/joker-signed-release
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
