@@ -1,0 +1,96 @@
+import { useEffect, useMemo, useState } from 'react'
+import { ChevronDown, ChevronRight, Loader2, Wrench } from 'lucide-react'
+import type { ToolCallInfo } from '@shared/types'
+import { useStore } from '../store'
+import { t, toolLabel } from '../i18n'
+import ToolCard from './ToolCard'
+
+interface Props {
+  toolCalls: ToolCallInfo[]
+}
+
+export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | null {
+  const language = useStore((s) => s.language)
+  const hasRunning = toolCalls.some((toolCall) => toolCall.status === 'running')
+  const [expanded, setExpanded] = useState(hasRunning || toolCalls.length <= 1)
+
+  useEffect(() => {
+    if (hasRunning) setExpanded(true)
+    else if (toolCalls.length > 1) setExpanded(false)
+  }, [hasRunning, toolCalls.length])
+
+  const summary = useMemo(() => buildSummary(toolCalls, language), [language, toolCalls])
+
+  if (toolCalls.length === 0) return null
+
+  if (toolCalls.length === 1) {
+    return (
+      <div className="w-full space-y-2">
+        <ToolCard toolCall={toolCalls[0]} />
+      </div>
+    )
+  }
+
+  const errorCount = toolCalls.filter((toolCall) => toolCall.status === 'error').length
+  const doneCount = toolCalls.filter((toolCall) => toolCall.status === 'done').length
+
+  return (
+    <div
+      className={`w-full overflow-hidden rounded-lg border bg-[var(--color-surface)] shadow-[0_8px_24px_rgba(0,0,0,0.12)] ${
+        hasRunning
+          ? 'border-[var(--color-accent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent),0_8px_24px_rgba(0,0,0,0.16)]'
+          : errorCount > 0
+            ? 'border-red-700'
+            : 'border-[var(--color-border)]'
+      }`}
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        className="flex min-h-12 w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+      >
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--color-bg)] text-[var(--color-text-secondary)]">
+          {hasRunning ? <Loader2 size={16} className="animate-spin text-[var(--color-accent)]" /> : <Wrench size={16} />}
+        </span>
+        <span className="shrink-0 whitespace-nowrap rounded-md bg-[var(--color-accent)]/10 px-2 py-1 text-sm font-medium leading-none text-[var(--color-text-primary)]">
+          {t(language, 'tool.group.title', { count: toolCalls.length })}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-muted)]" title={summary}>
+          {summary}
+        </span>
+        <span className="ml-auto flex shrink-0 items-center gap-2 text-[10px] text-[var(--color-text-muted)]">
+          {hasRunning
+            ? t(language, 'tool.group.running')
+            : errorCount > 0
+              ? t(language, 'tool.group.errors', { count: errorCount })
+              : t(language, 'tool.group.done', { count: doneCount })}
+          {expanded ? (
+            <ChevronDown size={15} className="text-[var(--color-text-muted)]" />
+          ) : (
+            <ChevronRight size={15} className="text-[var(--color-text-muted)]" />
+          )}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="space-y-2 border-t border-[var(--color-border)]/70 p-2">
+          {toolCalls.map((toolCall, index) => (
+            <ToolCard key={toolCall.toolCallId ?? `${toolCall.toolName}-${index}`} toolCall={toolCall} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function buildSummary(toolCalls: ToolCallInfo[], language: import('../i18n').Language): string {
+  const counts = new Map<string, number>()
+  for (const toolCall of toolCalls) {
+    const label = toolLabel(language, toolCall.toolName)
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+  return [...counts.entries()]
+    .map(([label, count]) => (count > 1 ? `${label} ×${count}` : label))
+    .join(' · ')
+}

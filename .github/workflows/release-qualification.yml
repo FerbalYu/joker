@@ -1,0 +1,144 @@
+name: Release qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_signed_release:
+        description: 'Run the fail-closed signed release contract'
+        required: true
+        default: false
+        type: boolean
+      signing_os:
+        description: 'Native runner for signing contract'
+        required: true
+        default: 'ubuntu-latest'
+        type: choice
+        options:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  linux-native:
+    name: Linux native package qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: true
+      JOKER_DISABLE_EXTERNAL_SERVICES: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build Linux packages
+        run: npm run build:dist -- --linux AppImage deb
+      - name: Native package qualification
+        env:
+          JOKER_NATIVE_REPORT_DIR: ${{ runner.temp }}/joker-native-package
+        run: xvfb-run -a node scripts/native-package-qualification.mjs --strict
+      - name: Upload Linux evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release-qualification
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            ${{ runner.temp }}/joker-native-package/native-package-report.json
+          if-no-files-found: error
+
+  macos-native:
+    name: macOS native package qualification
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      CI: true
+      JOKER_DISABLE_EXTERNAL_SERVICES: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build macOS package
+        run: npm run build:dist -- --mac dmg
+      - name: Native package qualification
+        env:
+          JOKER_NATIVE_REPORT_DIR: ${{ runner.temp }}/joker-native-package
+        run: node scripts/native-package-qualification.mjs --strict
+      - name: Upload macOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-qualification
+          path: |
+            dist/*.dmg
+            ${{ runner.temp }}/joker-native-package/native-package-report.json
+          if-no-files-found: error
+
+  signed-release-contract:
+    name: Signed release contract (fail closed)
+    if: github.event_name == 'workflow_dispatch' && inputs.enable_signed_release == true
+    runs-on: ${{ inputs.signing_os || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    env:
+      CI: true
+      JOKER_SIGNED_REPORT_DIR: ${{ runner.temp }}/joker-signed-release
+      GNUPGHOME: ${{ runner.temp }}/joker-gnupg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Import signing material without logging secrets
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          if [ -n "${GNUPGHOME:-}" ]; then mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"; fi
+          case "${{ inputs.signing_os }}" in
+            windows-latest|macos-latest)
+              test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD" || { echo 'CSC_LINK and CSC_KEY_PASSWORD are required.' >&2; exit 1; }
+              ;;
+            ubuntu-latest)
+              test -n "$GPG_PRIVATE_KEY" && test -n "$GPG_KEY_ID" || { echo 'GPG_PRIVATE_KEY and GPG_KEY_ID are required.' >&2; exit 1; }
+              printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+              ;;
+            *) echo 'Unsupported signing runner.' >&2; exit 1 ;;
+          esac
+      - name: Run sign and verify qualification
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: npm run test:qualification:signed-release
+      - name: Upload signed evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-release-qualification-${{ inputs.signing_os }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.asc
+            ${{ runner.temp }}/joker-signed-release/signed-release-report.json
+          if-no-files-found: error

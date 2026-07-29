@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.joker.app",
+  "productName": "JOKER",
+  "directories": {
+    "buildResources": "build"
+  },
+  "extraResources": [
+    {
+      "from": "src/image/logo.ico",
+      "to": "logo.ico"
+    }
+  ],
+  "files": [
+    "out/**/*"
+  ],
+  "win": {
+    "icon": "src/image/logo.ico",
+    "signAndEditExecutable": false,
+    "target": ["nsis"],
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+  "mac": {
+    "target": ["dmg"],
+    "category": "public.app-category.developer-tools",
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+  "linux": {
+    "target": ["AppImage", "deb"],
+    "category": "Development",
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}
