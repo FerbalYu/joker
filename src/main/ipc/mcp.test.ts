@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeHeaders, validateServerConfig } from './mcp'
+import { normalizeHeaders, validateServerConfig } from './mcp-config'
 
 void test('normalizeHeaders rejects CRLF and enforces limits', () => {
   assert.deepEqual(normalizeHeaders({ Authorization: 'Bearer token', 'X-Test': 'ok' }), {
@@ -10,7 +10,7 @@ void test('normalizeHeaders rejects CRLF and enforces limits', () => {
   assert.throws(() => normalizeHeaders({ Authorization: 'bad\r\nInjected: yes' }), /header value/)
   assert.throws(() => normalizeHeaders({ ['x'.repeat(81)]: 'value' }), /header name/)
   assert.throws(() => normalizeHeaders(Object.fromEntries(Array.from({ length: 31 }, (_, index) => [`X-${index}`, 'v']))), /Too many/)
-  assert.throws(() => normalizeHeaders({ Authorization: 'x'.repeat(32 * 1024) }), /too large/)
+  assert.throws(() => normalizeHeaders({ Authorization: 'x'.repeat(32 * 1024) }), /header value|too large/)
 })
 
 void test('validateServerConfig normalizes headers and rejects embedded HTTP credentials', () => {

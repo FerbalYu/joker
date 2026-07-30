@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AppConfig, AssistantSegment, ChatMessage, ContextUsage, StreamUsage, ToolCallInfo, ApprovalRequest, SessionMeta, ReasoningLevel, ProjectEntry } from '@shared/types'
+import type { AppConfig, AssistantSegment, ChatMessage, ContextUsage, StreamUsage, ToolCallInfo, ApprovalRequest, SessionMeta, ReasoningLevel, ProjectEntry, RunMode } from '@shared/types'
 import { getInitialLanguage, persistLanguage, type Language } from './i18n'
 import {
   appendTextSegment,
@@ -21,6 +21,8 @@ interface AppState {
   contextUsage: ContextUsage | null
   latestUsage: StreamUsage | null
   reasoningLevel: ReasoningLevel
+  activeRunMode: RunMode
+  streamRunMode: RunMode | null
   pendingToolCalls: ToolCallInfo[]
 
   approvalQueue: ApprovalRequest[]
@@ -51,6 +53,8 @@ interface AppState {
   setContextUsage: (usage: ContextUsage | null) => void
   setLatestUsage: (usage: StreamUsage | null) => void
   setReasoningLevel: (level: ReasoningLevel) => void
+  setActiveRunMode: (mode: RunMode) => void
+  setStreamRunMode: (mode: RunMode | undefined) => void
   addPendingToolCall: (tc: ToolCallInfo) => void
   resolveToolCall: (toolCallId: string, toolName: string, output: string, metadata?: Record<string, unknown>) => void
   failToolCall: (toolCallId: string, toolName: string, error: string) => void
@@ -82,6 +86,8 @@ export const useStore = create<AppState>((set, get) => ({
   contextUsage: null,
   latestUsage: null,
   reasoningLevel: 'auto',
+  activeRunMode: 'chat',
+  streamRunMode: null,
   pendingToolCalls: [],
   approvalQueue: [],
   selectedApproval: null,
@@ -100,7 +106,15 @@ export const useStore = create<AppState>((set, get) => ({
   removeMessage: (messageId) => set((s) => ({ messages: s.messages.filter((message) => message.id !== messageId) })),
   setMessages: (messages) => set({ messages }),
 
-  startStream: () => set({ streaming: true, streamStartedAt: Date.now(), streamText: '', streamSegments: [], pendingToolCalls: [] }),
+  startStream: () => set({
+    streaming: true,
+    streamStartedAt: Date.now(),
+    streamText: '',
+    streamSegments: [],
+    pendingToolCalls: [],
+    contextUsage: null,
+    latestUsage: null
+  }),
   appendToken: (token) =>
     set((s) => {
       const streamSegments = appendTextSegment(s.streamSegments, token)
@@ -122,6 +136,7 @@ export const useStore = create<AppState>((set, get) => ({
       segments: segments.length > 0 ? segments : undefined,
       usage,
       durationMs: state.streamStartedAt === null ? undefined : Math.max(0, Date.now() - state.streamStartedAt),
+      runMode: state.streamRunMode ?? undefined,
       createdAt: Date.now()
     }
     set((s) => ({
@@ -129,12 +144,13 @@ export const useStore = create<AppState>((set, get) => ({
       streamText: '',
       streamSegments: [],
       pendingToolCalls: [],
-      streamStartedAt: null
+      streamStartedAt: null,
+      streamRunMode: null
     }))
     return message
   },
 
-  clearStream: () => set({ streamText: '', streamSegments: [], pendingToolCalls: [], streamStartedAt: null }),
+  clearStream: () => set({ streamText: '', streamSegments: [], pendingToolCalls: [], streamStartedAt: null, streamRunMode: null }),
   resetTransientState: () =>
     set({
       streamText: '',
@@ -144,6 +160,7 @@ export const useStore = create<AppState>((set, get) => ({
       streamStartedAt: null,
       streamProviderName: null,
       streamModelName: null,
+      streamRunMode: null,
       contextUsage: null,
       latestUsage: null
     }),
@@ -153,6 +170,8 @@ export const useStore = create<AppState>((set, get) => ({
   setContextUsage: (usage) => set({ contextUsage: usage }),
   setLatestUsage: (usage) => set({ latestUsage: usage }),
   setReasoningLevel: (reasoningLevel) => set({ reasoningLevel }),
+  setActiveRunMode: (activeRunMode) => set({ activeRunMode }),
+  setStreamRunMode: (streamRunMode) => set({ streamRunMode: streamRunMode ?? null }),
 
   addPendingToolCall: (tc) =>
     set((s) => {

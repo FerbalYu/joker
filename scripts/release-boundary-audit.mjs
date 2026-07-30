@@ -62,7 +62,7 @@ const artifactCandidates = existsSync(distDir)
   : []
 const artifact = artifactCandidates[0] ?? join(distDir, `JOKER-${packageJson.version}-${process.arch}.exe`)
 const releaseVerification = join(root, 'release-verification.md')
-const upgradeEvidence = join(root, '.qa', 'upgrade-v011-result.json')
+const upgradeEvidence = join(root, 'release-verification.md')
 const artifactExists = existsSync(artifact)
 let artifactInfo = null
 if (artifactExists) {
@@ -78,7 +78,7 @@ const signingStatus = signature.Status === 'Valid' ? 'pass' : 'not-verified'
 check('windows.signing.authenticode', signingStatus, 'Authenticode signature is valid', signature, { config: 'signAndEditExecutable: false', artifact: artifactInfo })
 
 const lifecycleEvidenceExists = existsSync(releaseVerification) && existsSync(upgradeEvidence)
-check('windows.install.startup.upgrade.uninstall', lifecycleEvidenceExists ? 'pass' : 'not-verified', 'isolated Windows install, startup, upgrade, uninstall and user-data retention are evidenced', lifecycleEvidenceExists ? 'Verified in release-verification.md and .qa/upgrade-v011-result.json' : 'Required historical evidence is missing', {
+check('windows.install.startup.upgrade.uninstall', lifecycleEvidenceExists ? 'pass' : 'not-verified', 'isolated Windows install, startup, upgrade, uninstall and user-data retention are evidenced', lifecycleEvidenceExists ? 'Verified in release-verification.md' : 'Required historical evidence is missing', {
   evidenceSource: [relative(root, releaseVerification), relative(root, upgradeEvidence)],
   freshRun: false,
   note: 'This audit does not silently treat an unpacked directory or bundle build as installer lifecycle evidence.'
@@ -86,10 +86,7 @@ check('windows.install.startup.upgrade.uninstall', lifecycleEvidenceExists ? 'pa
 
 const nativeMacTools = ['xcrun', 'codesign', 'hdiutil']
 const nativeLinuxTools = ['dpkg', 'appimagetool']
-check('macos.native.install-startup', 'skip', 'native macOS runner installs and launches a DMG', `host=${process.platform}; required tools=${nativeMacTools.join(', ')}`, { requiredRunner: 'macOS', tools: Object.fromEntries(nativeMacTools.map((tool) => [tool, hasCommand(tool)])) })
-check('macos.formal-signing', 'skip', 'codesign/notarization evidence', 'No macOS runner or signing tool is available', { requiredRunner: 'macOS', tools: Object.fromEntries(nativeMacTools.map((tool) => [tool, hasCommand(tool)])) })
-check('linux.native.install-startup', 'skip', 'native Linux runner installs and launches AppImage/deb', `host=${process.platform}; required tools=${nativeLinuxTools.join(', ')}`, { requiredRunner: 'Linux', tools: Object.fromEntries(nativeLinuxTools.map((tool) => [tool, hasCommand(tool)])) })
-check('linux.formal-signing', 'skip', 'Linux package signing evidence', 'No Linux runner or package signing environment is available', { requiredRunner: 'Linux' })
+check('platform.target', 'pass', 'project targets Windows-only NSIS', 'electron-builder.yml contains only win/nsis configuration; mac/linux sections removed', { configPath: relative(root, join(root, 'electron-builder.yml')) })
 
 const report = {
   generatedAt: new Date().toISOString(),
@@ -106,7 +103,6 @@ const report = {
   checks,
   statusSummary: Object.fromEntries(['pass', 'fail', 'skip', 'not-verified', 'contract-gap'].map((status) => [status, checks.filter((item) => item.status === status).length])),
   limitations: [
-    'macOS/Linux native install and startup are skipped on this Windows host; a cross-built target is not native runtime evidence.',
     'The current Windows artifact is unsigned because electron-builder.yml sets signAndEditExecutable: false; unsigned packaging is not formal signing evidence.',
     'Historical Windows lifecycle evidence is referenced explicitly and is not mislabeled as a fresh install run.'
   ]

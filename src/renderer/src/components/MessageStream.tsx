@@ -3,7 +3,7 @@ import { Copy, Loader2, Pencil, Send, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Components } from 'react-markdown'
-import type { AssistantSegment, ChatMessage, ToolCallInfo } from '@shared/types'
+import type { AssistantSegment, ChatMessage, RunMode, ToolCallInfo } from '@shared/types'
 import { useStore } from '../store'
 import { t, type Language } from '../i18n'
 import ImagePreview from './ImagePreview'
@@ -13,6 +13,8 @@ import ToolCallList from './ToolCallList'
 import MessageMinimap from './MessageMinimap'
 import { segmentsFromLegacyMessage } from '../assistant-segments'
 import { splitUrls, classifyLink } from '../url-preview'
+import { extractResearchReports, visibleChatTools } from '../tool-visibility'
+import ResearchReportView from './research/ResearchReportView'
 import logoUrl from '../../../image/logo.png'
 
 const markdownComponents = (onCopyLink?: (url: string) => void): Components => ({
@@ -51,7 +53,7 @@ const markdownComponents = (onCopyLink?: (url: string) => void): Components => (
   },
   pre: ({ children }) => <pre className="mb-3 max-w-full overflow-hidden whitespace-pre-wrap break-words rounded-lg border border-[var(--color-border)] bg-[#08090a] last:mb-0">{children}</pre>,
   hr: () => <hr className="my-4 border-[var(--color-border)]" />,
-  table: ({ children }) => <div className="mb-3 max-w-full overflow-hidden"><table className="w-full table-fixed border-collapse text-left text-xs">{children}</table></div>,
+  table: ({ children }) => <div className="mb-3 max-w-full overflow-x-auto"><table className="min-w-full border-collapse text-left text-xs">{children}</table></div>,
   th: ({ children }) => <th className="border border-[var(--color-border)] bg-[var(--color-surface-active)] px-3 py-2 font-medium">{children}</th>,
   td: ({ children }) => <td className="border border-[var(--color-border)] px-3 py-2">{children}</td>
 })
@@ -61,6 +63,7 @@ interface Props {
   streamText: string
   streamSegments: AssistantSegment[]
   streaming: boolean
+  streamRunMode: RunMode | null
   pendingToolCalls: ToolCallInfo[]
   onCopyLink?: (url: string) => void
   onCopyMessage?: (text: string) => void
@@ -72,6 +75,7 @@ export default function MessageStream({
   streamText,
   streamSegments,
   streaming,
+  streamRunMode,
   pendingToolCalls,
   onCopyLink,
   onCopyMessage,
@@ -131,6 +135,7 @@ export default function MessageStream({
         {streaming && (
           <StreamingReply
             streamSegments={streamSegments}
+            runMode={streamRunMode}
             language={language}
             onCopyLink={onCopyLink}
           />
@@ -144,10 +149,12 @@ export default function MessageStream({
 
 function StreamingReply({
   streamSegments,
+  runMode,
   language,
   onCopyLink
 }: {
   streamSegments: AssistantSegment[]
+  runMode: RunMode | null
   language: Language
   onCopyLink?: (url: string) => void
 }): React.JSX.Element | null {
@@ -163,7 +170,7 @@ function StreamingReply({
   return (
     <div className="mb-6 min-w-0">
       <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-[var(--color-accent)]"><img src={logoUrl} alt="" className="h-4 w-4 rounded object-cover" />JOKER</div>
-      <AssistantSegmentsView segments={streamSegments} streaming onCopyLink={onCopyLink} />
+      <AssistantSegmentsView segments={streamSegments} streaming runMode={runMode} onCopyLink={onCopyLink} />
     </div>
   )
 }
@@ -171,10 +178,12 @@ function StreamingReply({
 function AssistantSegmentsView({
   segments,
   streaming = false,
+  runMode = null,
   onCopyLink
 }: {
   segments: AssistantSegment[]
   streaming?: boolean
+  runMode?: RunMode | null
   onCopyLink?: (url: string) => void
 }): React.JSX.Element {
   return (
@@ -192,9 +201,15 @@ function AssistantSegmentsView({
             </div>
           )
         }
+        const visibleTools = visibleChatTools(segment.tools)
+        const reports = extractResearchReports(segment.tools)
+        if (visibleTools.length === 0 && reports.length === 0) return null
         return (
-          <div key={`tools-${index}`} className="w-full">
-            <ToolCallList toolCalls={segment.tools} />
+          <div key={`tools-${index}`} className="w-full space-y-4">
+            {visibleTools.length > 0 && <ToolCallList toolCalls={visibleTools} />}
+            {reports.map((artifact, reportIndex) => (
+              <ResearchReportView key={artifact.toolCall.toolCallId ?? `report-${reportIndex}`} metadata={artifact.toolCall.metadata} status={artifact.toolCall.status} runMode={runMode} />
+            ))}
           </div>
         )
       })}
@@ -212,7 +227,18 @@ function MarkdownContent({ content, onCopyLink }: { content: string; onCopyLink?
 
 function MessageParts({ message, language, onCopyLink }: { message: ChatMessage; language: Language; onCopyLink?: (url: string) => void }): React.JSX.Element {
   if (!message.parts) return <UrlAwareText text={message.content} onCopyLink={onCopyLink} />
-  return <div className="space-y-2">{message.parts.map((part, index) => part.type === 'text' ? <UrlAwareText key={index} text={part.text} onCopyLink={onCopyLink} /> : <ImagePreview key={index} image={part} language={language} mode="message" />)}</div>
+  const images = message.parts.filter((part) => part.type === 'image')
+  const textParts = message.parts.filter((part) => part.type === 'text')
+  return (
+    <div className="space-y-2">
+      {images.length > 0 && (
+        <div data-message-attachments className="flex flex-wrap justify-end gap-2">
+          {images.map((image, index) => <ImagePreview key={index} image={image} language={language} mode="attachment" />)}
+        </div>
+      )}
+      {textParts.map((part, index) => <UrlAwareText key={index} text={part.text} onCopyLink={onCopyLink} />)}
+    </div>
+  )
 }
 
 function UrlAwareText({ text, onCopyLink }: { text: string; onCopyLink?: (url: string) => void }): React.JSX.Element {
@@ -261,7 +287,7 @@ const assistantSegments = !isUser
     : []
   const content = isUser
     ? <MessageParts message={message} language={language} onCopyLink={onCopyLink} />
-    : <AssistantSegmentsView segments={assistantSegments} onCopyLink={onCopyLink} />
+    : <AssistantSegmentsView segments={assistantSegments} runMode={message.runMode ?? null} onCopyLink={onCopyLink} />
   const duration = !isUser && message.durationMs !== undefined ? formatDuration(message.durationMs) : null
 
   return (

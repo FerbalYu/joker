@@ -1,6 +1,6 @@
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef, type ClipboardEvent, type KeyboardEvent } from 'react'
-import { ArrowLeft, Brain, Check, ChevronDown, FileText, FolderOpen, GitBranch, Globe, PencilLine, Send, ShieldAlert, ShieldCheck, Square, X } from 'lucide-react'
-import type { AppConfig, ChatImagePart, ContextUsage, GitStatus, ProviderEntry, ReasoningLevel, SkillDescriptor } from '@shared/types'
+import { ArrowLeft, Brain, Check, ChevronDown, FileText, FolderOpen, GitBranch, Globe, MessageSquare, PencilLine, SearchCheck, Send, ShieldAlert, ShieldCheck, Square, X } from 'lucide-react'
+import type { AppConfig, ChatImagePart, ContextUsage, GitStatus, ProviderEntry, ReasoningLevel, RunMode, SkillDescriptor } from '@shared/types'
 import { ALLOWED_IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_IMAGES_PER_MESSAGE, MAX_MESSAGE_IMAGE_BYTES, base64ByteSize, getImageResizeDimensions } from '@shared/messages'
 import { useStore } from '../store'
 import { t } from '../i18n'
@@ -24,12 +24,14 @@ type InputLink = {
 }
 
 interface Props {
-  onSend: (draft: { text: string; images: ChatImagePart[]; skillIds?: string[]; links?: string[] }) => void
+  onSend: (draft: { text: string; images: ChatImagePart[]; skillIds?: string[]; links?: string[]; runMode: RunMode }) => boolean | Promise<boolean>
   onAbort: () => void
   streaming: boolean
   contextUsage: ContextUsage | null
   reasoningLevel: ReasoningLevel
   onReasoningLevelChange: (level: ReasoningLevel) => void
+  runMode: RunMode
+  onRunModeChange: (mode: RunMode) => void
   onProjectChange: (projectId: string) => Promise<boolean>
   onProjectClear: () => Promise<boolean>
   onProjectPick: () => Promise<boolean>
@@ -39,7 +41,7 @@ interface Props {
 
 const MAX_INPUT_LINKS = 16
 
-const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, onAbort, streaming, contextUsage, reasoningLevel, onReasoningLevelChange, onProjectChange, onProjectClear, onProjectPick, gitStatus, gitStatusLoading }, ref): React.JSX.Element {
+const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, onAbort, streaming, contextUsage, reasoningLevel, onReasoningLevelChange, runMode, onRunModeChange, onProjectChange, onProjectClear, onProjectPick, gitStatus, gitStatusLoading }, ref): React.JSX.Element {
   const [text, setText] = useState('')
   const [images, setImages] = useState<ChatImagePart[]>([])
   const [imageError, setImageError] = useState<string | null>(null)
@@ -49,6 +51,7 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   const [links, setLinks] = useState<InputLink[]>([])
   const [slashToken, setSlashToken] = useState<SlashToken | null>(null)
   const [slashIndex, setSlashIndex] = useState(0)
+  const [submitting, setSubmitting] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuView, setMenuView] = useState<'providers' | 'models'>('providers')
   const [hoveredProviderId, setHoveredProviderId] = useState<string | null>(null)
@@ -68,6 +71,15 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   useEffect(() => {
     void window.joker.skill.list().then(setSkills)
   }, [])
+
+  useEffect(() => {
+    if (runMode !== 'research') return
+    setSelectedSkills([])
+    setImages([])
+    setLinks((current) => current.filter((link) => link.kind === 'web'))
+    setImageError(null)
+    setSlashToken(null)
+  }, [runMode])
 
   useEffect(() => {
     if (!projectMenuOpen) return
@@ -110,8 +122,10 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   }, [menuOpen])
 
   const filteredSkills = useMemo(
-    () => filterSkills(skills.filter((skill) => !selectedSkills.some((selected) => selected.id === skill.id)), slashToken?.query ?? ''),
-    [selectedSkills, skills, slashToken?.query]
+    () => runMode === 'chat'
+      ? filterSkills(skills.filter((skill) => !selectedSkills.some((selected) => selected.id === skill.id)), slashToken?.query ?? '')
+      : [],
+    [runMode, selectedSkills, skills, slashToken?.query]
   )
   const activeProvider = config ? resolveActiveProvider(config) : null
   const activeModel = activeProvider ? resolveActiveModel(activeProvider) : null
@@ -121,7 +135,7 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
 
   const addLink = (url: string): boolean => {
     const classification = classifyLink(url)
-    if ((classification.kind !== 'web' && classification.kind !== 'file') || url.length > 4096) return false
+    if ((classification.kind !== 'web' && classification.kind !== 'file') || (runMode === 'research' && classification.kind !== 'web') || url.length > 4096) return false
     const kind = classification.kind
     if (links.some((link) => link.url === url) || links.length >= MAX_INPUT_LINKS) return false
     setLinks((current) => [...current, { id: `${url}-${crypto.randomUUID()}`, url, kind, label: linkLabel(url) }])
@@ -176,6 +190,10 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   }
 
   const updateSlashToken = (value: string, caret: number): void => {
+    if (runMode !== 'chat') {
+      setSlashToken(null)
+      return
+    }
     const token = findSlashToken(value, caret)
     setSlashToken(token)
     setSlashIndex(0)
@@ -199,23 +217,33 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
 
   const handleSend = (): void => {
     const trimmed = text.trim()
-    if ((!trimmed && images.length === 0 && links.length === 0) || streaming) return
-    const commandText = selectedSkills.length > 0 ? text.replace(/(?:^|\s)\/[A-Za-z0-9._-]+/g, ' ').replace(/\s{2,}/g, ' ').trim() : trimmed
+    if ((!trimmed && images.length === 0 && links.length === 0) || streaming || submitting) return
+    const commandText = runMode === 'chat' && selectedSkills.length > 0 ? text.replace(/(?:^|\s)\/[A-Za-z0-9._-]+/g, ' ').replace(/\s{2,}/g, ' ').trim() : trimmed
     const linkText = links.map((link) => link.url).join('\n')
     const messageText = [commandText, linkText].filter(Boolean).join('\n')
-    onSend({ text: messageText, images, skillIds: selectedSkills.map((skill) => skill.id), links: links.map((link) => link.url) })
-    setText('')
-    setSelectedSkills([])
-    setLinks([])
-    setSlashToken(null)
-    setImages([])
-    setImageError(null)
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    setSubmitting(true)
+    void Promise.resolve(onSend({ text: messageText, images: runMode === 'chat' ? images : [], skillIds: runMode === 'chat' ? selectedSkills.map((skill) => skill.id) : undefined, links: links.map((link) => link.url), runMode }))
+      .then((accepted) => {
+        if (!accepted) return
+        setText('')
+        setSelectedSkills([])
+        setLinks([])
+        setSlashToken(null)
+        setImages([])
+        setImageError(null)
+        if (textareaRef.current) textareaRef.current.style.height = 'auto'
+      })
+      .finally(() => setSubmitting(false))
   }
 
   const handlePaste = async (event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> => {
     if (streaming) return
     const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'))
+    if (imageFiles.length > 0 && runMode === 'research') {
+      event.preventDefault()
+      setImageError(t(language, 'research.mode.imagesDisabled'))
+      return
+    }
     if (imageFiles.length === 0) {
       const pasted = event.clipboardData.getData('text/plain')
       const tokens = splitUrls(pasted)
@@ -334,16 +362,22 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   return (
     <div className="border-t border-[var(--color-border)] bg-[var(--color-surface)] px-[35px] py-3 shrink-0">
       <div className="relative w-full">
-        <div className="relative mb-2 flex items-center justify-between px-1" ref={projectMenuRef}>
-          <span className="text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'project.current')}</span>
+        <div className="relative mb-2 flex items-center justify-end px-1" ref={projectMenuRef}>
           <div className="flex min-w-0 items-center gap-2">
-            <button type="button" disabled={streaming || projectLoading} onClick={() => setProjectMenuOpen((open) => !open)} title={projects.find((project) => project.id === activeProjectId)?.path} className="flex max-w-64 items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-xs text-[var(--color-text-secondary)] transition hover:bg-[var(--color-surface-hover)] disabled:opacity-50">
-              <FolderOpen size={13} className="shrink-0 text-[var(--color-accent)]" />
-              <span className="max-w-44 truncate">{projects.find((project) => project.id === activeProjectId)?.name ?? t(language, 'project.none')}</span>
-              <ChevronDown size={13} className={`shrink-0 transition ${projectMenuOpen ? 'rotate-180' : ''}`} />
-            </button>
-            <GitStatusBadge status={gitStatus} loading={gitStatusLoading} language={language} />
-            {projectMenuOpen && (
+            {runMode === 'research' ? (
+              <span className="max-w-80 text-right text-[10px] leading-4 text-[var(--color-text-muted)]">{t(language, 'research.mode.publicWebOnly')}</span>
+            ) : (
+              <>
+                <span className="text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'project.current')}</span>
+                <button type="button" disabled={streaming || projectLoading} onClick={() => setProjectMenuOpen((open) => !open)} title={projects.find((project) => project.id === activeProjectId)?.path} className="flex min-h-9 max-w-64 items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:opacity-50">
+                  <FolderOpen size={13} className="shrink-0 text-[var(--color-accent)]" />
+                  <span className="max-w-44 truncate">{projects.find((project) => project.id === activeProjectId)?.name ?? t(language, 'project.none')}</span>
+                  <ChevronDown size={13} className={`shrink-0 transition-transform ${projectMenuOpen ? 'rotate-180' : ''}`} />
+                </button>
+                <GitStatusBadge status={gitStatus} loading={gitStatusLoading} language={language} />
+              </>
+            )}
+            {projectMenuOpen && runMode === 'chat' && (
               <div className="absolute bottom-full right-0 z-50 mb-2 w-72 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-2xl">
                 <div className="border-b border-[var(--color-border)] px-3 py-2 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'project.workFolder')}</div>
                 {activeProjectId && <button type="button" onClick={() => void onProjectClear().then((saved) => { if (saved) setProjectMenuOpen(false) })} className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-[var(--color-text-secondary)] transition hover:bg-[var(--color-surface-hover)]"><X size={13} className="shrink-0" />{t(language, 'project.clear')}</button>}
@@ -363,8 +397,18 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
             )}
           </div>
         </div>
-        <div className="flex items-end gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2">
-            <div className="flex min-h-6 flex-wrap gap-2">
+        <div data-input-composer className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2">
+          {(images.length > 0 || selectedSkills.length > 0 || links.length > 0) && (
+            <div data-input-attachments className="mb-2 flex min-h-6 flex-wrap gap-2">
+              {images.map((image, index) => (
+                <ImagePreview
+                  key={`${image.filename}-${index}`}
+                  image={image}
+                  language={language}
+                  mode="thumbnail"
+                  onRemove={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                />
+              ))}
               {selectedSkills.map((skill) => (
                 <span key={skill.id} className="inline-flex items-center gap-1 rounded-md border border-[var(--color-accent)]/50 bg-[var(--color-accent)]/10 px-2 py-1 text-xs text-[var(--color-accent)]">
                   ✦ /{skill.id}
@@ -378,67 +422,61 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
                   <button type="button" aria-label={t(language, 'input.removeLink')} title={t(language, 'input.removeLink')} onClick={() => setLinks((current) => current.filter((item) => item.id !== link.id))} className="ml-1 rounded px-0.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg)] hover:text-[var(--color-accent)]"><X size={12} /></button>
                 </span>
               ))}
-              {images.map((image, index) => (
-                <ImagePreview
-                  key={`${image.filename}-${index}`}
-                  image={image}
-                  language={language}
-                  mode="thumbnail"
-                  onRemove={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}
-                />
-              ))}
             </div>
-            {imageError && <p className="mt-1 text-[10px] text-red-400">{imageError}</p>}
-          <div className="relative min-w-0 flex-1">
-            <textarea
-            ref={textareaRef}
-            value={text}
-            onChange={(event) => {
-              setText(event.target.value)
-              updateSlashToken(event.target.value, event.target.selectionStart)
-            }}
-            onInput={handleInput}
-            onKeyDown={handleKeyDown}
-            onPaste={(event) => void handlePaste(event)}
-            rows={1}
-            placeholder={t(language, 'input.placeholder')}
-            className="w-full resize-none bg-transparent text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
-            disabled={streaming}
-          />
-          {slashToken && filteredSkills.length > 0 && (
-              <div ref={slashMenuRef} className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-72 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1 shadow-2xl">
-                <div className="border-b border-[var(--color-border)] px-2 py-1 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'input.skillCommands')}</div>
-                {filteredSkills.map((skill, index) => (
-                  <button key={skill.id} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => selectSkill(skill)} className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${index === slashIndex ? 'bg-[var(--color-surface-active)]' : 'hover:bg-[var(--color-surface-hover)]'}`}>
-                    <span className="min-w-0 shrink-0 truncate text-sm font-medium text-[var(--color-accent)]">/{skill.id}</span>
-                    <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]">{skill.description}</span>
-                    <span className="shrink-0 text-[9px] text-[var(--color-text-muted)]/60">{skill.source === 'external' ? t(language, 'input.skillSourceExternal') : skill.source === 'builtin' ? t(language, 'input.skillSourceBuiltin') : t(language, 'input.skillSourceUser')}</span>
-                  </button>
-                ))}
-                <div className="border-t border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-muted)]">{t(language, 'input.skillCommandHints')}</div>
-              </div>
-            )}
-          </div>
-          {streaming ? (
-            <button
-              type="button"
-              onClick={onAbort}
-              className="flex shrink-0 items-center gap-1 rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-red-500"
-            >
-              <Square size={12} className="fill-current" />
-              {t(language, 'input.stop')}
-            </button>
-          ) : (
+          )}
+          {imageError && <p className="mb-2 text-[10px] text-red-400">{imageError}</p>}
+          <div className="flex items-end gap-2">
+            <div className="relative min-w-0 flex-1">
+              <textarea
+                ref={textareaRef}
+                value={text}
+                onChange={(event) => {
+                  setText(event.target.value)
+                  updateSlashToken(event.target.value, event.target.selectionStart)
+                }}
+                onInput={handleInput}
+                onKeyDown={handleKeyDown}
+                onPaste={(event) => void handlePaste(event)}
+                rows={1}
+                placeholder={t(language, runMode === 'research' ? 'research.mode.placeholder' : 'input.placeholder')}
+                className="w-full resize-none bg-transparent text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
+                disabled={streaming || submitting}
+              />
+              {slashToken && filteredSkills.length > 0 && (
+                <div ref={slashMenuRef} className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-72 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1 shadow-2xl">
+                  <div className="border-b border-[var(--color-border)] px-2 py-1 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'input.skillCommands')}</div>
+                  {filteredSkills.map((skill, index) => (
+                    <button key={skill.id} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => selectSkill(skill)} className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${index === slashIndex ? 'bg-[var(--color-surface-active)]' : 'hover:bg-[var(--color-surface-hover)]'}`}>
+                      <span className="min-w-0 shrink-0 truncate text-sm font-medium text-[var(--color-accent)]">/{skill.id}</span>
+                      <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]">{skill.description}</span>
+                      <span className="shrink-0 text-[9px] text-[var(--color-text-muted)]/60">{skill.source === 'external' ? t(language, 'input.skillSourceExternal') : skill.source === 'builtin' ? t(language, 'input.skillSourceBuiltin') : t(language, 'input.skillSourceUser')}</span>
+                    </button>
+                  ))}
+                  <div className="border-t border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-muted)]">{t(language, 'input.skillCommandHints')}</div>
+                </div>
+              )}
+            </div>
+            {streaming ? (
+              <button
+                type="button"
+                onClick={onAbort}
+                className="flex shrink-0 items-center gap-1 rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-red-500"
+              >
+                <Square size={12} className="fill-current" />
+                {t(language, 'input.stop')}
+              </button>
+            ) : (
               <button
                 type="button"
                 onClick={handleSend}
-                disabled={!text.trim() && images.length === 0 && links.length === 0}
+                disabled={submitting || (!text.trim() && images.length === 0 && links.length === 0)}
                 className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-bg)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
-            >
-              <Send size={12} />
-              {t(language, 'input.send')}
-            </button>
-          )}
+              >
+                <Send size={12} />
+                {t(language, 'input.send')}
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="mt-2 flex flex-wrap items-center justify-between gap-3 px-1 text-xs text-[var(--color-text-muted)]">
@@ -447,6 +485,10 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
               <IconModeButton active={mode === 'suggest'} label={t(language, 'approval.mode.suggest')} onClick={() => handleModeChange('suggest')}><ShieldAlert size={15} /></IconModeButton>
               <IconModeButton active={mode === 'auto-edit'} label={t(language, 'approval.mode.autoEdit')} onClick={() => handleModeChange('auto-edit')}><PencilLine size={15} /></IconModeButton>
               <IconModeButton active={mode === 'full-auto'} label={t(language, 'approval.mode.fullAuto')} onClick={() => handleModeChange('full-auto')}><ShieldCheck size={15} /></IconModeButton>
+            </div>
+            <div role="radiogroup" aria-label={t(language, 'research.mode.label')} className="flex gap-1 rounded-md bg-[var(--color-bg)] p-0.5">
+              <RunModeIconButton selected={runMode === 'chat'} label={t(language, 'research.mode.chat')} onClick={() => onRunModeChange('chat')} disabled={streaming}><MessageSquare size={15} /></RunModeIconButton>
+              <RunModeIconButton selected={runMode === 'research'} label={t(language, 'research.mode.research')} onClick={() => onRunModeChange('research')} disabled={streaming}><SearchCheck size={15} /></RunModeIconButton>
             </div>
           </div>
 
@@ -558,6 +600,10 @@ function ReasoningSelector({ level, onChange, disabled, language }: { level: Rea
     </div>
   )
 }
+function RunModeIconButton({ selected, label, onClick, disabled, children }: { selected: boolean; label: string; onClick: () => void; disabled: boolean; children: React.ReactNode }): React.JSX.Element {
+  return <button type="button" role="radio" aria-checked={selected} aria-label={label} title={label} disabled={disabled} onClick={onClick} className={`flex h-7 w-7 items-center justify-center rounded transition-[background-color,color,transform] active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] disabled:opacity-50 ${selected ? 'bg-[var(--color-accent)] text-[var(--color-bg)]' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'}`}>{children}</button>
+}
+
 function IconModeButton({ active, label, onClick, children }: { active: boolean; label: string; onClick: () => void; children: React.ReactNode }): React.JSX.Element {
   return <button type="button" aria-label={label} title={label} onClick={onClick} className={`flex h-7 w-7 items-center justify-center rounded transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] ${active ? 'bg-[var(--color-accent)] text-[var(--color-bg)]' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'}`}>{children}</button>
 }

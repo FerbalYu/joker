@@ -14,10 +14,13 @@ import { webTools } from './tools/web'
 import { imageTools } from './tools/image'
 import { gitTools } from './tools/git'
 import { buildCapabilitySnapshot } from './agent/capabilities'
-import { validateChatParts } from '../shared/messages'
-import type { ChatMessage, ReasoningLevel, StreamEvent } from '@shared/types'
+import { researchReportTools } from './tools/research-report'
+import { contextTools } from './tools/context-retrieve'
+import { createResearchContext } from './research/context'
+import type { ReasoningLevel, RunMode, StreamEvent } from '@shared/types'
 import type { ModelMessage, ToolSet } from 'ai'
 import { StreamTransport } from './stream-transport'
+import { toModelMessages } from './model-messages'
 
 const REASONING_LEVELS = ['auto', 'none', 'low', 'medium', 'high'] as const
 const SKILL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/
@@ -34,20 +37,16 @@ function normalizeReasoningLevel(value: unknown): ReasoningLevel {
   return typeof value === 'string' && (REASONING_LEVELS as readonly string[]).includes(value) ? (value as ReasoningLevel) : 'auto'
 }
 
-function toModelMessages(messages: unknown[]): ModelMessage[] {
-  return messages.map((message) => {
-    if (!message || typeof message !== 'object') throw new Error('Invalid message')
-    const value = message as Partial<ChatMessage>
-    if (typeof value.role !== 'string' || typeof value.content !== 'string') throw new Error('Invalid message')
-    if (value.parts !== undefined && !validateChatParts(value.parts)) throw new Error('Invalid image attachment')
-    if (!value.parts) return { role: value.role as ModelMessage['role'], content: value.content } as ModelMessage
-    const content = value.parts.map((part) => part.type === 'text' ? { type: 'text' as const, text: part.text } : { type: 'file' as const, data: part.data, mediaType: part.mediaType })
-    return { role: value.role as ModelMessage['role'], content } as ModelMessage
-  })
+function normalizeRunMode(value: unknown): RunMode {
+  return value === 'research' ? 'research' : 'chat'
 }
 
 function buildAllTools(allowedMcpTools?: readonly string[]): ToolDefinition[] {
-  return [...fsTools, ...bashTools, ...searchTools, ...todoTools, ...subagentTools, ...webTools, ...imageTools, ...gitTools, ...getMcpTools(allowedMcpTools)]
+  return [...contextTools, ...fsTools, ...bashTools, ...searchTools, ...todoTools, ...subagentTools, ...webTools, ...imageTools, ...gitTools, ...getMcpTools(allowedMcpTools)]
+}
+
+function buildResearchTools(): ToolDefinition[] {
+  return [...contextTools, ...todoTools, ...webTools, ...researchReportTools]
 }
 
 interface ActiveRun {
@@ -98,7 +97,7 @@ export function setupStreaming(win: BrowserWindow): void {
         return
       }
       try {
-        handleSend(win, port2, transport, runId, sessionId, toModelMessages(data.messages), normalizeReasoningLevel(data.reasoningLevel), normalizeSkillIds(data.skillIds), typeof data.projectId === 'string' ? data.projectId : undefined)
+        handleSend(win, port2, transport, runId, sessionId, toModelMessages(data.messages), normalizeReasoningLevel(data.reasoningLevel), normalizeRunMode(data.runMode), normalizeSkillIds(data.skillIds), typeof data.projectId === 'string' ? data.projectId : undefined)
       } catch (error) {
         void transport.send({ type: 'error', sessionId, runId, error: error instanceof Error ? error.message : 'Invalid message' })
         void transport.send({ type: 'done', sessionId, runId })
@@ -119,6 +118,7 @@ function handleSend(
   sessionId: string,
   messages: ModelMessage[],
   reasoningLevel: ReasoningLevel,
+  runMode: RunMode,
   skillIds?: string[],
   projectId?: string
 ): void {
@@ -139,17 +139,26 @@ function handleSend(
     return
   }
 
+  const researchContext = runMode === 'research' ? createResearchContext() : undefined
   const toolContext: ToolContext = {
     workspacePath,
     sessionId,
     runId,
-    approvalGate: createApprovalGate(win, sessionId, runId),
+    approvalGate: createApprovalGate(win, sessionId, runId, runMode),
+    researchContext,
     abortSignal: controller.signal,
     onToolCall: (info) => { void info }
   }
-  const capabilities = buildCapabilitySnapshot(skillIds, workspacePath)
-  const tools: ToolSet = buildToolSet(buildAllTools(capabilities.allowedMcpTools), toolContext)
-  runAgent({ sessionId, runId, messages, tools, reasoningLevel, capabilities, onEvent, signal: controller.signal }).finally(() => {
+  const capabilities = buildCapabilitySnapshot(skillIds, workspacePath, runMode)
+  const definitions = runMode === 'research' ? buildResearchTools() : buildAllTools(capabilities.allowedMcpTools)
+  const tools: ToolSet = buildToolSet(definitions, toolContext)
+  void runAgent({ sessionId, runId, messages, tools, reasoningLevel, runMode, capabilities, onEvent, signal: controller.signal })
+    .catch(async (error) => {
+      console.error('Agent run failed outside its lifecycle guard', error)
+      await onEvent({ type: 'error', sessionId, runId, error: error instanceof Error ? error.message : 'Agent run failed' }).catch(() => undefined)
+      await onEvent({ type: 'done', sessionId, runId }).catch(() => undefined)
+    })
+    .finally(() => {
     if (activeRuns.get(win.id)?.runId === runId) activeRuns.delete(win.id)
     cancelApprovalsForRun({ windowId: win.id, sessionId, runId })
   })

@@ -24,7 +24,9 @@ export default function ApprovalPanel({ approval }: Props): React.JSX.Element {
           <p className="text-sm font-medium text-[var(--color-text-primary)]">{t(language, 'approval.required')}</p>
         </div>
         <p className="text-xs text-[var(--color-text-muted)]">
-          {t(language, approval.toolName === 'WebRead'
+          {t(language, approval.toolName === 'ResearchWebAccess'
+            ? 'approval.description.researchWebAccess'
+            : approval.toolName === 'WebRead'
             ? 'approval.description.webRead'
             : approval.toolName === 'WebSearch'
               ? 'approval.description.webSearch'

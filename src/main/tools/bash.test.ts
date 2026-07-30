@@ -6,7 +6,7 @@ import type { ToolContext } from './registry'
 const context = (abortSignal?: AbortSignal): ToolContext => ({
   workspacePath: process.cwd(),
   sessionId: 'bash-test',
-  approvalGate: async () => true,
+  approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test approval' }),
   abortSignal
 })
 

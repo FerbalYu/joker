@@ -4,8 +4,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gitTools } from './git'
+import type { ToolContext } from './registry'
 
-const context = (workspacePath: string) => ({ workspacePath, sessionId: 'git-test', approvalGate: async () => true })
+const context = (workspacePath: string): ToolContext => ({ workspacePath, sessionId: 'git-test', approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test approval' }) })
 
 void test('GitStatus is a bounded read-only tool', async () => {
   const root = mkdtempSync(join(tmpdir(), 'joker-git-tool-'))
@@ -20,7 +21,7 @@ void test('GitStatus is a bounded read-only tool', async () => {
 
 void test('GitStatus refuses to use an implicit workspace', async () => {
   const tool = gitTools.find((item) => item.name === 'GitStatus')!
-  const result = await tool.execute({}, { workspacePath: null, sessionId: 'git-no-workspace', approvalGate: async () => true })
+  const result = await tool.execute({}, { workspacePath: null, sessionId: 'git-no-workspace', approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test approval' }) })
   assert.match(result.output, /No working folder selected/)
 })
 

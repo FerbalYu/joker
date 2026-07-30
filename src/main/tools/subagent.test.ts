@@ -7,7 +7,7 @@ function createContext(signal: AbortSignal): Parameters<typeof runSubagent>[0]['
     workspacePath: 'C:\\workspace',
     sessionId: 'session-test',
     runId: `run-${crypto.randomUUID()}`,
-    approvalGate: async () => true,
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test approval' }),
     abortSignal: signal
   }
 }
@@ -35,6 +35,7 @@ function fakeModel(active: { count: number; max: number }, delayMs: number): Par
             controller.enqueue({ type: 'text-start', id: 'text-1' })
             controller.enqueue({ type: 'text-delta', id: 'text-1', delta: 'done' })
             controller.enqueue({ type: 'text-end', id: 'text-1' })
+            controller.enqueue({ type: 'finish', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } })
             controller.close()
           }
         }),
@@ -66,6 +67,26 @@ void test('sub-agent cancels a queued request without starting it', async () => 
   await assert.rejects(second, /aborted/i)
   await first
   assert.equal(active.max >= 1, true)
+})
+
+void test('sub-agent returns output with cumulative usage details', async () => {
+  const active = { count: 0, max: 0 }
+  const controller = new AbortController()
+  const result = await runSubagent({
+    prompt: 'report usage',
+    model: fakeModel(active, 0),
+    toolContext: createContext(controller.signal)
+  })
+  assert.equal(result.output, 'done')
+  assert.deepEqual(result.usage, {
+    inputTokens: 1,
+    outputTokens: 1,
+    totalTokens: 2,
+    noCacheTokens: undefined,
+    cacheReadTokens: undefined,
+    cacheWriteTokens: undefined,
+    stepCount: 1
+  })
 })
 
 void test('sub-agent concurrency is capped at four running providers', async () => {

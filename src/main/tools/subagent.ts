@@ -1,6 +1,7 @@
 import { isStepCount, streamText } from 'ai'
 import { createLanguageModel } from '../providers'
 import { loadConfig, resolveActiveModel } from '../store/config'
+import { streamUsageFromModelUsage } from '../agent/usage'
 import { z } from 'zod'
 import { buildToolSet, type ToolDefinition, type ToolResult, type ToolContext } from './registry'
 import { readTool } from './fs'
@@ -10,9 +11,11 @@ import { gitTools } from './git'
 // Concurrency limiter — max 4 concurrent sub-agents.
 const MAX_CONCURRENT_SUBAGENTS = 4
 let runningSubagents = 0
+type QueuedSubagentResult = SubagentRunResult
+
 const queuedSubagents: Array<{
-  run: () => Promise<string>
-  resolve: (value: string | PromiseLike<string>) => void
+  run: () => Promise<QueuedSubagentResult>
+  resolve: (value: QueuedSubagentResult | PromiseLike<QueuedSubagentResult>) => void
   reject: (reason?: unknown) => void
   signal?: AbortSignal
   onAbort?: () => void
@@ -22,11 +25,11 @@ function abortError(): Error {
   return new Error('Aborted')
 }
 
-function runQueuedSubagent(run: () => Promise<string>, signal?: AbortSignal): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
+function runQueuedSubagent(run: () => Promise<QueuedSubagentResult>, signal?: AbortSignal): Promise<QueuedSubagentResult> {
+  return new Promise<QueuedSubagentResult>((resolve, reject) => {
     const task: {
-      run: () => Promise<string>
-      resolve: (value: string | PromiseLike<string>) => void
+      run: () => Promise<QueuedSubagentResult>
+      resolve: (value: QueuedSubagentResult | PromiseLike<QueuedSubagentResult>) => void
       reject: (reason?: unknown) => void
       signal?: AbortSignal
       onAbort?: () => void
@@ -70,6 +73,11 @@ export function getReadonlySubagentToolNames(): string[] {
   return READ_ONLY_SUBAGENT_TOOLS.map((tool) => tool.name)
 }
 
+export interface SubagentRunResult {
+  output: string
+  usage: ReturnType<typeof streamUsageFromModelUsage>
+}
+
 export interface SubagentRunOptions {
   prompt: string
   context?: string
@@ -77,7 +85,7 @@ export interface SubagentRunOptions {
   model?: ReturnType<typeof createLanguageModel>
 }
 
-export async function runSubagent({ prompt, context: extraContext, toolContext, model }: SubagentRunOptions): Promise<string> {
+export async function runSubagent({ prompt, context: extraContext, toolContext, model }: SubagentRunOptions): Promise<SubagentRunResult> {
   if (toolContext.abortSignal?.aborted) throw new Error('Aborted')
   return runQueuedSubagent(async () => {
     if (toolContext.abortSignal?.aborted) throw new Error('Aborted')
@@ -95,7 +103,8 @@ export async function runSubagent({ prompt, context: extraContext, toolContext, 
       stopWhen: isStepCount(20),
       abortSignal: toolContext.abortSignal
     })
-    return await result.text
+    const [output, usage, steps] = await Promise.all([result.text, result.usage, result.steps])
+    return { output, usage: streamUsageFromModelUsage(usage, steps.length) }
   }, toolContext.abortSignal)
 }
 
@@ -113,7 +122,7 @@ export const agentTool: ToolDefinition = {
   execute: async (input, toolContext: ToolContext): Promise<ToolResult> => {
     const { prompt, context: extraContext } = input as { prompt: string; context?: string }
     const result = await runSubagent({ prompt, context: extraContext, toolContext })
-    return { output: result }
+    return { output: result.output, metadata: { usage: result.usage } }
   }
 }
 

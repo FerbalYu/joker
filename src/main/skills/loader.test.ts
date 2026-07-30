@@ -16,7 +16,7 @@ void test('parses external Skills with BOM, CRLF, and folder-id fallback', () =>
     const skill = parseSkillFile(skillPath, 'external', 'external-qa')
     assert.equal(skill.id, 'external-qa')
     assert.equal(skill.source, 'external')
-    assert.equal(skill.trusted, true)
+    assert.equal(skill.trusted, false)
     assert.equal(skill.instructions, 'Use the browser.')
   } finally {
     rmSync(root, { recursive: true, force: true })

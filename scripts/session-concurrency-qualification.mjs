@@ -20,7 +20,7 @@ const runDir = await mkdtemp(join(tmpdir(), 'joker-session-concurrency-'))
 const dataDir = join(runDir, 'sessions')
 const reportPath = join(runDir, 'session-concurrency-report.json')
 const sessionId = 'concurrency-seed-session'
-const workerPath = join(root, '.qa', 'session-concurrency-worker.mjs')
+const workerPath = join(root, 'scripts', 'fixtures', 'session-concurrency-worker.mjs')
 const workerOutputs = []
 const children = []
 

@@ -24,6 +24,24 @@ void test('normalizeConfig defaults Skills to enabled unless disabled', () => {
   assert.deepEqual(config.disabledSkills, ['offline-skill'])
 })
 
+void test('normalizeConfig defaults usage reporting and prompt cache to enabled', () => {
+  const config = normalizeConfig({
+    providers: [{ id: 'p', name: 'P', type: 'openai-compatible', models: [{ id: 'm', name: 'm', enabled: true }], currentModelId: 'm' }],
+    activeProviderId: 'p'
+  })
+  assert.equal(config.providers[0].includeUsage, true)
+  assert.equal(config.providers[0].promptCache, true)
+})
+
+void test('normalizeConfig preserves disabled usage reporting and prompt cache', () => {
+  const config = normalizeConfig({
+    providers: [{ id: 'p', name: 'P', type: 'openai-compatible', includeUsage: false, promptCache: false, models: [{ id: 'm', name: 'm', enabled: true }], currentModelId: 'm' }],
+    activeProviderId: 'p'
+  })
+  assert.equal(config.providers[0].includeUsage, false)
+  assert.equal(config.providers[0].promptCache, false)
+})
+
 void test('legacy config receives default model context limit', () => {
   const config = normalizeConfig({ provider: { provider: 'openai', model: 'legacy-model' } })
   assert.equal(config.providers[0].models[0].maxContextTokens, DEFAULT_MAX_CONTEXT_TOKENS)

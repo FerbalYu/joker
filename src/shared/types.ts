@@ -1,6 +1,16 @@
 // Shared types between main process and renderer
 
+export type {
+  ContextOptimizationMetrics,
+  ContextOptimizationMode,
+  ContextReference,
+  ContextTransformMetric as ContextOptimizationTransform,
+  SessionContextCheckpoint
+} from './context'
+import type { ContextOptimizationMetrics, ContextOptimizationMode } from './context'
+
 export type MessageRole = 'user' | 'assistant' | 'system'
+export type RunMode = 'chat' | 'research'
 
 export interface ChatTextPart {
   type: 'text'
@@ -23,6 +33,7 @@ export interface ChatMessage {
   content: string
   parts?: ChatPart[]
   skillIds?: string[]
+  runMode?: RunMode
   toolCalls?: ToolCallInfo[]
   /** Chronological assistant blocks: text before tools, tool groups, text after tools. */
   segments?: AssistantSegment[]
@@ -48,7 +59,10 @@ export interface StreamUsage {
   inputTokens?: number
   outputTokens?: number
   totalTokens?: number
+  noCacheTokens?: number
   cacheReadTokens?: number
+  cacheWriteTokens?: number
+  stepCount?: number
 }
 
 export type ReasoningLevel = 'auto' | 'none' | 'low' | 'medium' | 'high'
@@ -82,11 +96,18 @@ export interface ContextUsage {
   systemPromptTokens: number
   otherTokens: number
   cacheHitRate?: number
+  source?: 'provider' | 'estimate'
+  stepNumber?: number
+  compressionCount?: number
+  compressionBeforeTokens?: number
+  compressionAfterTokens?: number
+  compressionError?: string
+  optimization?: ContextOptimizationMetrics
 }
 
 export type StreamEvent =
   | { type: 'token'; sessionId: string; runId?: string; text: string }
-  | { type: 'message-start'; sessionId: string; runId?: string; messageId: string; providerName?: string; modelName?: string }
+  | { type: 'message-start'; sessionId: string; runId?: string; messageId: string; runMode?: RunMode; providerName?: string; modelName?: string }
   | { type: 'message-end'; sessionId: string; runId?: string; messageId: string; usage?: StreamUsage }
   | { type: 'context-usage'; sessionId: string; runId?: string; usage: ContextUsage }
   | { type: 'tool-call'; sessionId: string; runId?: string; toolCallId: string; toolName: string; input: Record<string, unknown> }
@@ -171,6 +192,8 @@ export interface ProviderConfig {
   apiKey?: string
   baseUrl?: string
   modelsPath?: string
+  includeUsage?: boolean
+  promptCache?: boolean
 }
 
 export const DEFAULT_MAX_CONTEXT_TOKENS = 262_144
@@ -191,6 +214,8 @@ export interface ProviderEntry {
   enabled: boolean
   apiKey?: string
   baseUrl?: string
+  includeUsage?: boolean
+  promptCache?: boolean
   models: ModelConfig[]
   currentModelId: string
 }
@@ -273,6 +298,7 @@ export interface SkillDescriptor {
 export interface AppConfig {
   providers: ProviderEntry[]
   activeProviderId: string
+  contextOptimizationMode?: ContextOptimizationMode
   mcpServers?: McpServerConfig[]
   disabledSkills?: string[]
 }

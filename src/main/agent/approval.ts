@@ -1,6 +1,7 @@
 import type { BrowserWindow } from 'electron'
-import type { ApprovalGate } from '../tools/registry'
-import type { ApprovalRequest } from '@shared/types'
+import type { ApprovalDecision, ApprovalGate, ToolDefinition } from '../tools/registry'
+import { classifyToolRisk, type ToolRisk } from '../tools/risk'
+import type { ApprovalRequest, RunMode } from '@shared/types'
 
 export type ApprovalMode = 'suggest' | 'auto-edit' | 'full-auto'
 
@@ -84,10 +85,36 @@ export class ApprovalRegistry {
 const registry = new ApprovalRegistry()
 let approvalIpcRegistered = false
 
-// Read-only tools that never need approval
-const ALWAYS_SAFE = new Set(['Read', 'Grep', 'Glob', 'TodoWrite', 'GitStatus', 'GitDiff', 'GitLog', 'GitBranch'])
-// Write tools that are auto-approved in 'auto-edit' mode
-const WRITE_TOOLS = new Set(['Write', 'Edit'])
+export interface PermissionDecision {
+  action: 'allow' | 'deny' | 'ask'
+  risk: ToolRisk
+  reason: string
+}
+
+const RESEARCH_SAFE_TOOLS = new Set(['TodoWrite', 'PresentResearchReport'])
+const RESEARCH_WEB_TOOLS = new Set(['WebSearch', 'WebRead'])
+
+export function evaluateToolPermission(
+  mode: ApprovalMode,
+  runMode: RunMode,
+  toolName: string,
+  tool?: Pick<ToolDefinition, 'risk' | 'source'>,
+  researchWebApproved = false
+): PermissionDecision {
+  const risk = classifyToolRisk(toolName, tool?.risk, tool?.source)
+  if (runMode === 'research') {
+    if (RESEARCH_SAFE_TOOLS.has(toolName)) return { action: 'allow', risk, reason: 'research-safe tool' }
+    if (!RESEARCH_WEB_TOOLS.has(toolName)) return { action: 'deny', risk, reason: 'tool is unavailable in research mode' }
+    if (researchWebApproved) return { action: 'allow', risk, reason: 'research web access approved for this run' }
+    if (mode === 'full-auto') return { action: 'allow', risk, reason: 'full-auto mode' }
+    return { action: 'ask', risk, reason: 'research web access requires approval' }
+  }
+
+  if (risk === 'read') return { action: 'allow', risk, reason: 'read-only tool' }
+  if (mode === 'full-auto') return { action: 'allow', risk, reason: 'full-auto mode' }
+  if (mode === 'auto-edit' && risk === 'write_local') return { action: 'allow', risk, reason: 'auto-edit mode' }
+  return { action: 'ask', risk, reason: `${risk} tool requires approval` }
+}
 
 export function setApprovalMode(mode: ApprovalMode, windowId?: number): void {
   // The optional legacy form keeps callers source-compatible; IPC always supplies a window id.
@@ -122,28 +149,43 @@ export async function registerApprovalIpc(): Promise<void> {
   }
 }
 
-export function createApprovalGate(win: BrowserWindow, sessionId: string, runId?: string): ApprovalGate {
+export function createApprovalGate(win: BrowserWindow, sessionId: string, runId?: string, runMode: RunMode = 'chat'): ApprovalGate {
   const scope: ApprovalScope = { windowId: win.id, sessionId, runId: runId ?? crypto.randomUUID() }
-  return async (toolName: string, input: Record<string, unknown>): Promise<boolean> => {
-    const mode = registry.getMode(scope.windowId)
-    if (mode === 'full-auto') return true
-    if (ALWAYS_SAFE.has(toolName)) return true
-    if (mode === 'auto-edit' && WRITE_TOOLS.has(toolName)) return true
+  let researchWebApproved = false
+  return async (
+    toolName: string,
+    input: Record<string, unknown>,
+    tool?: Pick<ToolDefinition, 'risk' | 'source'>
+  ): Promise<ApprovalDecision> => {
+    const decision = evaluateToolPermission(registry.getMode(scope.windowId), runMode, toolName, tool, researchWebApproved)
+    if (decision.action !== 'ask') {
+      return { outcome: decision.action, risk: decision.risk, reason: decision.reason }
+    }
 
     const requestId = crypto.randomUUID()
+    const researchWebRequest = runMode === 'research' && RESEARCH_WEB_TOOLS.has(toolName)
     const request: ApprovalRequest = {
       requestId,
       windowId: scope.windowId,
       runId: scope.runId,
       sessionId: scope.sessionId,
-      toolName,
-      input: sanitizeInput(toolName, input)
+      toolName: researchWebRequest ? 'ResearchWebAccess' : toolName,
+      input: researchWebRequest
+        ? { tools: ['WebSearch', 'WebRead'], firstCall: { toolName, input: sanitizeInput(toolName, input) } }
+        : sanitizeInput(toolName, input)
     }
     win.webContents.send('approval:request', request)
 
-    return new Promise<boolean>((resolve) => {
+    const approved = await new Promise<boolean>((resolve) => {
       registry.add(scope, requestId, resolve)
     })
+    if (approved && researchWebRequest) researchWebApproved = true
+    return {
+      outcome: approved ? 'allow' : 'deny',
+      risk: decision.risk,
+      reason: approved ? 'approved by user' : 'denied by user',
+      approvedByUser: approved
+    }
   }
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight, Loader2, Wrench } from 'lucide-react'
 import type { ToolCallInfo } from '@shared/types'
 import { useStore } from '../store'
@@ -12,12 +12,7 @@ interface Props {
 export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | null {
   const language = useStore((s) => s.language)
   const hasRunning = toolCalls.some((toolCall) => toolCall.status === 'running')
-  const [expanded, setExpanded] = useState(hasRunning || toolCalls.length <= 1)
-
-  useEffect(() => {
-    if (hasRunning) setExpanded(true)
-    else if (toolCalls.length > 1) setExpanded(false)
-  }, [hasRunning, toolCalls.length])
+  const [expanded, setExpanded] = useState(false)
 
   const summary = useMemo(() => buildSummary(toolCalls, language), [language, toolCalls])
 
@@ -25,7 +20,7 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
 
   if (toolCalls.length === 1) {
     return (
-      <div className="w-full space-y-2">
+      <div className="w-full max-w-[640px] space-y-1.5">
         <ToolCard toolCall={toolCalls[0]} />
       </div>
     )
@@ -36,7 +31,8 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
 
   return (
     <div
-      className={`w-full overflow-hidden rounded-lg border bg-[var(--color-surface)] shadow-[0_8px_24px_rgba(0,0,0,0.12)] ${
+      data-tool-call-group
+      className={`w-full max-w-[640px] overflow-hidden rounded-lg border bg-[var(--color-surface)] shadow-[0_8px_24px_rgba(0,0,0,0.12)] ${
         hasRunning
           ? 'border-[var(--color-accent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent),0_8px_24px_rgba(0,0,0,0.16)]'
           : errorCount > 0
@@ -45,15 +41,16 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
       }`}
     >
       <button
+        data-tool-call-group-toggle
         type="button"
         onClick={() => setExpanded((value) => !value)}
         aria-expanded={expanded}
-        className="flex min-h-12 w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+        className="flex min-h-6 w-full items-center gap-2 px-2 py-1 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
       >
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--color-bg)] text-[var(--color-text-secondary)]">
-          {hasRunning ? <Loader2 size={16} className="animate-spin text-[var(--color-accent)]" /> : <Wrench size={16} />}
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[var(--color-bg)] text-[var(--color-text-secondary)]">
+          {hasRunning ? <Loader2 size={14} className="animate-spin text-[var(--color-accent)]" /> : <Wrench size={14} />}
         </span>
-        <span className="shrink-0 whitespace-nowrap rounded-md bg-[var(--color-accent)]/10 px-2 py-1 text-sm font-medium leading-none text-[var(--color-text-primary)]">
+        <span className="shrink-0 whitespace-nowrap rounded-md bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-[12px] font-medium leading-none text-[var(--color-text-primary)]">
           {t(language, 'tool.group.title', { count: toolCalls.length })}
         </span>
         <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-muted)]" title={summary}>
@@ -74,7 +71,7 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
       </button>
 
       {expanded && (
-        <div className="space-y-2 border-t border-[var(--color-border)]/70 p-2">
+        <div className="space-y-1.5 border-t border-[var(--color-border)]/70 p-1.5">
           {toolCalls.map((toolCall, index) => (
             <ToolCard key={toolCall.toolCallId ?? `${toolCall.toolName}-${index}`} toolCall={toolCall} />
           ))}

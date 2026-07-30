@@ -8,10 +8,15 @@ import { DEFAULT_MAX_CONTEXT_TOKENS } from '../../shared/types'
 export function createLanguageModel(config: ProviderConfig): LanguageModel {
   switch (config.apiFormat) {
     case 'chat-completions': {
+      if (config.provider === 'openai') {
+        const openai = createOpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl })
+        return openai.chat(config.model)
+      }
       const compatible = createOpenAICompatible({
         baseURL: config.baseUrl ?? 'https://api.openai.com/v1',
         apiKey: config.apiKey,
-        name: config.provider
+        name: config.provider,
+        includeUsage: config.includeUsage !== false
       })
       return compatible.chatModel(config.model)
     }
@@ -93,18 +98,28 @@ function extractModelNames(payload: unknown): string[] {
   return [...names].sort((a, b) => a.localeCompare(b))
 }
 
-export async function requestJson(url: string, apiKey: string | undefined, init: RequestInit, timeoutMs: number): Promise<unknown> {
+export async function requestJson(
+  url: string,
+  apiKey: string | undefined,
+  init: RequestInit,
+  timeoutMs: number,
+  apiFormat?: ApiFormat
+): Promise<unknown> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
+    const headers = new Headers(init.headers)
+    if (apiFormat === 'anthropic-messages') {
+      headers.set('x-api-key', apiKey ?? '')
+      headers.set('anthropic-version', '2023-06-01')
+    } else {
+      headers.set('Authorization', `Bearer ${apiKey ?? ''}`)
+    }
+    if (init.body) headers.set('Content-Type', 'application/json')
     const response = await fetch(url, {
       ...init,
       signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${apiKey ?? ''}`,
-        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-        ...init.headers
-      }
+      headers
     })
     const text = await response.text()
     if (!response.ok) {
@@ -133,7 +148,7 @@ export async function fetchProviderModels(provider: ProviderModelDraft): Promise
   if (!provider.baseUrl?.trim()) throw new Error('请先填写接口地址')
   const started = Date.now()
   const url = buildModelsUrl(provider)
-  const payload = await requestJson(url, provider.apiKey, { method: 'GET' }, 8000)
+  const payload = await requestJson(url, provider.apiKey, { method: 'GET' }, 8000, provider.apiFormat)
   const names = extractModelNames(payload)
   if (names.length === 0) {
     const preview = JSON.stringify(payload).slice(0, 200)
@@ -167,7 +182,7 @@ export async function testProviderModel(provider: ProviderModelDraft, modelId: s
       url = appendApiPath(base, '/chat/completions')
       body = { model: id, temperature: 0, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }
     }
-    await requestJson(url, provider.apiKey, { method: 'POST', body: JSON.stringify(body) }, 12000)
+    await requestJson(url, provider.apiKey, { method: 'POST', body: JSON.stringify(body) }, 12000, provider.apiFormat)
     return { success: true, status: 'available', modelId: id, latencyMs: Date.now() - started, message: '模型可用' }
   } catch (error) {
     return {

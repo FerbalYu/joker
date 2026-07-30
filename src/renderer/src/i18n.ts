@@ -36,7 +36,38 @@ const translations: Record<Language, Record<string, string>> = {
     'detail.running': '运行中',
     'detail.idle': '空闲',
     'detail.context': '上下文',
+    'detail.usage': '本次用量',
+    'detail.inputTokens': '总输入',
+    'detail.outputTokens': '总输出',
+    'detail.totalTokens': 'Token 总计',
+    'detail.noCacheTokens': '未缓存输入',
+    'detail.cacheReadTokens': '缓存读取',
+    'detail.cacheWriteTokens': '缓存创建',
+    'detail.modelSteps': '模型调用',
+    'detail.step': '第 {{count}} 步',
+    'detail.providerMeasured': '服务商实测',
+    'detail.localEstimate': '本地估算',
+    'detail.compressions': '压缩 {{count}} 次',
+    'detail.compressionChange': '{{before}} → {{after}}',
+    'detail.compressionError': '压缩异常：{{error}}',
+    'context.modeValue': '模式：{{mode}}',
+    'context.policyValue': '策略：{{policy}}',
+    'context.mode.legacy': 'Legacy',
+    'context.mode.observe': '观察',
+    'context.mode.v2': 'V2',
+    'context.mode.disabled': '关闭',
+    'context.latestTransform': '最近转换',
+    'context.transformTokens': '转换 Token',
+    'context.retrievable': '可回取',
+    'context.yes': '是',
+    'context.no': '否',
+    'context.summaryCost': 'Summary 成本（入 + 出）',
+    'context.estimatedNetSaved': '估算净节省',
+    'context.retrievalCount': '回取次数',
+    'context.retrievalFailures': '{{count}} 次失败',
+    'context.errorValue': '优化异常：{{error}}',
     'detail.tools': '工具调用',
+    'detail.tasks': '任务',
     'detail.approval': '待审批',
     'settings.title': '设置',
     'settings.close': '关闭设置',
@@ -84,6 +115,20 @@ const translations: Record<Language, Record<string, string>> = {
     'settings.testSuccess': '模型可用（{{latency}}ms）',
     'settings.testFailed': '模型不可用：{{message}}',
     'settings.maxContextTokens': '最大上下文 Token',
+    'settings.compressionThreshold': '自动压缩阈值',
+    'settings.compressionThresholdHint': '达到最大上下文的 80% 或进入输出与安全预留区时触发，以较早者为准。',
+    'settings.includeUsage': '流式 Usage 统计',
+    'settings.includeUsageHint': '请求兼容接口返回 token 统计；若网关不支持可关闭。',
+    'settings.promptCache': 'Prompt Cache',
+    'settings.promptCacheHint': '原生 OpenAI/Anthropic 会发送缓存提示；兼容网关是否命中以实际 usage 为准。',
+    'settings.contextOptimization': '上下文优化',
+    'settings.contextOptimizationHint': '控制模型投影的自动压缩策略；原始会话不会被修改。',
+    'settings.contextOptimizationMode': '优化模式',
+    'settings.contextOptimizationDisable': '快速关闭',
+    'settings.contextOptimizationModeHint.legacy': '使用当前稳定的 legacy 压缩实现。',
+    'settings.contextOptimizationModeHint.observe': '运行 V2 并记录指标，但仍向模型发送 legacy 投影。',
+    'settings.contextOptimizationModeHint.v2': '向模型发送 V2 优化后的上下文投影。',
+    'settings.contextOptimizationModeHint.disabled': '关闭自动压缩，仅保留硬限制保护。',
     'settings.enabled': '已启用',
     'settings.disabled': '未启用',
     'settings.models': '模型列表',
@@ -164,6 +209,10 @@ const translations: Record<Language, Record<string, string>> = {
     'message.thinking': '思考中...',
     'message.error': '⚠️ 错误：{{error}}',
     'message.imageSaveFailed': '图片消息保存失败，请重试',
+    'message.saveFailed': '消息保存失败，请重试',
+    'message.channelNotReady': '消息通道尚未就绪，请稍后重试',
+    'message.sessionNotReady': '会话仍在加载，请稍后重试',
+    'message.sendBusy': '上一条消息仍在发送，请稍后重试',
     'tool.input': '输入',
     'tool.output': '输出',
     'tool.diff': '差异',
@@ -188,6 +237,8 @@ const translations: Record<Language, Record<string, string>> = {
     'tool.name.gitDiff': 'Git 差异',
     'tool.name.gitLog': 'Git 日志',
     'tool.name.gitBranch': 'Git 分支',
+    'tool.name.researchWebAccess': '研究网页访问',
+    'tool.name.presentResearchReport': '生成研究报告',
     'tool.gitStaged': '暂存区',
     'tool.gitWorkingTree': '工作区',
     'tool.gitRecentCommits': '最近 {{count}} 条提交',
@@ -196,6 +247,37 @@ const translations: Record<Language, Record<string, string>> = {
     'approval.description.webRead': 'JOKER 想访问外部网页并读取其内容。',
     'approval.description.webSearch': 'JOKER 想访问外部搜索引擎检索公开网页结果。',
     'approval.description.generateImage': 'JOKER 想访问外部制图服务生成图片。这可能产生费用，并会将图片保存到本地。',
+    'approval.description.researchWebAccess': 'JOKER 将为本次研究访问公共网页，最多执行 6 次搜索、读取 12 个公共网页。',
+    'research.mode.label': '运行模式',
+    'research.mode.chat': '普通聊天',
+    'research.mode.research': '深度研究',
+    'research.mode.publicWebOnly': '仅访问公共网页；不使用项目、Skills 或图片。',
+    'research.mode.placeholder': '描述要研究的问题，可附上公共网页链接…',
+    'research.mode.imagesDisabled': '深度研究模式不接受图片，仅访问公共网页。',
+    'research.report.label': '深度研究报告',
+    'research.report.artifact': '研究报告',
+    'research.report.preparing': '正在整理研究报告…',
+    'research.report.invalidTitle': '研究报告不可用',
+    'research.report.invalid': '报告数据未通过安全校验；本次会话仍可继续。',
+    'research.report.download': '下载 Markdown',
+    'research.report.saving': '正在保存…',
+    'research.report.saved': '报告已保存',
+    'research.report.saveFailed': '报告保存失败',
+    'research.sources': '来源',
+    'research.charts': '图表',
+    'research.citation.label': '查看来源 {{id}} 与引文',
+    'research.chart.aria': '图表：{{title}}',
+    'research.chart.data': '查看数据表',
+    'research.chart.sources': '数据来源',
+    'research.progress.title': '研究进度',
+    'research.progress.planning': '规划中',
+    'research.progress.searching': '搜索中',
+    'research.progress.reading': '阅读中',
+    'research.progress.synthesizing': '汇总中',
+    'research.progress.completed': '已完成',
+    'research.progress.stopped': '已停止',
+    'research.progress.error': '出错',
+    'research.progress.counts': '{{searches}} 次搜索 · {{reads}} 个网页',
     'thinking.label': '思考级别',
     'thinking.auto': '自动',
     'thinking.none': '关闭',
@@ -266,7 +348,38 @@ const translations: Record<Language, Record<string, string>> = {
     'detail.running': 'Running',
     'detail.idle': 'Idle',
     'detail.context': 'Context',
+    'detail.usage': 'Run usage',
+    'detail.inputTokens': 'Total input',
+    'detail.outputTokens': 'Total output',
+    'detail.totalTokens': 'Total tokens',
+    'detail.noCacheTokens': 'Non-cached input',
+    'detail.cacheReadTokens': 'Cache reads',
+    'detail.cacheWriteTokens': 'Cache writes',
+    'detail.modelSteps': 'Model calls',
+    'detail.step': 'Step {{count}}',
+    'detail.providerMeasured': 'Provider measured',
+    'detail.localEstimate': 'Local estimate',
+    'detail.compressions': '{{count}} compressions',
+    'detail.compressionChange': '{{before}} → {{after}}',
+    'detail.compressionError': 'Compression issue: {{error}}',
+    'context.modeValue': 'Mode: {{mode}}',
+    'context.policyValue': 'Policy: {{policy}}',
+    'context.mode.legacy': 'Legacy',
+    'context.mode.observe': 'Observe',
+    'context.mode.v2': 'V2',
+    'context.mode.disabled': 'Disabled',
+    'context.latestTransform': 'Latest transform',
+    'context.transformTokens': 'Transform tokens',
+    'context.retrievable': 'Retrievable',
+    'context.yes': 'Yes',
+    'context.no': 'No',
+    'context.summaryCost': 'Summary cost (in + out)',
+    'context.estimatedNetSaved': 'Estimated net saved',
+    'context.retrievalCount': 'Retrieval count',
+    'context.retrievalFailures': '{{count}} failed',
+    'context.errorValue': 'Optimization issue: {{error}}',
     'detail.tools': 'Tool calls',
+    'detail.tasks': 'Tasks',
     'detail.approval': 'Approval required',
     'settings.title': 'Settings',
     'settings.close': 'Close settings',
@@ -314,6 +427,20 @@ const translations: Record<Language, Record<string, string>> = {
     'settings.testSuccess': 'Model available ({{latency}}ms)',
     'settings.testFailed': 'Model unavailable: {{message}}',
     'settings.maxContextTokens': 'Max context tokens',
+    'settings.compressionThreshold': 'Auto-compress threshold',
+    'settings.compressionThresholdHint': 'Triggers at 80% of context capacity or when output and safety reserves are reached, whichever comes first.',
+    'settings.includeUsage': 'Streaming usage',
+    'settings.includeUsageHint': 'Ask compatible APIs to report token usage; disable this if the gateway rejects it.',
+    'settings.promptCache': 'Prompt cache',
+    'settings.promptCacheHint': 'Native OpenAI/Anthropic requests include cache hints; compatible gateway hits depend on reported usage.',
+    'settings.contextOptimization': 'Context optimization',
+    'settings.contextOptimizationHint': 'Controls automatic compression of the model projection. Original sessions are not modified.',
+    'settings.contextOptimizationMode': 'Optimization mode',
+    'settings.contextOptimizationDisable': 'Quick disable',
+    'settings.contextOptimizationModeHint.legacy': 'Use the current stable legacy compression path.',
+    'settings.contextOptimizationModeHint.observe': 'Run V2 and record metrics while still sending the legacy projection.',
+    'settings.contextOptimizationModeHint.v2': 'Send the V2 optimized context projection to the model.',
+    'settings.contextOptimizationModeHint.disabled': 'Disable automatic compression and retain hard-limit protection only.',
     'settings.enabled': 'Enabled',
     'settings.disabled': 'Disabled',
     'settings.models': 'Models',
@@ -394,6 +521,10 @@ const translations: Record<Language, Record<string, string>> = {
     'message.thinking': 'Thinking...',
     'message.error': '⚠️ Error: {{error}}',
     'message.imageSaveFailed': 'Failed to save image message; please try again',
+    'message.saveFailed': 'Failed to save the message; please try again',
+    'message.channelNotReady': 'The message channel is not ready; please try again shortly',
+    'message.sessionNotReady': 'The session is still loading; please try again shortly',
+    'message.sendBusy': 'The previous message is still being sent; please try again shortly',
     'tool.input': 'Input',
     'tool.output': 'Output',
     'tool.diff': 'Diff',
@@ -418,6 +549,8 @@ const translations: Record<Language, Record<string, string>> = {
     'tool.name.gitDiff': 'Git diff',
     'tool.name.gitLog': 'Git log',
     'tool.name.gitBranch': 'Git branches',
+    'tool.name.researchWebAccess': 'Research web access',
+    'tool.name.presentResearchReport': 'Present research report',
     'tool.gitStaged': 'staged',
     'tool.gitWorkingTree': 'working tree',
     'tool.gitRecentCommits': 'latest {{count}} commits',
@@ -426,6 +559,37 @@ const translations: Record<Language, Record<string, string>> = {
     'approval.description.webRead': 'JOKER wants to access an external webpage and read its content.',
     'approval.description.webSearch': 'JOKER wants to query an external search engine for public web results.',
     'approval.description.generateImage': 'JOKER wants to use an external image service. This may incur charges and will save the result locally.',
+    'approval.description.researchWebAccess': 'For this research run, JOKER may perform up to 6 searches and read up to 12 public webpages.',
+    'research.mode.label': 'Run mode',
+    'research.mode.chat': 'Chat',
+    'research.mode.research': 'Deep Research',
+    'research.mode.publicWebOnly': 'Public web only; projects, Skills, and images are not used.',
+    'research.mode.placeholder': 'Describe the research question; you may include public webpage links…',
+    'research.mode.imagesDisabled': 'Deep Research does not accept images and only accesses public webpages.',
+    'research.report.label': 'Deep Research report',
+    'research.report.artifact': 'Research report',
+    'research.report.preparing': 'Preparing the research report…',
+    'research.report.invalidTitle': 'Research report unavailable',
+    'research.report.invalid': 'The report data failed safety validation. The conversation can continue.',
+    'research.report.download': 'Download Markdown',
+    'research.report.saving': 'Saving…',
+    'research.report.saved': 'Report saved',
+    'research.report.saveFailed': 'Unable to save report',
+    'research.sources': 'Sources',
+    'research.charts': 'Charts',
+    'research.citation.label': 'View source {{id}} and quote',
+    'research.chart.aria': 'Chart: {{title}}',
+    'research.chart.data': 'View data table',
+    'research.chart.sources': 'Data sources',
+    'research.progress.title': 'Research progress',
+    'research.progress.planning': 'Planning',
+    'research.progress.searching': 'Searching',
+    'research.progress.reading': 'Reading',
+    'research.progress.synthesizing': 'Synthesizing',
+    'research.progress.completed': 'Completed',
+    'research.progress.stopped': 'Stopped',
+    'research.progress.error': 'Error',
+    'research.progress.counts': '{{searches}} searches · {{reads}} webpages',
     'thinking.label': 'Reasoning',
     'thinking.auto': 'Auto',
     'thinking.none': 'Off',
@@ -484,6 +648,69 @@ export function t(language: Language, key: string, params: Record<string, string
   )
 }
 
+export function localizeError(language: Language, error: unknown): string {
+  const value = typeof error === 'string' ? error : error instanceof Error ? error.message : String(error)
+  if (language === 'en') return value
+
+  return value
+    .replace(/AI_RetryError/g, '重试错误')
+    .replace(/AI_APICallError/g, 'API 调用错误')
+    .replace(/APICallError/g, 'API 调用错误')
+    .replace(/RetryError/g, '重试错误')
+    .replace(/Failed after (\d+) attempts?/gi, '重试 $1 次后仍然失败')
+    .replace(/Last error:/gi, '最后一次错误：')
+    .replace(/Cannot connect to API/gi, '无法连接到 API')
+    .replace(/bad port/gi, '端口号无效')
+    .replace(/Invalid URL/gi, 'URL 无效')
+    .replace(/Session not found/gi, '会话不存在')
+    .replace(/Failed to save edited message/gi, '编辑后的消息保存失败')
+    .replace(/MCP error/gi, 'MCP 错误')
+    .replace(/Invalid project/gi, '项目无效')
+    .replace(/Invalid or unavailable project/gi, '项目无效或不可用')
+    .replace(/Invalid Skill selection/gi, 'Skill 选择无效')
+    .replace(/Invalid image attachment/gi, '图片附件无效')
+    .replace(/Invalid message/gi, '消息无效')
+    .replace(/Invalid session/gi, '会话无效')
+    .replace(/Tool call was denied by user/gi, '工具调用已被用户拒绝')
+    .replace(/Unable to open/gi, '无法打开')
+    .replace(/File not found/gi, '文件不存在')
+    .replace(/The target is not a file/gi, '目标不是文件')
+    .replace(/Only Markdown files are supported/gi, '仅支持 Markdown 文件')
+    .replace(/Markdown file is too large/gi, 'Markdown 文件过大')
+    .replace(/Unable to read Markdown file/gi, '无法读取 Markdown 文件')
+    .replace(/Unable to reveal file/gi, '无法在资源管理器中显示文件')
+    .replace(/Image provider is disabled/gi, '制图服务商未启用')
+    .replace(/Image provider is not configured/gi, '制图服务商未配置')
+    .replace(/Image prompt is required/gi, '请输入图片描述')
+    .replace(/Image prompt is too long/gi, '图片描述过长')
+    .replace(/Image provider returned invalid JSON/gi, '制图服务商返回了无效的 JSON')
+    .replace(/Image provider returned no image/gi, '制图服务商未返回图片')
+    .replace(/Image provider returned no models/gi, '制图服务商未返回模型')
+    .replace(/Image provider is not configured/gi, '制图服务商未配置')
+    .replace(/Model found; no paid image generation was performed/gi, '已找到模型，未执行付费制图')
+    .replace(/Configured image model was not found/gi, '未找到配置的制图模型')
+    .replace(/The model returned an empty response/gi, '模型返回了空响应')
+    .replace(/The message channel is not ready/gi, '消息通道尚未就绪')
+    .replace(/Failed to save the message/gi, '消息保存失败')
+    .replace(/Unknown error/gi, '未知错误')
+    .replace(/Failed to fetch/gi, '请求失败')
+    .replace(/fetch failed/gi, '网络请求失败')
+    .replace(/network error/gi, '网络错误')
+    .replace(/timed out|timeout/gi, '请求超时')
+    .replace(/The operation was aborted/gi, '操作已中止')
+    .replace(/Unauthorized/gi, '未授权')
+    .replace(/Forbidden/gi, '禁止访问')
+    .replace(/Not Found/gi, '未找到')
+    .replace(/Internal Server Error/gi, '服务器内部错误')
+    .replace(/Unknown error/gi, '未知错误')
+    .replace(/An unknown stream error occurred\.?/gi, '发生未知的流错误')
+    .replace(/(?<!https?):\s*/g, '：')
+    .replace(/([：，。！？])\s+/g, '$1')
+    .replace(/\.\s+/g, '。')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 const TOOL_NAME_KEYS: Record<string, string> = {
   Read: 'tool.name.read',
   Write: 'tool.name.write',
@@ -499,7 +726,9 @@ const TOOL_NAME_KEYS: Record<string, string> = {
   GitStatus: 'tool.name.gitStatus',
   GitDiff: 'tool.name.gitDiff',
   GitLog: 'tool.name.gitLog',
-  GitBranch: 'tool.name.gitBranch'
+  GitBranch: 'tool.name.gitBranch',
+  ResearchWebAccess: 'tool.name.researchWebAccess',
+  PresentResearchReport: 'tool.name.presentResearchReport'
 }
 
 export function toolLabel(language: Language, toolName: string): string {

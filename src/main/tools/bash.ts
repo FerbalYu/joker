@@ -7,6 +7,34 @@ const DEFAULT_TIMEOUT_MS = 120_000
 const MAX_OUTPUT_BYTES = 1024 * 1024
 const OUTPUT_TRUNCATION_MARKER = '\n[output truncated: 1 MiB limit]'
 
+const ENV_BLOCKLIST_PATTERNS = [
+  /API_?KEY/i,
+  /SECRET/i,
+  /TOKEN/i,
+  /PASSWORD/i,
+  /CREDENTIAL/i,
+  /AUTH/i,
+  /PRIVATE_?KEY/i,
+  /ACCESS_?KEY/i,
+  /SESSION_?KEY/i,
+  /ANTHROPIC/i,
+  /OPENAI/i,
+  /AWS/i,
+  /AZURE/i,
+  /GOOGLE/i,
+  /GCP/i
+]
+
+function buildSafeEnv(): NodeJS.ProcessEnv {
+  const safe: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue
+    if (ENV_BLOCKLIST_PATTERNS.some((pattern) => pattern.test(key))) continue
+    safe[key] = value
+  }
+  return safe
+}
+
 function killProcessTree(child: ChildProcess): void {
   if (!child.pid) return
   if (process.platform === 'win32') {
@@ -70,7 +98,7 @@ export const bashTool: ToolDefinition = {
       const child = spawn(command, {
         shell: true,
         cwd,
-        env: { ...process.env },
+        env: buildSafeEnv(),
         windowsHide: true,
         detached: process.platform !== 'win32'
       })

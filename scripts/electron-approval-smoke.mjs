@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 import { once } from 'node:events'
+import { createHash } from 'node:crypto'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const runDir = await mkdtemp(join(tmpdir(), 'joker-electron-approval-'))
@@ -121,7 +122,7 @@ async function sendWritePrompt(page) {
 }
 
 try {
-  provider = spawn(process.execPath, [join(root, '.qa', 'fake-provider.mjs')], {
+  provider = spawn(process.execPath, [join(root, 'scripts', 'fixtures', 'fake-provider.mjs')], {
     cwd: root,
     env: { ...process.env, PORT: String(providerPort), LOG_PATH: logPath },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -148,13 +149,20 @@ try {
   await writeFile(join(skillsRoot, 'SKILL.md'), `---\nid: qa-skill\nname: QA Skill\ndescription: deterministic QA skill\nallowedMcpTools: qa-mcp/echo\n---\nAlways describe the QA capability before using it.\n`)
   const mcpScript = `import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'\nimport { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'\nimport { z } from 'zod'\nconst server = new McpServer({ name: 'qa-mcp', version: '1.0.0' })\nserver.registerTool('echo', { description: 'QA echo', inputSchema: { message: z.string() } }, async ({ message }) => ({ content: [{ type: 'text', text: message }] }))\nawait server.connect(new StdioServerTransport())\n`
   await writeFile(mcpFixture, mcpScript)
+  const mcpArgs = ['--input-type=module', '-e', mcpScript]
+  const trustedFingerprint = createHash('sha256').update(JSON.stringify({
+    transport: 'stdio', command: process.execPath.trim(), args: mcpArgs.map((arg) => arg.trim())
+  })).digest('hex').slice(0, 32)
   await writeFile(join(home, '.joker', 'config.json'), JSON.stringify({
     providers: [{
       id: 'qa-provider', name: 'QA Provider', type: 'openai-compatible', apiFormat: 'chat-completions',
       baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: 'qa-key',
       models: [{ id: 'gpt-4o', name: 'gpt-4o', enabled: true }], currentModelId: 'gpt-4o', enabled: true
     }],
-    activeProviderId: 'qa-provider', mcpServers: [{ id: 'qa-mcp', name: 'QA MCP', enabled: true, transport: 'stdio', command: process.execPath, args: ['--input-type=module', '-e', mcpScript], autoConnect: true }], disabledSkills: []
+    activeProviderId: 'qa-provider', mcpServers: [{
+      id: 'qa-mcp', name: 'QA MCP', enabled: true, transport: 'stdio', command: process.execPath,
+      args: mcpArgs, autoConnect: true, trustState: 'trusted', trustedFingerprint, permission: 'allow'
+    }], disabledSkills: []
   }, null, 2))
 
   const pages = await launchElectron()

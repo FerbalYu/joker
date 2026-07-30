@@ -17,11 +17,39 @@ void test('store restores sessions and clears transient stream state', () => {
   assert.deepEqual(useStore.getState().pendingToolCalls, [])
 })
 
+void test('startStream clears stale context and usage state', () => {
+  useStore.getState().setContextUsage({
+    inputTokens: 10,
+    maxTokens: 100,
+    percent: 10,
+    messageTokens: 10,
+    mcpTokens: 0,
+    systemTokens: 0,
+    toolTokens: 0,
+    skillTokens: 0,
+    systemPromptTokens: 0,
+    otherTokens: 0
+  })
+  useStore.getState().setLatestUsage({ inputTokens: 10 })
+  useStore.getState().startStream()
+  assert.equal(useStore.getState().contextUsage, null)
+  assert.equal(useStore.getState().latestUsage, null)
+  useStore.getState().resetTransientState()
+})
+
 void test('store persists usage on committed assistant messages', () => {
   useStore.getState().resetTransientState()
   useStore.getState().startStream()
   useStore.getState().appendToken('answer')
-  const usage: StreamUsage = { inputTokens: 12, outputTokens: 4, totalTokens: 16, cacheReadTokens: 2 }
+  const usage: StreamUsage = {
+    inputTokens: 12,
+    outputTokens: 4,
+    totalTokens: 16,
+    noCacheTokens: 10,
+    cacheReadTokens: 2,
+    cacheWriteTokens: 1,
+    stepCount: 3
+  }
   const message = useStore.getState().commitStream('assistant-1', usage)
   assert.deepEqual(message?.usage, usage)
   assert.deepEqual(useStore.getState().messages.at(-1)?.usage, usage)
@@ -29,6 +57,19 @@ void test('store persists usage on committed assistant messages', () => {
   useStore.getState().resetTransientState()
   assert.equal(useStore.getState().latestUsage, null)
 })
+void test('store persists stream run mode on committed assistant messages and resets it', () => {
+  useStore.getState().resetTransientState()
+  useStore.getState().setActiveRunMode('research')
+  useStore.getState().setStreamRunMode('research')
+  useStore.getState().startStream()
+  useStore.getState().appendToken('report')
+  const message = useStore.getState().commitStream('assistant-research')
+  assert.equal(message?.runMode, 'research')
+  assert.equal(useStore.getState().streamRunMode, null)
+  assert.equal(useStore.getState().activeRunMode, 'research')
+  useStore.getState().setActiveRunMode('chat')
+})
+
 void test('store resolves tool results by toolCallId', () => {
   useStore.getState().resetTransientState()
   useStore.getState().addPendingToolCall({ toolCallId: 'call-a', toolName: 'Read', input: {}, status: 'running' })

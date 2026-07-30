@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import type { ApiFormat, AppConfig, McpServerConfig, ModelConfig, ProviderConfig, ProviderEntry, ProviderType } from '../../shared/types'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../../shared/types'
+import { normalizeContextOptimizationMode } from '../../shared/context'
 import { getJokerHomeDir } from './paths'
 
 function getConfigDir(): string {
@@ -80,13 +81,17 @@ function getDefaults(): AppConfig {
         modelsPath: '/v1/models',
         enabled: true,
         apiKey: process.env['OPENAI_API_KEY'] ?? '',
+        includeUsage: true,
+        promptCache: true,
         models: [model],
         currentModelId: model.id
       }
     ],
     activeProviderId: 'openai-default',
+    contextOptimizationMode: 'legacy',
     mcpServers: [],
-    disabledSkills: []  }
+    disabledSkills: []
+  }
 }
 
 function normalizeProvider(raw: Partial<ProviderEntry>, index: number): ProviderEntry {
@@ -126,6 +131,8 @@ function normalizeProvider(raw: Partial<ProviderEntry>, index: number): Provider
     enabled: raw.enabled !== false,
     apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : '',
     baseUrl: typeof raw.baseUrl === 'string' ? raw.baseUrl : undefined,
+    includeUsage: raw.includeUsage !== false,
+    promptCache: raw.promptCache !== false,
     models: safeModels,
     currentModelId
   }
@@ -141,7 +148,13 @@ export function normalizeConfig(raw: unknown): AppConfig {
     const activeProviderId = safeProviders.some((provider) => provider.id === value.activeProviderId)
       ? (value.activeProviderId as string)
       : safeProviders[0].id
-    return { providers: safeProviders, activeProviderId, mcpServers: normalizeMcpServers(value.mcpServers), disabledSkills: Array.isArray(value.disabledSkills) ? value.disabledSkills.filter((skill): skill is string => typeof skill === 'string').slice(0, 100) : [] }
+    return {
+      providers: safeProviders,
+      activeProviderId,
+      contextOptimizationMode: normalizeContextOptimizationMode(value.contextOptimizationMode),
+      mcpServers: normalizeMcpServers(value.mcpServers),
+      disabledSkills: Array.isArray(value.disabledSkills) ? value.disabledSkills.filter((skill): skill is string => typeof skill === 'string').slice(0, 100) : []
+    }
   }
 
   if (value.provider && typeof value.provider === 'object') {
@@ -160,10 +173,12 @@ export function normalizeConfig(raw: unknown): AppConfig {
       enabled: true,
       apiKey: legacy.apiKey ?? '',
       baseUrl: legacy.baseUrl,
+      includeUsage: legacy.includeUsage !== false,
+      promptCache: legacy.promptCache !== false,
       models: [createModel(modelName)],
       currentModelId: modelName
     }
-    return { providers: [migrated], activeProviderId: migrated.id, mcpServers: [], disabledSkills: [] }
+    return { providers: [migrated], activeProviderId: migrated.id, contextOptimizationMode: 'legacy', mcpServers: [], disabledSkills: [] }
   }
 
   return getDefaults()
@@ -203,7 +218,9 @@ export function resolveActiveModel(config: AppConfig): ProviderConfig {
     model: model.name,
     apiKey: provider.apiKey,
     baseUrl: provider.baseUrl,
-    modelsPath: provider.modelsPath
+    modelsPath: provider.modelsPath,
+    includeUsage: provider.includeUsage !== false,
+    promptCache: provider.promptCache !== false
   }
 }
 

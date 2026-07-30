@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import * as electron from 'electron'
 import { join } from 'node:path'
 import {
@@ -15,7 +16,7 @@ import {
   unlinkSync,
   writeFileSync
 } from 'node:fs'
-import type { ChatMessage, SessionMeta } from '@shared/types'
+import type { ChatMessage, ContextReference, SessionContextCheckpoint, SessionMeta, ToolCallInfo } from '@shared/types'
 import { getMessageText, validateChatParts } from '../../shared/messages'
 import { cleanupGeneratedImages } from './generated-images'
 import { resolveProjectPath } from './projects'
@@ -23,14 +24,22 @@ import { getJokerHomeDir } from './paths'
 
 interface StoredSession extends SessionMeta {
   messages: ChatMessage[]
+  contextCheckpoint?: SessionContextCheckpoint
 }
 
-interface SessionEnvelope {
+interface SessionEnvelopeV1 {
   schemaVersion: 1
+  data: Omit<StoredSession, 'contextCheckpoint'>
+}
+
+interface SessionEnvelopeV2 {
+  schemaVersion: 2
   data: StoredSession
 }
 
-const SESSION_SCHEMA_VERSION = 1
+type SessionEnvelope = SessionEnvelopeV1 | SessionEnvelopeV2
+
+const SESSION_SCHEMA_VERSION = 2
 const SESSION_LOCK_STALE_MS = 30_000
 const SESSION_LOCK_RETRY_MS = 5
 const SESSION_LOCK_TIMEOUT_MS = 30_000
@@ -67,7 +76,25 @@ function isValidMessage(message: unknown): message is ChatMessage {
   if (typeof candidate.id !== 'string' || !candidate.id || typeof candidate.role !== 'string') return false
   if (!['user', 'assistant', 'system'].includes(candidate.role)) return false
   if (typeof candidate.content !== 'string' || typeof candidate.createdAt !== 'number' || !Number.isFinite(candidate.createdAt)) return false
+  if (candidate.runMode !== undefined && candidate.runMode !== 'chat' && candidate.runMode !== 'research') return false
   return candidate.parts === undefined || validateChatParts(candidate.parts)
+}
+
+function isValidContextCheckpoint(value: unknown): value is SessionContextCheckpoint {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<SessionContextCheckpoint>
+  const summary = candidate.summary as Partial<SessionContextCheckpoint['summary']> | undefined
+  return candidate.version === 1 &&
+    typeof candidate.policyVersion === 'string' && candidate.policyVersion.length > 0 &&
+    typeof candidate.sourceFromMessageId === 'string' && candidate.sourceFromMessageId.length > 0 &&
+    typeof candidate.sourceUntilMessageId === 'string' && candidate.sourceUntilMessageId.length > 0 &&
+    typeof candidate.sourceHash === 'string' && /^[a-f0-9]{64}$/.test(candidate.sourceHash) &&
+    typeof candidate.createdAt === 'number' && Number.isFinite(candidate.createdAt) &&
+    typeof candidate.estimatedSourceTokens === 'number' && candidate.estimatedSourceTokens >= 0 &&
+    typeof candidate.estimatedSummaryTokens === 'number' && candidate.estimatedSummaryTokens >= 0 &&
+    Boolean(summary) && typeof summary?.goal === 'string' &&
+    ['confirmedFacts', 'decisions', 'filesRead', 'changesMade', 'failedAttempts', 'openTasks', 'criticalIdentifiers']
+      .every((key) => Array.isArray(summary?.[key as keyof typeof summary]) && (summary?.[key as keyof typeof summary] as unknown[]).every((item) => typeof item === 'string'))
 }
 
 function isValidStoredSession(value: unknown, expectedId?: string): value is StoredSession {
@@ -78,13 +105,14 @@ function isValidStoredSession(value: unknown, expectedId?: string): value is Sto
     typeof candidate.createdAt === 'number' && Number.isFinite(candidate.createdAt) &&
     typeof candidate.updatedAt === 'number' && Number.isFinite(candidate.updatedAt) &&
     (candidate.projectId === undefined || typeof candidate.projectId === 'string') &&
-    Array.isArray(candidate.messages) && candidate.messages.every(isValidMessage)
+    Array.isArray(candidate.messages) && candidate.messages.every(isValidMessage) &&
+    (candidate.contextCheckpoint === undefined || isValidContextCheckpoint(candidate.contextCheckpoint))
 }
 
 function decodeStoredSession(raw: unknown, expectedId: string): StoredSession | null {
   if (!raw || typeof raw !== 'object') return null
   const candidate = raw as Partial<SessionEnvelope> & Partial<StoredSession>
-  const data = candidate.schemaVersion === SESSION_SCHEMA_VERSION ? candidate.data : raw
+  const data = candidate.schemaVersion === 1 || candidate.schemaVersion === SESSION_SCHEMA_VERSION ? candidate.data : raw
   return isValidStoredSession(data, expectedId) ? data : null
 }
 
@@ -225,6 +253,140 @@ function writeSessionUnlocked(session: StoredSession): void {
   }
 }
 
+function messageSourceHash(messages: ChatMessage[]): string {
+  return createHash('sha256').update(JSON.stringify(messages)).digest('hex')
+}
+
+export function hashSessionMessageRange(messages: ChatMessage[], fromMessageId: string, untilMessageId: string): string | null {
+  const from = messages.findIndex((message) => message.id === fromMessageId)
+  const until = messages.findIndex((message) => message.id === untilMessageId)
+  if (from < 0 || until < from) return null
+  return messageSourceHash(messages.slice(from, until + 1))
+}
+
+export function isContextCheckpointValid(session: StoredSession, policyVersion?: string): boolean {
+  const checkpoint = session.contextCheckpoint
+  if (!checkpoint || (policyVersion && checkpoint.policyVersion !== policyVersion)) return false
+  return hashSessionMessageRange(session.messages, checkpoint.sourceFromMessageId, checkpoint.sourceUntilMessageId) === checkpoint.sourceHash
+}
+
+export function setContextCheckpoint(sessionId: string, checkpoint: SessionContextCheckpoint | null): boolean {
+  if (checkpoint !== null && !isValidContextCheckpoint(checkpoint)) return false
+  return withSessionLock(sessionId, () => {
+    const session = readSessionWithBackupUnlocked(sessionId)
+    if (!session) return false
+    if (checkpoint === null) delete session.contextCheckpoint
+    else {
+      const sourceHash = hashSessionMessageRange(session.messages, checkpoint.sourceFromMessageId, checkpoint.sourceUntilMessageId)
+      if (sourceHash !== checkpoint.sourceHash) return false
+      session.contextCheckpoint = checkpoint
+    }
+    session.updatedAt = Date.now()
+    writeSessionUnlocked(session)
+    return true
+  })
+}
+
+export function getValidContextCheckpoint(sessionId: string, policyVersion?: string): SessionContextCheckpoint | null {
+  const session = readSessionWithBackup(sessionId)
+  return session && isContextCheckpointValid(session, policyVersion) ? session.contextCheckpoint ?? null : null
+}
+
+function messageTools(message: ChatMessage): ToolCallInfo[] {
+  if (message.segments?.length) return message.segments.flatMap((segment) => segment.type === 'tools' ? segment.tools : [])
+  return message.toolCalls ?? []
+}
+
+function contextIdFor(reference: Omit<ContextReference, 'contextId'>): string {
+  return `ctx_${createHash('sha256').update([
+    reference.sessionId,
+    reference.messageId,
+    reference.toolCallId ?? '',
+    reference.sourceType,
+    reference.contentHash
+  ].join('\u0000')).digest('hex').slice(0, 32)}`
+}
+
+export function createToolResultReference(sessionId: string, toolCallId: string, projectedTokens: number): ContextReference | null {
+  const found = findToolResult(sessionId, toolCallId)
+  if (!found) return null
+  const reference = {
+    sessionId,
+    messageId: found.messageId,
+    toolCallId,
+    sourceType: 'tool-result' as const,
+    sourceName: found.toolName,
+    contentHash: createHash('sha256').update(found.output).digest('hex'),
+    originalTokens: Math.ceil(found.output.length / 4),
+    projectedTokens: Math.max(0, projectedTokens),
+    createdAt: Date.now()
+  }
+  return { ...reference, contextId: contextIdFor(reference) }
+}
+
+export function findToolResult(sessionId: string, toolCallId: string): { messageId: string; toolName: string; output: string } | null {
+  const session = readSessionWithBackup(sessionId)
+  if (!session) return null
+  for (const message of session.messages) {
+    const tool = messageTools(message).find((candidate) => candidate.toolCallId === toolCallId)
+    if (tool?.output !== undefined) return { messageId: message.id, toolName: tool.toolName, output: tool.output }
+  }
+  return null
+}
+
+export function retrieveContextReference(options: {
+  sessionId: string
+  contextId?: string
+  toolCallId?: string
+  contentHash?: string
+  query?: string
+  lineStart?: number
+  lineEnd?: number
+  maxChars?: number
+}): { reference: ContextReference; content: string; totalLines: number; returnedLines: [number, number] } | null {
+  if (!options.contextId && !options.toolCallId) return null
+  const session = readSessionWithBackup(options.sessionId)
+  if (!session) return null
+  for (const message of session.messages) {
+    for (const tool of messageTools(message)) {
+      if (tool.output === undefined || !tool.toolCallId) continue
+      const contentHash = createHash('sha256').update(tool.output).digest('hex')
+      const base = {
+        sessionId: options.sessionId,
+        messageId: message.id,
+        toolCallId: tool.toolCallId,
+        sourceType: 'tool-result' as const,
+        sourceName: tool.toolName,
+        contentHash,
+        originalTokens: Math.ceil(tool.output.length / 4),
+        projectedTokens: 0,
+        createdAt: message.createdAt
+      }
+      const contextId = contextIdFor(base)
+      if (options.toolCallId && tool.toolCallId !== options.toolCallId) continue
+      if (options.contextId && contextId !== options.contextId) continue
+      if (options.contentHash && contentHash !== options.contentHash) return null
+
+      const lines = tool.output.split(/\r?\n/)
+      const query = options.query?.trim().toLocaleLowerCase()
+      const matching = query ? lines.map((line, index) => line.toLocaleLowerCase().includes(query) ? index : -1).filter((index) => index >= 0) : []
+      const requestedStart = Math.max(1, options.lineStart ?? (matching[0] === undefined ? 1 : matching[0] + 1))
+      const defaultEnd = options.lineStart === undefined && matching[0] !== undefined ? requestedStart + 40 : lines.length
+      const requestedEnd = Math.max(requestedStart, Math.min(lines.length, options.lineEnd ?? defaultEnd))
+      const maxChars = Math.min(64_000, Math.max(256, options.maxChars ?? 16_000))
+      let content = lines.slice(requestedStart - 1, requestedEnd).join('\n')
+      if (content.length > maxChars) content = `${content.slice(0, maxChars)}\n[ContextRetrieve output limited]`
+      return {
+        reference: { ...base, contextId },
+        content,
+        totalLines: lines.length,
+        returnedLines: [requestedStart, requestedEnd]
+      }
+    }
+  }
+  return null
+}
+
 export function createSession(title = 'New conversation'): SessionMeta {
   ensureDataDir()
   const now = Date.now()
@@ -294,6 +456,7 @@ export function replaceMessages(sessionId: string, messages: ChatMessage[]): boo
     const session = readSessionWithBackupUnlocked(sessionId)
     if (!session) return false
     session.messages = messages
+    delete session.contextCheckpoint
     session.updatedAt = Date.now()
     if (session.title === 'New conversation') {
       const firstUser = session.messages.find((message) => message.role === 'user')

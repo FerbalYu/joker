@@ -38,7 +38,7 @@ test('reads legacy JSON and writes the schema-versioned envelope', () => {
   assert.deepEqual(getSession(id), legacy)
   assert.equal(appendMessage(id, { id: 'm1', role: 'user', content: 'hello', createdAt: 3 }), true)
   const stored = JSON.parse(readFileSync(join(dataDir, `${id}.json`), 'utf8'))
-  assert.equal(stored.schemaVersion, 1)
+  assert.equal(stored.schemaVersion, 2)
   assert.equal(stored.data.id, id)
   deleteSession(id)
 })
@@ -54,6 +54,55 @@ test('falls back to a valid backup when the primary file is corrupt', () => {
   assert.equal(deleteSession(session.id), true)
   assert.equal(existsSync(path), false)
   assert.equal(existsSync(`${path}.bak`), false)
+})
+
+test('assistant usage and tool segments survive a session round trip', () => {
+  const session = createSession('usage round trip')
+  const assistant = {
+    id: 'assistant-usage',
+    role: 'assistant' as const,
+    content: 'done',
+    createdAt: 2,
+    usage: {
+      inputTokens: 100,
+      outputTokens: 20,
+      totalTokens: 120,
+      noCacheTokens: 40,
+      cacheReadTokens: 60,
+      cacheWriteTokens: 5,
+      stepCount: 3
+    },
+    segments: [{
+      type: 'tools' as const,
+      tools: [{
+        toolCallId: 'call-agent',
+        toolName: 'Agent',
+        input: { prompt: 'inspect' },
+        output: 'result',
+        metadata: { usage: { inputTokens: 50, outputTokens: 10, totalTokens: 60 } },
+        status: 'done' as const
+      }]
+    }]
+  }
+  try {
+    assert.equal(appendMessage(session.id, assistant), true)
+    assert.deepEqual(getSession(session.id)?.messages.at(-1), assistant)
+  } finally {
+    deleteSession(session.id)
+  }
+})
+
+test('runMode survives round trips, legacy messages remain valid, and invalid modes are rejected', () => {
+  const session = createSession('run mode validation')
+  try {
+    assert.equal(appendMessage(session.id, { id: 'legacy', role: 'user', content: 'legacy', createdAt: 1 }), true)
+    assert.equal(appendMessage(session.id, { id: 'research-user', role: 'user', content: 'research', runMode: 'research', createdAt: 2 }), true)
+    assert.equal(appendMessage(session.id, { id: 'research-assistant', role: 'assistant', content: 'report', runMode: 'research', createdAt: 3 }), true)
+    assert.deepEqual(getSession(session.id)?.messages.map((message) => message.runMode), [undefined, 'research', 'research'])
+    assert.equal(appendMessage(session.id, { id: 'invalid', role: 'user', content: 'bad', runMode: 'invalid' as never, createdAt: 4 }), false)
+  } finally {
+    deleteSession(session.id)
+  }
 })
 
 test('large sessions restore bounded message data without temp-file leaks', () => {

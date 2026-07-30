@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ExternalLink, X } from 'lucide-react'
 import type { GeneratedImageRef } from '@shared/types'
 import { useStore } from '../store'
-import { t } from '../i18n'
+import { t, localizeError } from '../i18n'
 
 interface Props {
   image: GeneratedImageRef
@@ -20,7 +20,7 @@ export default function GeneratedImagePreview({ image }: Props): React.JSX.Eleme
     void window.joker.generatedImage.read(image).then((result) => {
       if (!active) return
       if (!result.success || !result.data || !result.mediaType) {
-        setError(result.error ?? t(language, 'image.generatedLoadFailed'))
+        setError(localizeError(language, result.error ?? t(language, 'image.generatedLoadFailed')))
         return
       }
       setUrl(`data:${result.mediaType};base64,${result.data}`)

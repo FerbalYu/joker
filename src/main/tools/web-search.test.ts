@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeSearchOptions, parseBaiduResults, parseBingResults } from './web-search'
+import { normalizeSearchOptions, parseBaiduResults, parseBingResults, searchWeb } from './web-search'
 
 void test('normalizeSearchOptions clamps limits and trims query', () => {
   assert.deepEqual(
@@ -42,6 +42,24 @@ void test('parseBingResults extracts public titles and urls', () => {
       snippet: 'A Chinese TypeScript tutorial.'
     }
   ])
+})
+
+void test('search metadata always contains a bounded results array', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input) => {
+    const url = String(input)
+    const html = url.includes('bing.com')
+      ? '<li class="b_algo"><h2><a href="https://example.com/a">Result A</a></h2><p>Snippet A</p></li>'
+      : ''
+    return new Response(html, { status: 200, headers: { 'content-type': 'text/html' } })
+  }
+  try {
+    const result = await searchWeb({ query: 'metadata', limit: 1 })
+    assert.deepEqual(result.metadata?.results, [{ title: 'Result A', url: 'https://example.com/a', snippet: 'Snippet A' }])
+    assert.equal(result.metadata?.count, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })
 
 void test('parseBaiduResults prefers mu absolute urls and filters junk', () => {

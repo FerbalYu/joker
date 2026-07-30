@@ -1,9 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { STREAM_HIGH_WATER_MARK } from '../shared/types'
+import { StreamBridge, type StreamPortLike } from './stream-bridge'
 import type {
   StreamEvent,
   StreamFlowState,
-  StreamEventEnvelope,
   ApprovalRequest,
   AppConfig,
   ChatMessage,
@@ -22,60 +22,31 @@ import type {
   GeneratedImageRef,
   GeneratedImageReadResult,
   ProjectState,
-  GitStatus
+  GitStatus,
+  RunMode
 } from '@shared/types'
 interface SessionRecord extends SessionMeta {
   messages: ChatMessage[]
 }
 
-let streamPort: MessagePort | null = null
-let streamEventCallback: ((event: StreamEvent) => void) | null = null
-let streamFlowCallback: ((flow: StreamFlowState) => void) | null = null
-
-function attachStreamHandler(): void {
-  if (!streamPort) return
-  streamPort.onmessage = (event: MessageEvent) => {
-    const data = event.data as StreamEventEnvelope | { type: 'stream:flow'; flow: StreamFlowState }
-    if (data?.type === 'stream:flow') {
-      streamFlowCallback?.(data.flow)
-      return
-    }
-    if (data?.type !== 'stream:event') return
-    try {
-      streamEventCallback?.(data.event)
-    } finally {
-      streamPort?.postMessage({ type: 'stream:ack', seq: data.seq, runId: data.runId })
-    }
-  }
-  streamPort.start()
-}
+const streamBridge = new StreamBridge(STREAM_HIGH_WATER_MARK)
+ipcRenderer.on('stream:port', (event) => {
+  const port = event.ports[0]
+  if (port) streamBridge.acceptPort(port)
+})
 
 const api = {
   chat: {
-    onPort: (callback: (port: MessagePort) => void): void => {
-      ipcRenderer.once('stream:port', (event) => {
-        const port = event.ports[0]
-        if (!port) return
-        streamPort = port
-        callback(port)
-        streamPort.postMessage({ type: 'stream:ready', credit: STREAM_HIGH_WATER_MARK })
-        attachStreamHandler()
-      })
-    },
-    send: (_port: MessagePort, sessionId: string, messages: unknown[], reasoningLevel: ReasoningLevel, skillIds?: string[], projectId?: string, runId = crypto.randomUUID()): void => {
-      if (!streamPort) return
-      streamPort.postMessage({ type: 'chat:send', sessionId, runId, messages, reasoningLevel, skillIds, projectId })
-    },
-    abort: (_port: MessagePort, runId?: string): void => {
-      streamPort?.postMessage({ type: 'chat:abort', runId })
-    },
-    onEvent: (_port: MessagePort, callback: (event: StreamEvent) => void): void => {
-      streamEventCallback = callback
-      attachStreamHandler()
-    },
-    onFlow: (callback: (flow: StreamFlowState) => void): void => {
-      streamFlowCallback = callback
-    },
+    onPort: (callback: (port: MessagePort) => void): (() => void) =>
+      streamBridge.onPort(callback as (port: StreamPortLike) => void),
+    send: (_port: MessagePort, sessionId: string, messages: unknown[], reasoningLevel: ReasoningLevel, skillIds?: string[], projectId?: string, runId = crypto.randomUUID(), runMode: RunMode = 'chat'): boolean =>
+      streamBridge.send({ type: 'chat:send', sessionId, runId, messages, reasoningLevel, skillIds, projectId, runMode }),
+    abort: (_port: MessagePort | null, runId?: string): boolean =>
+      streamBridge.send({ type: 'chat:abort', runId }),
+    onEvent: (_port: MessagePort, callback: (event: StreamEvent) => void): (() => void) =>
+      streamBridge.onEvent(callback),
+    onFlow: (callback: (flow: StreamFlowState) => void): (() => void) =>
+      streamBridge.onFlow(callback),
   },
   approval: {
     onRequest: (callback: (req: ApprovalRequest) => void): (() => void) => {
@@ -129,7 +100,8 @@ const api = {
   },
   file: {
     reveal: (url: string): Promise<{ success: boolean; error?: string }> => ipcRenderer.invoke('file:reveal', url),
-    readMarkdown: (url: string): Promise<{ success: boolean; title?: string; path?: string; content?: string; error?: string }> => ipcRenderer.invoke('file:read-markdown', url)
+    readMarkdown: (url: string): Promise<{ success: boolean; title?: string; path?: string; content?: string; error?: string }> => ipcRenderer.invoke('file:read-markdown', url),
+    saveMarkdown: (value: { title: string; content: string }): Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }> => ipcRenderer.invoke('file:save-markdown', value)
   },
   markdown: {
     openFile: (url: string): Promise<{ success: boolean; error?: string }> => ipcRenderer.invoke('markdown:open-file', url)

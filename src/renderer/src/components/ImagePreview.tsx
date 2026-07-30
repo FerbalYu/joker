@@ -7,7 +7,7 @@ import { t, type Language } from '../i18n'
 interface Props {
   image: ChatImagePart
   language: Language
-  mode: 'thumbnail' | 'message'
+  mode: 'thumbnail' | 'attachment'
   onRemove?: () => void
 }
 
@@ -36,19 +36,16 @@ export default function ImagePreview({ image, language, mode, onRemove }: Props)
 
   return (
     <>
-      <div className={mode === 'thumbnail'
-        ? 'relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-surface)]'
-        : 'block max-h-80 max-w-full overflow-hidden rounded-lg border border-[var(--color-border)]'}
-      >
+      <div data-image-preview={mode} className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-surface)]">
         <button
           ref={triggerRef}
           type="button"
           onClick={() => setOpen(true)}
           aria-label={t(language, 'input.previewImage')}
           title={t(language, 'input.previewImage')}
-          className={mode === 'thumbnail' ? 'h-full w-full cursor-zoom-in' : 'block max-h-80 max-w-full cursor-zoom-in'}
+          className="h-full w-full cursor-zoom-in"
         >
-          <img src={previewUrl} alt={alt} className={mode === 'thumbnail' ? 'h-full w-full object-cover' : 'max-h-80 max-w-full object-contain'} />
+          <img src={previewUrl} alt={alt} className="h-full w-full object-cover" />
         </button>
         {mode === 'thumbnail' && onRemove && (
           <button

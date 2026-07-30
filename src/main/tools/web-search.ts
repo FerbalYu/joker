@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { ToolDefinition, ToolResult } from './registry'
+import type { ToolDefinition, ToolResult, ToolContext } from './registry'
 
 const DEFAULT_TIMEOUT_MS = 12_000
 const MAX_TIMEOUT_MS = 20_000
@@ -27,6 +27,7 @@ export interface WebSearchMetadata extends Record<string, unknown> {
   query: string
   provider: WebSearchProvider | 'none'
   count: number
+  results: WebSearchResultItem[]
   searchUrl?: string
   fallbackReason?: string
 }
@@ -266,7 +267,7 @@ export async function searchWeb(options: WebSearchOptions): Promise<ToolResult> 
   if (!normalized.query) {
     return {
       output: 'Search query is required.',
-      metadata: { query: '', provider: 'none', count: 0 }
+      metadata: { query: '', provider: 'none', count: 0, results: [] }
     }
   }
 
@@ -276,6 +277,7 @@ export async function searchWeb(options: WebSearchOptions): Promise<ToolResult> 
       query: normalized.query,
       provider: 'bing',
       count: bing.results.length,
+      results: bing.results,
       searchUrl: bing.searchUrl
     }
     return {
@@ -290,6 +292,7 @@ export async function searchWeb(options: WebSearchOptions): Promise<ToolResult> 
       query: normalized.query,
       provider: 'baidu',
       count: baidu.results.length,
+      results: baidu.results,
       searchUrl: baidu.searchUrl,
       fallbackReason: bing.fallbackReason
     }
@@ -309,6 +312,7 @@ export async function searchWeb(options: WebSearchOptions): Promise<ToolResult> 
       query: normalized.query,
       provider: 'none',
       count: 0,
+      results: [],
       searchUrl: bing.searchUrl,
       fallbackReason: baidu.fallbackReason ?? bing.fallbackReason
     }
@@ -324,10 +328,19 @@ export const webSearchTool: ToolDefinition = {
     limit: z.number().int().min(1).max(MAX_LIMIT).optional().describe('Maximum number of results to return'),
     timeoutMs: z.number().int().min(3_000).max(MAX_TIMEOUT_MS).optional().describe('Request timeout in milliseconds')
   }),
-  execute: async (input): Promise<ToolResult> =>
-    searchWeb({
+  execute: async (input, context: ToolContext): Promise<ToolResult> => {
+    try {
+      context.researchContext?.consumeSearch()
+    } catch (error) {
+      return {
+        output: error instanceof Error ? error.message : 'Research WebSearch budget exhausted.',
+        metadata: { query: String(input.query ?? ''), provider: 'none', count: 0, results: [] }
+      }
+    }
+    return searchWeb({
       query: input.query as string,
       limit: input.limit as number | undefined,
       timeoutMs: input.timeoutMs as number | undefined
     })
+  }
 }

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, Plus, Trash2, X } from 'lucide-react'
-import type { ApiFormat, AppConfig, ImageProviderConfig, ImageProviderEntry, McpServerConfig, McpServerRuntime, ModelConfig, ProviderEntry, SkillDescriptor } from '@shared/types'
+import type { ApiFormat, AppConfig, ContextOptimizationMode, ImageProviderConfig, ImageProviderEntry, McpServerConfig, McpServerRuntime, ModelConfig, ProviderEntry, SkillDescriptor } from '@shared/types'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '@shared/types'
 import { useStore } from '../store'
-import { t } from '../i18n'
+import { localizeError, t } from '../i18n'
 
 interface Props {
   onClose: () => void
@@ -12,6 +12,17 @@ interface Props {
 type SettingsTab = 'provider' | 'image' | 'mcp' | 'skills'
 
 const API_FORMATS: ApiFormat[] = ['anthropic-messages', 'chat-completions', 'responses']
+const COMPRESSION_TRIGGER_RATIO = 0.8
+const COMPRESSION_SAFETY_RESERVE = 4096
+const DEFAULT_OUTPUT_TOKEN_RESERVE = 8192
+const CONTEXT_OPTIMIZATION_MODES: ContextOptimizationMode[] = ['legacy', 'observe', 'v2', 'disabled']
+
+function compressionThreshold(maxContextTokens: number): number {
+  return Math.max(1, Math.min(
+    Math.floor(maxContextTokens * COMPRESSION_TRIGGER_RATIO),
+    maxContextTokens - DEFAULT_OUTPUT_TOKEN_RESERVE - COMPRESSION_SAFETY_RESERVE
+  ))
+}
 
 function defaultModel(): ModelConfig {
   const name = 'gpt-4o'
@@ -29,6 +40,8 @@ function createProvider(index: number): ProviderEntry {
     enabled: true,
     apiKey: '',
     baseUrl: 'https://api.example.com/v1',
+    includeUsage: true,
+    promptCache: true,
     models: [model],
     currentModelId: model.id
   }
@@ -177,7 +190,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
   const addMcpServer = async (): Promise<void> => {
     const result = await window.joker.mcp.add(mcpDraft)
     if (!result.success) {
-      setError(result.error ?? 'MCP error')
+      setError(localizeError(language, result.error ?? 'MCP error'))
       return
     }
     setMcpServers(await window.joker.mcp.list())
@@ -194,7 +207,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
       ? await window.joker.mcp.revokeTrust(server.id)
       : await window.joker.mcp.trust(server.id)
     if (!result.success) {
-      setError(result.error ?? t(language, 'settings.mcpTrustFailed'))
+      setError(localizeError(language, result.error ?? t(language, 'settings.mcpTrustFailed')))
       return
     }
     await refreshMcpServers()
@@ -205,7 +218,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
     const permission = server.permission === 'allow' ? 'deny' : 'allow'
     const result = await window.joker.mcp.setPermission(server.id, permission)
     if (!result.success) {
-      setError(result.error ?? t(language, 'settings.mcpPermissionFailed'))
+      setError(localizeError(language, result.error ?? t(language, 'settings.mcpPermissionFailed')))
       return
     }
     await refreshMcpServers()
@@ -275,7 +288,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
     try {
       const result = await window.joker.config.fetchModels(selectedProvider)
       if (!result.success) {
-        setError(result.error ?? t(language, 'settings.fetchModels'))
+        setError(localizeError(language, result.error ?? t(language, 'settings.fetchModels')))
         return
       }
       const currentIds = new Set(result.models.map((model) => model.id))
@@ -287,7 +300,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
       })
       setStatusMessage(t(language, 'settings.modelsFetched', { count: result.models.length, latency: result.latencyMs ?? 0 }))
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(localizeError(language, err instanceof Error ? err.message : String(err)))
     } finally {
       setFetchingModels(false)
     }
@@ -303,10 +316,10 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
       setStatusMessage(
         result.success
           ? t(language, 'settings.testSuccess', { latency: result.latencyMs ?? 0 })
-          : t(language, 'settings.testFailed', { message: result.message })
+          : t(language, 'settings.testFailed', { message: localizeError(language, result.message) })
       )
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(localizeError(language, err instanceof Error ? err.message : String(err)))
     } finally {
       setTestingProvider(false)
     }
@@ -329,7 +342,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
         setSaved(true)
         setTimeout(() => setSaved(false), 2000)
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
+        setError(localizeError(language, err instanceof Error ? err.message : String(err)))
       } finally {
         setSaving(false)
       }
@@ -344,7 +357,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(localizeError(language, err instanceof Error ? err.message : String(err)))
     } finally {
       setSaving(false)
     }
@@ -359,7 +372,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
     try {
       const result = await window.joker.imageConfig.fetchModels(selectedImageProvider)
       if (!result.success) {
-        setError(result.error ?? t(language, 'settings.fetchImageModels'))
+        setError(localizeError(language, result.error ?? t(language, 'settings.fetchImageModels')))
         return
       }
       setImageModelsByProvider((current) => ({ ...current, [providerId]: result.models }))
@@ -373,7 +386,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
         setImageModelMenuOpen(true)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(localizeError(language, err instanceof Error ? err.message : String(err)))
     } finally {
       setImageFetchingModels((current) => ({ ...current, [providerId]: false }))
     }
@@ -425,7 +438,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
       const result = await window.joker.imageConfig.test(selectedImageProvider)
       setImageStatus(result.message)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(localizeError(language, err instanceof Error ? err.message : String(err)))
     } finally {
       setImageTesting(false)
     }
@@ -577,6 +590,56 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
                   </button>
                 </div>
 
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  {(selectedProvider.type === 'openai-compatible' || selectedProvider.type === 'ollama') && <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="text-sm text-[var(--color-text-primary)]">{t(language, 'settings.includeUsage')}</p>
+                      <p className="mt-0.5 text-[11px] leading-4 text-[var(--color-text-muted)]">{t(language, 'settings.includeUsageHint')}</p>
+                    </div>
+                    <button type="button" onClick={() => updateProvider({ includeUsage: selectedProvider.includeUsage === false })} className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium ${selectedProvider.includeUsage !== false ? 'bg-[var(--color-accent)] text-[var(--color-bg)]' : 'bg-[var(--color-surface-active)] text-[var(--color-text-secondary)]'}`}>
+                      {selectedProvider.includeUsage !== false ? t(language, 'settings.enabled') : t(language, 'settings.disabled')}
+                    </button>
+                  </div>}
+                  <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="text-sm text-[var(--color-text-primary)]">{t(language, 'settings.promptCache')}</p>
+                      <p className="mt-0.5 text-[11px] leading-4 text-[var(--color-text-muted)]">{t(language, 'settings.promptCacheHint')}</p>
+                    </div>
+                    <button type="button" onClick={() => updateProvider({ promptCache: selectedProvider.promptCache === false })} className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium ${selectedProvider.promptCache !== false ? 'bg-[var(--color-accent)] text-[var(--color-bg)]' : 'bg-[var(--color-surface-active)] text-[var(--color-text-secondary)]'}`}>
+                      {selectedProvider.promptCache !== false ? t(language, 'settings.enabled') : t(language, 'settings.disabled')}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-[var(--color-text-primary)]">{t(language, 'settings.contextOptimization')}</p>
+                      <p className="mt-0.5 text-[11px] leading-4 text-[var(--color-text-muted)]">{t(language, 'settings.contextOptimizationHint')}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setLocalConfig({ ...config, contextOptimizationMode: 'disabled' })}
+                      disabled={(config.contextOptimizationMode ?? 'legacy') === 'disabled'}
+                      className="shrink-0 rounded-md bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/20 disabled:opacity-40"
+                    >
+                      {t(language, 'settings.contextOptimizationDisable')}
+                    </button>
+                  </div>
+                  <label className="mt-3 block text-xs text-[var(--color-text-muted)]">
+                    <span className="mb-1 block">{t(language, 'settings.contextOptimizationMode')}</span>
+                    <select
+                      data-testid="context-optimization-mode"
+                      value={config.contextOptimizationMode ?? 'legacy'}
+                      onChange={(event) => setLocalConfig({ ...config, contextOptimizationMode: event.target.value as ContextOptimizationMode })}
+                      className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
+                    >
+                      {CONTEXT_OPTIMIZATION_MODES.map((mode) => <option key={mode} value={mode}>{t(language, `context.mode.${mode}`)}</option>)}
+                    </select>
+                  </label>
+                  <p className="mt-2 text-[11px] leading-4 text-[var(--color-text-muted)]">{t(language, `settings.contextOptimizationModeHint.${config.contextOptimizationMode ?? 'legacy'}`)}</p>
+                </div>
+
                 <div className="mt-4">
                   <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'settings.modelsPath')}</label>
                   <input value={selectedProvider.modelsPath ?? '/v1/models'} onChange={(event) => updateProvider({ modelsPath: event.target.value })} className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none" />
@@ -608,9 +671,12 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
                   {statusMessage && <p className={`mb-2 text-xs ${statusMessage.includes('不可用') || statusMessage.includes('unavailable') ? 'text-red-400' : 'text-[var(--color-accent)]'}`}>{statusMessage}</p>}
                   <div className="overflow-hidden rounded-md border border-[var(--color-border)]">
                     {selectedProvider.models.map((model) => (
-                      <div key={model.id} className="flex items-center gap-2 border-b border-[var(--color-border)] p-2 last:border-b-0">
-                        <input value={model.name} onChange={(event) => updateModel(model.id, { name: event.target.value, id: event.target.value })} className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none" />
-                        <input type="number" min={1} step={1} value={model.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS} onChange={(event) => updateModel(model.id, { maxContextTokens: Number(event.target.value) })} title={t(language, 'settings.maxContextTokens')} placeholder={String(DEFAULT_MAX_CONTEXT_TOKENS)} className="w-28 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-xs text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none" />
+                      <div key={model.id} className="grid grid-cols-[minmax(0,1fr)_7rem_auto_auto_auto] items-center gap-2 border-b border-[var(--color-border)] p-2 last:border-b-0">
+                        <input value={model.name} onChange={(event) => updateModel(model.id, { name: event.target.value, id: event.target.value })} className="min-w-0 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none" />
+                        <div>
+                          <input type="number" min={1} step={1} value={model.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS} onChange={(event) => updateModel(model.id, { maxContextTokens: Number(event.target.value) })} title={t(language, 'settings.maxContextTokens')} placeholder={String(DEFAULT_MAX_CONTEXT_TOKENS)} className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-xs text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none" />
+                          <p className="mt-1 truncate text-[10px] text-[var(--color-text-muted)]" title={t(language, 'settings.compressionThresholdHint')}>{t(language, 'settings.compressionThreshold')}: {compressionThreshold(model.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS).toLocaleString()}</p>
+                        </div>
                         <button onClick={() => updateProvider({ currentModelId: model.id })} className={`rounded px-2 py-1 text-xs ${selectedProvider.currentModelId === model.id ? 'bg-[var(--color-accent)]/20 text-[var(--color-accent)]' : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]'}`}>
                           {selectedProvider.currentModelId === model.id ? t(language, 'settings.active') : t(language, 'settings.use')}
                         </button>

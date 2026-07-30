@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { existsSync, mkdirSync } from 'node:fs'
-import { diffLines } from 'diff'
+import { diffLines, structuredPatch } from 'diff'
 import type { ToolDefinition, ToolResult, ToolContext } from './registry'
 import { resolveWorkspacePath } from '../store/projects'
 
@@ -89,20 +89,20 @@ export const editTool: ToolDefinition = {
 
     // Generate a diff
     const diff = diffLines(original, updated)
-    const diffText = diff
-      .map((part) => {
-        const prefix = part.added ? '+' : part.removed ? '-' : ' '
-        return part.value
-          .split('\n')
-          .filter((l) => l !== '')
-          .map((l) => `${prefix}${l}`)
-          .join('\n')
-      })
+    let additions = 0
+    let deletions = 0
+    for (const part of diff) {
+      if (part.added) additions += part.count
+      if (part.removed) deletions += part.count
+    }
+    const patch = structuredPatch(filePath, filePath, original, updated, '', '', { context: 2 })
+    const diffText = patch.hunks
+      .map((hunk) => `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join('\n')}`)
       .join('\n')
 
     return {
       output: `Edited ${filePath}`,
-      metadata: { diff: diffText, occurrences }
+      metadata: { diff: diffText, occurrences, additions, deletions }
     }
   }
 }

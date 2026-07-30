@@ -1,6 +1,6 @@
 import { chromium } from 'playwright-core'
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -14,7 +14,7 @@ const logPath = join(runDir, 'fake-provider.log')
 const reportPath = join(runDir, 'report.json')
 const providerPort = 18765 + Math.floor(Math.random() * 500)
 const cdpPort = 19200 + Math.floor(Math.random() * 500)
-const provider = spawn(process.execPath, [join(root, '.qa', 'fake-provider.mjs')], {
+const provider = spawn(process.execPath, [join(root, 'scripts', 'fixtures', 'fake-provider.mjs')], {
   cwd: root,
   env: { ...process.env, PORT: String(providerPort), LOG_PATH: logPath },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -112,6 +112,14 @@ try {
   check('electron exposes remote debugging endpoint', true)
   check('renderer page booted', Boolean(page))
   await page.waitForLoadState('domcontentloaded')
+  await page.waitForSelector('textarea')
+  await page.locator('textarea').fill('Cold-start stream regression')
+  await page.locator('textarea').press('Enter')
+  await page.waitForFunction(() => document.body.innerText.includes('Fake Provider is online.'), undefined, { timeout: 30_000 })
+  check('cold-start textarea send reaches provider and renders assistant reply', true)
+  const providerRequests = (await readFile(logPath, 'utf8')).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+  check('cold-start send creates provider POST', providerRequests.some((entry) => entry.method === 'POST' && entry.url === '/v1/chat/completions'))
+  await screenshot(page, 'cold-start-reply')
   await screenshot(page, 'boot')
   check('JOKER title rendered', await page.locator('body').innerText().then((text) => text.includes('JOKER') || text.includes('New conversation')))
 

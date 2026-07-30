@@ -39,7 +39,7 @@ export function parseSkillFile(path: string, source: SkillSource, fallbackId?: s
     instructions: body,
     allowedMcpTools,
     enabled: false,
-    trusted: source === 'builtin' || source === 'external',
+    trusted: source === 'builtin',
     path
   }
 }

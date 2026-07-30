@@ -32,7 +32,7 @@ const providerLogPath = join(runDir, 'provider.jsonl')
 const reportPath = join(runDir, 'report.json')
 const providerPort = 18865 + Math.floor(Math.random() * 400)
 const cdpPort = 19700 + Math.floor(Math.random() * 400)
-const provider = spawn(process.execPath, [join(root, '.qa', 'stream-provider.mjs')], {
+const provider = spawn(process.execPath, [join(root, 'scripts', 'fixtures', 'stream-provider.mjs')], {
   cwd: root,
   env: { ...process.env, PORT: String(providerPort), LOG_PATH: providerLogPath, STREAM_CHUNKS: String(chunks), STREAM_CHUNK_DELAY_MS: '0', STREAM_ABORT_CHUNK_DELAY_MS: '10' },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -151,7 +151,8 @@ function protocolFor(run, expectedChunks, aborted = false) {
   if (!run) return { pass: false, reason: 'run missing' }
   const messageEnds = run.typeCounts['message-end'] ?? 0
   const contextUsages = run.typeCounts['context-usage'] ?? 0
-  const normalOrder = !run.outOfOrder && run.firstTypes[0] === 'message-start' && messageEnds === (aborted ? 0 : 1) && contextUsages === (aborted ? 0 : 1)
+  const expectedContextUsages = aborted ? 1 : 3
+  const normalOrder = !run.outOfOrder && run.firstTypes[0] === 'message-start' && messageEnds === (aborted ? 0 : 1) && contextUsages === expectedContextUsages
   const terminal = run.terminalCounts.done === 1 && (aborted ? run.terminalCounts.abort <= 1 : run.terminalCounts.abort === 0) && run.lastTypes.at(-1) === 'done'
   const received = aborted ? run.tokenCount <= expectedChunks : run.tokenCount === expectedChunks
   return { pass: normalOrder && terminal && received, normalOrder, terminal, received, receivedTokens: run.tokenCount, expectedTokens: expectedChunks, outOfOrder: run.outOfOrder, terminalCounts: run.terminalCounts }

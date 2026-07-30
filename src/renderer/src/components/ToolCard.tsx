@@ -22,6 +22,8 @@ import type { GeneratedImageRef, ToolCallInfo } from '@shared/types'
 import { useStore } from '../store'
 import { t, toolLabel } from '../i18n'
 import GeneratedImagePreview from './GeneratedImagePreview'
+import { getToolOutputPreview } from '../tool-output-preview'
+import { getEditDiffPreview } from '../edit-diff'
 
 interface Props {
   toolCall: ToolCallInfo
@@ -50,12 +52,25 @@ export default function ToolCard({ toolCall }: Props): React.JSX.Element {
   const Icon = TOOL_ICONS[toolCall.toolName] ?? Wrench
   const isRunning = toolCall.status === 'running'
   const isDone = toolCall.status === 'done'
-  const hasDiff = toolCall.metadata?.diff !== undefined
+  const editDiff = getEditDiffPreview(toolCall.metadata)
+  const diffText = toolCall.toolName === 'Edit'
+    ? editDiff.text
+    : typeof toolCall.metadata?.diff === 'string'
+      ? toolCall.metadata.diff
+      : ''
+  const hasDiff = diffText.length > 0
   const generatedImages = getGeneratedImages(toolCall.metadata)
   const canExpand = toolCall.toolName !== 'GenerateImage' && (Boolean(toolCall.output) || hasDiff)
 
   const language = useStore((s) => s.language)
   const primaryArg = getPrimaryArg(toolCall.toolName, toolCall.input, language)
+  const outputPreview = toolCall.output ? getToolOutputPreview(toolCall.toolName, toolCall.output, language) : null
+  const additions = toolCall.toolName === 'Edit'
+    ? editDiff.additions
+    : getMetadataCount(toolCall.metadata, 'additions')
+  const deletions = toolCall.toolName === 'Edit'
+    ? editDiff.deletions
+    : getMetadataCount(toolCall.metadata, 'deletions')
 
   return (
     <div
@@ -70,16 +85,16 @@ export default function ToolCard({ toolCall }: Props): React.JSX.Element {
       <button
         onClick={() => canExpand && setExpanded(!expanded)}
         aria-expanded={canExpand ? expanded : undefined}
-        className={`flex min-h-12 min-w-0 w-full items-center gap-2.5 px-3 py-2 text-left transition-colors ${
+        className={`flex min-h-6 min-w-0 w-full items-center gap-2 px-2 py-1 text-left transition-colors ${
           canExpand
             ? 'hover:bg-[var(--color-surface-hover)]'
             : 'cursor-default'
         }`}
       >
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--color-bg)] text-[var(--color-text-secondary)]">
-          <Icon size={16} />
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[var(--color-bg)] text-[var(--color-text-secondary)]">
+          <Icon size={14} />
         </span>
-        <span className="shrink-0 whitespace-nowrap rounded-md bg-[var(--color-accent)]/10 px-2 py-1 text-sm font-medium leading-none text-[var(--color-text-primary)]">
+        <span className="shrink-0 whitespace-nowrap rounded-md bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-[12px] font-medium leading-none text-[var(--color-text-primary)]">
           {toolLabel(language, toolCall.toolName)}
         </span>
         {primaryArg && (
@@ -90,7 +105,13 @@ export default function ToolCard({ toolCall }: Props): React.JSX.Element {
             {primaryArg}
           </span>
         )}
-        <span className="ml-auto flex shrink-0 items-center gap-2">
+        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          {toolCall.toolName === 'Edit' && isDone && (
+            <span className="flex items-center gap-1 font-mono text-[10px] tabular-nums">
+              <span className="text-green-400">+{additions}</span>
+              <span className="text-red-400">-{deletions}</span>
+            </span>
+          )}
           {toolCall.metadata?.source === 'http' && isDone && (
             <span className="hidden rounded-full bg-[var(--color-bg)] px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-[var(--color-text-muted)] sm:inline">
               HTTP
@@ -120,15 +141,13 @@ export default function ToolCard({ toolCall }: Props): React.JSX.Element {
       )}
 
       {canExpand && expanded && (
-        <div className="border-t border-[var(--color-border)]/70 px-3 py-2.5">
+        <div className="border-t border-[var(--color-border)]/70 px-2 py-1.5">
           {/* Output */}
-          {toolCall.output && (
+          {outputPreview && !(toolCall.toolName === 'Edit' && hasDiff) && (
             <div className={hasDiff ? 'mb-2' : undefined}>
               <p className="mb-1 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'tool.output')}</p>
-                <pre className="max-w-full overflow-hidden whitespace-pre-wrap break-words rounded bg-[var(--color-bg)] p-2 text-xs text-[var(--color-text-secondary)]">
-                {toolCall.output.length > 2000
-                  ? toolCall.output.slice(0, 2000) + `\n${t(language, 'tool.truncated')}`
-                  : toolCall.output}
+              <pre className="max-w-full overflow-hidden whitespace-pre-wrap break-words rounded bg-[var(--color-bg)] p-2 text-xs text-[var(--color-text-secondary)]">
+                {outputPreview.text}
               </pre>
             </div>
           )}
@@ -139,7 +158,7 @@ export default function ToolCard({ toolCall }: Props): React.JSX.Element {
               <p className="mb-1 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'tool.diff')}</p>
               <pre className="max-w-full overflow-hidden whitespace-pre-wrap break-words rounded bg-[var(--color-bg)] p-2 text-xs">
                 <code className="font-mono">
-                  {(toolCall.metadata?.diff as string)
+                  {diffText
                     .split('\n')
                     .map((line, i) => (
                       <span
@@ -163,6 +182,11 @@ export default function ToolCard({ toolCall }: Props): React.JSX.Element {
       )}
     </div>
   )
+}
+
+function getMetadataCount(metadata: Record<string, unknown> | undefined, key: string): number {
+  const value = metadata?.[key]
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
 }
 
 function getGeneratedImages(metadata: Record<string, unknown> | undefined): GeneratedImageRef[] {

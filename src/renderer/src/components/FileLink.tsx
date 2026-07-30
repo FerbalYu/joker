@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Check, Copy, FileText, FolderOpen } from 'lucide-react'
 import { useStore } from '../store'
 import { classifyLink } from '../url-preview'
+import { localizeError } from '../i18n'
 
 export default function FileLink({ url, onCopy }: { url: string; onCopy?: (url: string) => void }): React.JSX.Element {
   const language = useStore((s) => s.language)
@@ -21,7 +22,7 @@ export default function FileLink({ url, onCopy }: { url: string; onCopy?: (url: 
     setError(null)
     const action = isMarkdown ? window.joker.markdown.openFile(url) : window.joker.file.reveal(url)
     void action.then((result) => {
-      if (!result.success) setError(result.error ?? (language === 'zh' ? '打开失败' : 'Unable to open'))
+      if (!result.success) setError(localizeError(language, result.error ?? (language === 'zh' ? '打开失败' : 'Unable to open')))
     })
   }
 
