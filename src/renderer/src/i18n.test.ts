@@ -61,6 +61,12 @@ void test('research mode, approval, report and progress translations exist in bo
       'research.report.saveFailed',
       'research.sources',
       'research.chart.data',
+      'research.chart.xAxis',
+      'research.chart.yAxis',
+      'research.chart.type.bar',
+      'research.chart.type.line',
+      'research.chart.type.pie',
+      'research.chart.type.scatter',
       'research.progress.synthesizing',
       'approval.description.researchWebAccess'
     ]) assert.notEqual(t(language, key), key)

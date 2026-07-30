@@ -119,13 +119,16 @@ function researchResponse(messages) {
       ],
       charts: [{
         type: 'bar',
-        title: 'Deterministic verification counts',
-        xLabel: 'Artifact',
-        yLabel: 'Count',
+        title: '公开网页深度研究流程中的确定性验证产物、权威来源引用、数据图表与会话持久化结果完整统计',
+        xLabel: '验证产物名称（包含来源、章节、引用与图表持久化状态）',
+        yLabel: '已完成并通过校验的项目数量（项）',
         sourceIds: ['S1'],
         data: [
-          { label: 'Verified source', value: 1 },
-          { label: 'Report sections', value: 2 }
+          { label: '已验证公开来源', value: 1 },
+          { label: '报告章节', value: 2 },
+          { label: '紧凑引用', value: 2 },
+          { label: '持久化图表', value: 1 },
+          { label: '可下载报告', value: 1 }
         ]
       }]
     }, RESEARCH_CALLS.PresentResearchReport)

@@ -15,6 +15,9 @@ const reportPath = join(runDir, 'report.json')
 const providerPort = 20765 + Math.floor(Math.random() * 500)
 const cdpPortBase = 21300 + Math.floor(Math.random() * 400)
 const reportTitle = 'Example Domain Deterministic Research Report'
+const chartTitle = '公开网页深度研究流程中的确定性验证产物、权威来源引用、数据图表与会话持久化结果完整统计'
+const chartXLabel = '验证产物名称（包含来源、章节、引用与图表持久化状态）'
+const chartYLabel = '已完成并通过校验的项目数量（项）'
 const checks = []
 const screenshots = []
 const consoleEvents = []
@@ -178,16 +181,51 @@ async function inspectRenderedReport(page) {
   const articleText = await article.innerText()
   const headings = await article.locator('h3').allTextContents()
   const citation = article.getByRole('button', { name: /S1/ }).first()
-  const canvas = article.locator('canvas').first()
+  const chart = article.locator('[data-research-chart]').first()
+  await chart.waitFor({ state: 'visible', timeout: 20_000 })
+  const chartTitleElement = chart.locator('[data-chart-title]')
+  const axisMeta = chart.locator('[data-chart-axis-meta]')
+  const canvas = chart.locator('canvas').first()
   await canvas.waitFor({ state: 'visible', timeout: 20_000 })
   await waitFor(async () => canvas.evaluate((element) => element.width > 0 && element.height > 0 && element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0), 10_000, 'non-zero ECharts canvas')
+  const chartLayout = await chart.evaluate((element) => {
+    const title = element.querySelector('[data-chart-title]')
+    const metadata = element.querySelector('[data-chart-axis-meta]')
+    const canvas = element.querySelector('canvas')
+    if (!(title instanceof HTMLElement) || !(metadata instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement)) return null
+    const sectionRect = element.getBoundingClientRect()
+    const titleRect = title.getBoundingClientRect()
+    const metadataRect = metadata.getBoundingClientRect()
+    const canvasRect = canvas.getBoundingClientRect()
+    const titleStyle = getComputedStyle(title)
+    return {
+      section: { top: sectionRect.top, bottom: sectionRect.bottom, width: sectionRect.width },
+      title: { top: titleRect.top, bottom: titleRect.bottom, width: titleRect.width, height: titleRect.height, lineHeight: Number.parseFloat(titleStyle.lineHeight) },
+      metadata: { top: metadataRect.top, bottom: metadataRect.bottom, width: metadataRect.width, height: metadataRect.height },
+      canvas: { top: canvasRect.top, bottom: canvasRect.bottom, width: canvasRect.width, height: canvasRect.height },
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth
+    }
+  })
   const canvasMetrics = await canvas.evaluate((element) => ({
     width: element.width,
     height: element.height,
     clientWidth: element.getBoundingClientRect().width,
     clientHeight: element.getBoundingClientRect().height
   }))
-  return { article, articleText, headings, citation, canvas, canvasMetrics }
+  return {
+    article,
+    articleText,
+    headings,
+    citation,
+    chart,
+    chartTitleElement,
+    chartTitleText: await chartTitleElement.innerText(),
+    axisMetaText: await axisMeta.innerText(),
+    chartLayout,
+    canvas,
+    canvasMetrics
+  }
 }
 
 try {
@@ -281,7 +319,7 @@ try {
   const firstTurn = chatEntries[0]
   const firstToolNames = toolNamesFromProviderEntry(firstTurn)
   const emittedToolNames = [...new Set(chatEntries.flatMap((entry) => messageToolNames(entry.body?.messages)))]
-  check('preload runMode reaches main research-only capability set', JSON.stringify(firstToolNames.sort()) === JSON.stringify(['PresentResearchReport', 'TodoWrite', 'WebRead', 'WebSearch'].sort()), firstToolNames)
+  check('preload runMode reaches main research capability set', JSON.stringify(firstToolNames.sort()) === JSON.stringify(['ContextRetrieve', 'PresentResearchReport', 'TodoWrite', 'WebRead', 'WebSearch'].sort()), firstToolNames)
   check('research system prompt includes the hard 6/12 budget', firstTurn?.body?.messages?.some((message) => message.role === 'system' && /at most 6 WebSearch calls and 12 WebRead calls/.test(String(message.content))), firstTurn?.body?.messages?.[0]?.content)
   check('provider history records the deterministic research tool sequence', ['TodoWrite', 'WebSearch', 'WebRead', 'PresentResearchReport'].every((name) => emittedToolNames.includes(name)), emittedToolNames)
   check('only one ResearchWebAccess request occurs for the run', await page.evaluate(() => window.__jokerQaApprovalRequests.length) === 1, await page.evaluate(() => window.__jokerQaApprovalRequests))
@@ -291,11 +329,16 @@ try {
   const downloadButton = rendered.article.getByRole('button', { name: /下载 Markdown|Download Markdown/i })
   check('valid report exposes an accessible Markdown download button', await downloadButton.isVisible() && !await downloadButton.isDisabled())
   check('report renders at least two sections', rendered.headings.includes('Purpose and identity') && rendered.headings.includes('Smoke-test evidence'), rendered.headings)
+  check('chart keeps the complete long title outside the canvas', rendered.chartTitleText === chartTitle && rendered.chartLayout?.title.bottom <= rendered.chartLayout?.canvas.top, { title: rendered.chartTitleText, layout: rendered.chartLayout })
+  check('chart exposes complete external axis metadata', rendered.axisMetaText.includes(chartXLabel) && rendered.axisMetaText.includes(chartYLabel) && /横轴|X axis/i.test(rendered.axisMetaText) && /纵轴|Y axis/i.test(rendered.axisMetaText), rendered.axisMetaText)
+  check('axis metadata stays outside the canvas', rendered.chartLayout?.metadata.bottom <= rendered.chartLayout?.canvas.top, rendered.chartLayout)
+  check('long chart title wraps instead of clipping', Number.isFinite(rendered.chartLayout?.title.lineHeight) && rendered.chartLayout.title.height > rendered.chartLayout.title.lineHeight, rendered.chartLayout)
+  check('chart card has no horizontal overflow', rendered.chartLayout?.scrollWidth <= rendered.chartLayout?.clientWidth, rendered.chartLayout)
   check('source S1 and compact citations render', rendered.articleText.includes('[S1]') && await rendered.citation.innerText() === '[S1]')
   check('ECharts canvas has non-zero dimensions', rendered.canvasMetrics.width > 0 && rendered.canvasMetrics.height > 0 && rendered.canvasMetrics.clientWidth > 0 && rendered.canvasMetrics.clientHeight > 0, rendered.canvasMetrics)
   const dataSummary = rendered.article.getByText(/查看数据表|View data table/i).first()
   await dataSummary.click()
-  check('chart data table expands', await rendered.article.locator('table').isVisible() && (await rendered.article.locator('table').innerText()).includes('Verified source'))
+  check('chart data table expands', await rendered.article.locator('table').isVisible() && (await rendered.article.locator('table').innerText()).includes('已验证公开来源'))
   const toolGroupText = await page.locator('button[aria-expanded]').allTextContents()
   check('report is not inside the ordinary collapsible tool group', await rendered.article.evaluate((article) => ![...article.querySelectorAll('button[aria-expanded]')].some((button) => /工具调用|tool calls/i.test(button.textContent ?? ''))) && !toolGroupText.some((text) => /PresentResearchReport/.test(text)), toolGroupText)
 
@@ -334,6 +377,8 @@ try {
   check('session restart restores report metadata and source', restoredReport?.title === reportTitle && restoredReport?.sources?.[0]?.sourceId === 'S1' && restoredReport?.sources?.[0]?.hostname === 'example.com', restoredReport)
   const restored = await inspectRenderedReport(page)
   check('restart re-renders report title and source S1', restored.articleText.includes(reportTitle) && restored.articleText.includes('[S1]'))
+  check('restart restores complete chart title and axis metadata', restored.chartTitleText === chartTitle && restored.axisMetaText.includes(chartXLabel) && restored.axisMetaText.includes(chartYLabel), { title: restored.chartTitleText, axisMeta: restored.axisMetaText })
+  check('restart preserves external chart layout without overflow', restored.chartLayout?.metadata.bottom <= restored.chartLayout?.canvas.top && restored.chartLayout?.scrollWidth <= restored.chartLayout?.clientWidth, restored.chartLayout)
   check('restart restores the accessible Markdown download button', await restored.article.getByRole('button', { name: /下载 Markdown|Download Markdown/i }).isVisible())
   check('restart re-renders non-zero ECharts canvas', restored.canvasMetrics.width > 0 && restored.canvasMetrics.height > 0 && restored.canvasMetrics.clientWidth > 0 && restored.canvasMetrics.clientHeight > 0, restored.canvasMetrics)
   await screenshot(page, 'research-report-restart', restored.article)
