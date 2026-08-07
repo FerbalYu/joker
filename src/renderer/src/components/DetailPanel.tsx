@@ -2,17 +2,24 @@ import { useEffect, useState } from 'react'
 import { PanelRightClose, PanelRightOpen, ShieldAlert, Circle, CircleCheck, CircleDot } from 'lucide-react'
 import { useStore } from '../store'
 import { t } from '../i18n'
-import ApprovalPanel from './ApprovalPanel'
+import type { GoalState, GoalStatus, StreamUsage } from '@shared/types'
 import ToolCallList from './ToolCallList'
 import { latestTodoState } from '../detail-todos'
 import { visibleChatTools } from '../tool-visibility'
 import { deriveResearchProgress } from '../research-progress'
 import { contextOptimizationView } from '../context-optimization-ui'
+import { toRunActivityViewModel, formatElapsedDuration } from '../run-activity'
+import { subagentActivitiesForView } from '../subagent-activity'
+import SubagentActivityList from './SubagentActivityList'
 
-export default function DetailPanel(): React.JSX.Element {
+interface Props {
+  onGoalAction?: (action: 'pause' | 'resume' | 'clear') => void | Promise<void>
+}
+
+export default function DetailPanel({ onGoalAction }: Props): React.JSX.Element {
   const approvalQueue = useStore((s) => s.approvalQueue)
-  const selectedApproval = useStore((s) => s.selectedApproval)
   const pendingToolCalls = useStore((s) => s.pendingToolCalls)
+  const liveSubagentActivities = useStore((s) => s.subagentActivities)
   const messages = useStore((s) => s.messages)
   const activeSessionId = useStore((s) => s.activeSessionId)
   const sessions = useStore((s) => s.sessions)
@@ -22,17 +29,33 @@ export default function DetailPanel(): React.JSX.Element {
   const streamProviderName = useStore((s) => s.streamProviderName)
   const streamModelName = useStore((s) => s.streamModelName)
   const streamRunMode = useStore((s) => s.streamRunMode)
+  const runActivity = useStore((s) => s.runActivity)
   const language = useStore((s) => s.language)
   const [collapsed, setCollapsed] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1180)
   const [compactHidden, setCompactHidden] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1180)
+  const [elapsedNow, setElapsedNow] = useState(Date.now())
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeApprovals = approvalQueue.filter((approval) => approval.sessionId === activeSessionId)
   const activePendingToolCalls = activeSessionId ? pendingToolCalls : []
-  const visiblePendingToolCalls = visibleChatTools(activePendingToolCalls)
+  const visiblePendingToolCalls = visibleChatTools(activePendingToolCalls).filter((tool) => tool.toolName !== 'Agent')
+  const subagentActivities = subagentActivitiesForView(activeSessionId ? liveSubagentActivities : [], messages)
   const todoState = latestTodoState(activePendingToolCalls, messages)
-  const activeSelectedApproval = selectedApproval?.sessionId === activeSessionId ? selectedApproval : null
   const researchProgress = deriveResearchProgress(activePendingToolCalls, messages, streaming, streamRunMode)
   const contextOptimization = contextUsage ? contextOptimizationView(contextUsage) : null
+  const activityView = toRunActivityViewModel(runActivity, language)
+  const activityStartedAt = activeSession?.activity.runId === runActivity.runId
+    ? activeSession.activity.startedAt
+    : undefined
+  const elapsedDuration = streaming && activityStartedAt !== undefined
+    ? formatElapsedDuration(elapsedNow - activityStartedAt)
+    : null
+
+  useEffect(() => {
+    if (!streaming || activityStartedAt === undefined) return
+    setElapsedNow(Date.now())
+    const timer = window.setInterval(() => setElapsedNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [activityStartedAt, streaming])
 
   useEffect(() => {
     const media = window.matchMedia('(max-width: 1179px)')
@@ -69,12 +92,17 @@ export default function DetailPanel(): React.JSX.Element {
           </section>
 
           <section className="space-y-2">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
               <p className="text-xs uppercase tracking-widest text-[var(--color-text-muted)]">{t(language, 'detail.status')}</p>
-              <span className={`text-xs ${streaming ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-secondary)]'}`}>{t(language, streaming ? 'detail.running' : 'detail.idle')}</span>
+              <div className="flex min-w-0 items-center gap-2">
+                {elapsedDuration && <span data-detail-run-duration className="font-mono text-[10px] tabular-nums text-[var(--color-text-muted)]" title={t(language, 'detail.elapsed')}>{elapsedDuration}</span>}
+                <span data-detail-run-status={activityView.phase} className={`truncate text-xs ${streaming ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-secondary)]'}`}>{activityView.label}</span>
+              </div>
             </div>
             {(streamProviderName || streamModelName) && <p className="text-xs text-[var(--color-text-secondary)]">{streamProviderName ?? '—'} / {streamModelName ?? '—'}</p>}
           </section>
+
+          {activeSession.goal && <GoalCard goal={activeSession.goal} language={language} streaming={streaming} onAction={onGoalAction} />}
 
           {contextUsage && <section>
             <div className="flex items-center justify-between text-xs">
@@ -138,21 +166,68 @@ export default function DetailPanel(): React.JSX.Element {
             </div>
           </section>}
 
+          {subagentActivities.length > 0 && <section>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-xs uppercase tracking-widest text-[var(--color-text-muted)]">{t(language, 'detail.subagents')}</p>
+              <span className="font-mono text-[10px] tabular-nums text-[var(--color-text-secondary)]">{subagentActivities.length}</span>
+            </div>
+            <SubagentActivityList activities={subagentActivities} language={language} now={elapsedNow} />
+          </section>}
+
           {visiblePendingToolCalls.length > 0 && <section>
             <p className="mb-2 text-xs uppercase tracking-widest text-[var(--color-text-muted)]">{t(language, 'detail.tools')}</p>
             <ToolCallList toolCalls={visiblePendingToolCalls} />
           </section>}
 
-          {activeApprovals.length === 0 && visiblePendingToolCalls.length === 0 && !todoState && !contextUsage && !latestUsage && <p className="text-sm text-[var(--color-text-muted)]">{t(language, 'detail.empty')}</p>}
-
-          {activeSelectedApproval && <section className="border-t border-[var(--color-border)] pt-4">
-            <p className="mb-2 text-xs uppercase tracking-widest text-[var(--color-text-muted)]">{t(language, 'detail.approval')}</p>
-            <ApprovalPanel key={activeSelectedApproval.requestId} approval={activeSelectedApproval} />
-          </section>}
+          {activeApprovals.length === 0 && visiblePendingToolCalls.length === 0 && subagentActivities.length === 0 && !todoState && !contextUsage && !latestUsage && <p className="text-sm text-[var(--color-text-muted)]">{t(language, 'detail.empty')}</p>}
         </div>}
       </div>}
     </aside>
   )
+}
+
+function GoalCard({ goal, language, streaming, onAction }: { goal: GoalState; language: 'zh' | 'en'; streaming: boolean; onAction?: Props['onGoalAction'] }): React.JSX.Element {
+  const total = usageTotal(goal.cumulativeUsage)
+  const canPause = streaming && (goal.status === 'executing' || goal.status === 'validating' || goal.status === 'queued')
+  const hardBlocked = goal.status === 'blocked' && (goal.stopReason === 'max-rounds' || goal.stopReason === 'token-limit')
+  const canResume = !streaming && !hardBlocked && (goal.status === 'paused' || goal.status === 'interrupted' || goal.status === 'blocked')
+  const canClear = !streaming || goal.status !== 'executing'
+  return <section role="status" aria-live="polite" data-goal-card data-goal-status={goal.status} className="rounded-lg bg-[var(--color-bg)] p-3 shadow-[inset_0_0_0_1px_var(--color-border)]">
+    <div className="flex items-center justify-between gap-2">
+      <p className="text-xs uppercase tracking-widest text-[var(--color-text-muted)]">{t(language, 'detail.goal')}</p>
+      <span className={`text-xs font-medium ${goal.status === 'completed' ? 'text-emerald-400' : goal.status === 'blocked' ? 'text-amber-400' : 'text-[var(--color-accent)]'}`}>{goalStatusLabel(language, goal.status)}</span>
+    </div>
+    <p className="mt-2 break-words text-xs text-[var(--color-text-primary)]">{goal.objective}</p>
+    <div className="mt-2 grid grid-cols-2 gap-1 text-[10px] text-[var(--color-text-muted)]">
+      <span>{t(language, 'detail.goalRound', { round: goal.currentRound, max: goal.maxRounds })}</span>
+      <span className="text-right tabular-nums">{goal.tokenLimit === undefined
+        ? t(language, 'detail.goalUsageUnlimited', { used: total.toLocaleString() })
+        : t(language, 'detail.goalBudget', { used: total.toLocaleString(), limit: goal.tokenLimit.toLocaleString() })}</span>
+    </div>
+    {goal.stopReason && <p className="mt-1 break-words text-[10px] text-amber-400">{t(language, 'detail.goalStopReason', { reason: goalStopReasonLabel(language, goal.stopReason) })}</p>}
+    {goal.feedback && <p className="mt-1 break-words text-[10px] text-amber-400">{goal.feedback}</p>}
+    {onAction && <div className="mt-3 flex flex-wrap gap-1.5">
+      {canPause && <GoalButton label={t(language, 'detail.goalPause')} onClick={() => onAction('pause')} />}
+      {canResume && <GoalButton label={t(language, 'detail.goalResume')} onClick={() => onAction('resume')} />}
+      {canClear && <GoalButton label={t(language, 'detail.goalClear')} onClick={() => onAction('clear')} muted />}
+    </div>}
+  </section>
+}
+
+function GoalButton({ label, onClick, muted = false }: { label: string; onClick: () => void | Promise<void>; muted?: boolean }): React.JSX.Element {
+  return <button type="button" onClick={() => void onClick()} className={`rounded-md border px-2 py-1 text-[10px] transition ${muted ? 'border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]' : 'border-[var(--color-accent)]/50 bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20'}`}>{label}</button>
+}
+
+function usageTotal(usage: StreamUsage): number {
+  return Math.max(usage.totalTokens ?? 0, (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0))
+}
+
+function goalStatusLabel(language: 'zh' | 'en', status: GoalStatus): string {
+  return t(language, `goal.status.${status}`)
+}
+
+function goalStopReasonLabel(language: 'zh' | 'en', reason: NonNullable<GoalState['stopReason']>): string {
+  return t(language, `goal.stopReason.${reason}`)
 }
 
 function DetailMetric({ label, value, mono = false }: { label: string; value: string; mono?: boolean }): React.JSX.Element {

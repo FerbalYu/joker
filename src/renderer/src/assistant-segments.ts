@@ -23,6 +23,13 @@ export function appendToolSegment(segments: AssistantSegment[], toolCall: ToolCa
   return next
 }
 
+export function mergeAdjacentSegments(segments: AssistantSegment[]): AssistantSegment[] {
+  return segments.reduce<AssistantSegment[]>((merged, segment) => {
+    if (segment.type === 'text') return appendTextSegment(merged, segment.text)
+    return segment.tools.reduce((next, tool) => appendToolSegment(next, tool), merged)
+  }, [])
+}
+
 export function updateToolInSegments(
   segments: AssistantSegment[],
   matcher: (tool: ToolCallInfo) => boolean,

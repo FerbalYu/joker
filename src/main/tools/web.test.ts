@@ -16,6 +16,13 @@ void test('public URL policy rejects private, metadata, ULA, link-local, and map
     assert.equal(isPrivateAddress(address), true, address)
   }
 })
+
+void test('public URL policy rejects the 198.18/15 benchmarking range and mapped forms', () => {
+  assert.equal(isPrivateAddress('198.18.0.76'), true)
+  assert.equal(isPrivateAddress('198.19.255.255'), true)
+  assert.equal(isPrivateAddress('::ffff:198.18.0.76'), true)
+  assert.equal(isPrivateAddress('::ffff:c612:4c'), true)
+})
 void test('normalizeOptions clamps request limits', () => {
   assert.deepEqual(normalizeOptions({ timeoutMs: 1, maxChars: 999999 }), {
     timeoutMs: 3_000,

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import type { ChatMessage, ToolCallInfo } from '@shared/types'
+import type { ChatMessage } from '@shared/types'
 import {
   buildMinimapEntries,
   calculateViewportIndicator,
@@ -12,18 +12,35 @@ interface Props {
   messages: ChatMessage[]
   streamText: string
   streaming: boolean
-  pendingToolCalls: ToolCallInfo[]
   scrollRef: RefObject<HTMLDivElement | null>
 }
 
-export default function MessageMinimap({ messages, streamText, streaming, pendingToolCalls, scrollRef }: Props): React.JSX.Element | null {
+export default function MessageMinimap({ messages, streamText, streaming, scrollRef }: Props): React.JSX.Element | null {
   const trackRef = useRef<HTMLDivElement>(null)
+  const latestStreamTextRef = useRef(streamText)
   const [trackHeight, setTrackHeight] = useState(0)
+  const [previewStreamText, setPreviewStreamText] = useState(streamText)
   const [indicator, setIndicator] = useState<ViewportIndicator>({ top: 0, height: 0 })
   const entries = useMemo(
-    () => buildMinimapEntries(messages, streamText, streaming, trackHeight),
-    [messages, streamText, streaming, trackHeight]
+    () => buildMinimapEntries(messages, previewStreamText, streaming, trackHeight),
+    [messages, previewStreamText, streaming, trackHeight]
   )
+
+  useEffect(() => {
+    latestStreamTextRef.current = streamText
+  }, [streamText])
+
+  useEffect(() => {
+    if (!streaming) {
+      setPreviewStreamText('')
+      return
+    }
+    setPreviewStreamText(latestStreamTextRef.current)
+    const timer = window.setInterval(() => {
+      setPreviewStreamText((current) => current === latestStreamTextRef.current ? current : latestStreamTextRef.current)
+    }, 160)
+    return () => window.clearInterval(timer)
+  }, [streaming])
 
   useEffect(() => {
     const scrollElement = scrollRef.current
@@ -48,7 +65,8 @@ export default function MessageMinimap({ messages, streamText, streaming, pendin
     const observer = new ResizeObserver(update)
     observer.observe(scrollElement)
     observer.observe(trackElement)
-    if (scrollElement.firstElementChild) observer.observe(scrollElement.firstElementChild)
+    const contentElement = scrollElement.querySelector('[data-message-stream-content]')
+    if (contentElement) observer.observe(contentElement)
     scrollElement.addEventListener('scroll', update, { passive: true })
     update()
 
@@ -57,7 +75,7 @@ export default function MessageMinimap({ messages, streamText, streaming, pendin
       observer.disconnect()
       scrollElement.removeEventListener('scroll', update)
     }
-  }, [messages, pendingToolCalls, scrollRef, streamText, streaming])
+  }, [scrollRef])
 
   if (entries.length === 0) return null
 

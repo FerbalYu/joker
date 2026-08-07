@@ -103,6 +103,97 @@ void test('buildToolSet audits the complete successful lifecycle', async () => {
   assert.equal(events[3]?.resultPreview, 'completed output')
 })
 
+void test('generated tools reuse approval, audit, and observability lifecycle', async () => {
+  const audit: Array<Record<string, unknown>> = []
+  const observed: Array<{ status: string; toolCallId?: string }> = []
+  const toolSet = buildToolSet([{
+    name: 'GeneratedFixture',
+    description: 'generated fixture',
+    source: {
+      type: 'generated',
+      toolId: 'tool-1',
+      name: 'Tool 1',
+      versionId: 'v1',
+      fingerprint: 'a'.repeat(64),
+      validationReportId: 'report-1',
+      pointerRevision: 1,
+      capabilityRevision: 1,
+      runtimeQualificationLevel: 'L2'
+    },
+    risk: 'read',
+    inputSchema: z.object({}),
+    execute: async () => ({ output: 'generated output' })
+  }], {
+    workspacePath: process.cwd(),
+    sessionId: 'session-generated',
+    runId: 'run-generated',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'generated project-read' }),
+    auditWriter: (event) => audit.push(event),
+    onToolCall: (event) => { observed.push(event) }
+  })
+  const result = await (toolSet.GeneratedFixture as unknown as { execute: (input: Record<string, unknown>, options: { toolCallId: string }) => Promise<{ output: string }> }).execute({}, { toolCallId: 'call-generated' })
+  assert.equal(result.output, 'generated output')
+  assert.deepEqual(audit.map((event) => [event.source, event.sourceId, event.versionId, event.validationReportId, event.stage]), [
+    ['generated', 'tool-1', 'v1', 'report-1', 'proposed'],
+    ['generated', 'tool-1', 'v1', 'report-1', 'approval_resolved'],
+    ['generated', 'tool-1', 'v1', 'report-1', 'started'],
+    ['generated', 'tool-1', 'v1', 'report-1', 'finished']
+  ])
+  assert.deepEqual(observed.map((event) => [event.toolCallId, event.status]), [
+    ['call-generated', 'running'],
+    ['call-generated', 'done']
+  ])
+})
+
+void test('host approval grant propagates only after the approval gate resolves', async () => {
+  let observedGrant: ToolContext['hostApprovalGrant']
+  const grant = {
+    requestId: 'request-1',
+    webContentsId: 17,
+    sessionId: 'session-grant',
+    runId: 'run-grant',
+    toolName: 'ToolPromote',
+    requestHash: 'a'.repeat(64),
+    approvedAt: 10
+  }
+  const toolSet = buildToolSet([{
+    name: 'ToolPromote',
+    description: 'promotion grant propagation',
+    inputSchema: z.object({}),
+    risk: 'write_local',
+    execute: async (_input, context) => {
+      observedGrant = context.hostApprovalGrant
+      return { output: 'ok' }
+    }
+  }], {
+    workspacePath: null,
+    sessionId: 'session-grant',
+    runId: 'run-grant',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'write_local', reason: 'host approved', hostGrant: grant })
+  })
+
+  await (toolSet.ToolPromote as unknown as { execute: (input: Record<string, unknown>) => Promise<{ output: string }> }).execute({})
+  assert.deepEqual(observedGrant, grant)
+})
+
+void test('buildToolSet rejects duplicate tool names instead of overwriting a capability', () => {
+  assert.throws(() => buildToolSet([{
+    name: 'Duplicate',
+    description: 'first',
+    inputSchema: z.object({}),
+    execute: async () => ({ output: 'first' })
+  }, {
+    name: 'Duplicate',
+    description: 'second',
+    inputSchema: z.object({}),
+    execute: async () => ({ output: 'second' })
+  }], {
+    workspacePath: process.cwd(),
+    sessionId: 'session-duplicate',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test' })
+  }), /Duplicate ToolDefinition name/)
+})
+
 void test('buildToolSet records denial without executing or starting the tool', async () => {
   const events: Array<Record<string, unknown>> = []
   let executed = false
@@ -142,4 +233,30 @@ void test('audit writer failures never change tool execution', async () => {
 
   const result = await (toolSet.AuditFailure as unknown as { execute: (input: Record<string, unknown>) => Promise<{ output: string }> }).execute({})
   assert.equal(result.output, 'ok')
+})
+
+void test('tool observability reports running and completion with the provider tool call id', async () => {
+  const events: Array<{ toolCallId?: string; status: string; durationMs?: number }> = []
+  const toolSet = buildToolSet([{
+    name: 'Observed',
+    description: 'observable tool',
+    inputSchema: z.object({ value: z.string() }),
+    execute: async () => ({ output: 'observed' })
+  }], {
+    workspacePath: process.cwd(),
+    sessionId: 'session-observed',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test approval' }),
+    onToolCall: (event) => { events.push(event) }
+  })
+
+  const result = await (toolSet.Observed as unknown as {
+    execute: (input: Record<string, unknown>, options: { toolCallId: string }) => Promise<{ output: string }>
+  }).execute({ value: 'x' }, { toolCallId: 'call-observed' })
+
+  assert.equal(result.output, 'observed')
+  assert.deepEqual(events.map((event) => [event.toolCallId, event.status]), [
+    ['call-observed', 'running'],
+    ['call-observed', 'done']
+  ])
+  assert.equal(typeof events[1]?.durationMs, 'number')
 })

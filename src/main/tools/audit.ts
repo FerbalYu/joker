@@ -12,8 +12,14 @@ export interface ToolAuditEvent {
   sessionId: string
   runId?: string
   tool: string
-  source: 'builtin' | 'mcp'
+  source: 'builtin' | 'mcp' | 'generated'
   sourceId?: string
+  toolId?: string
+  versionId?: string
+  fingerprint?: string
+  validationReportId?: string
+  pointerRevision?: number
+  capabilityRevision?: number
   risk: ToolRisk
   stage: ToolAuditStage
   status: ToolAuditStatus

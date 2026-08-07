@@ -1,124 +1,202 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { useStore } from './store'
+import { isSessionRuntimeBusy, useStore } from './store'
 import type { ChatMessage, StreamUsage } from '@shared/types'
 
-void test('store restores sessions and clears transient stream state', () => {
-  const message: ChatMessage = { id: 'm1', role: 'user', content: 'hello', createdAt: 1 }
-  useStore.getState().setMessages([message])
-  useStore.getState().startStream()
-  useStore.getState().appendToken('partial')
-  useStore.getState().resetTransientState()
+const sessionA = 'session-a'
+const sessionB = 'session-b'
 
-  assert.deepEqual(useStore.getState().messages, [message])
-  assert.equal(useStore.getState().streamText, '')
-  assert.equal(useStore.getState().streaming, false)
-  assert.equal(useStore.getState().streamStartedAt, null)
-  assert.deepEqual(useStore.getState().pendingToolCalls, [])
-})
-
-void test('startStream clears stale context and usage state', () => {
-  useStore.getState().setContextUsage({
-    inputTokens: 10,
-    maxTokens: 100,
-    percent: 10,
-    messageTokens: 10,
-    mcpTokens: 0,
-    systemTokens: 0,
-    toolTokens: 0,
-    skillTokens: 0,
-    systemPromptTokens: 0,
-    otherTokens: 0
+function resetStore(): void {
+  useStore.setState({
+    messages: [],
+    sessionRuntimes: {},
+    activeSessionId: null,
+    approvalQueue: [],
+    selectedApproval: null
   })
-  useStore.getState().setLatestUsage({ inputTokens: 10 })
-  useStore.getState().startStream()
-  assert.equal(useStore.getState().contextUsage, null)
-  assert.equal(useStore.getState().latestUsage, null)
-  useStore.getState().resetTransientState()
+  useStore.getState().setActiveSession(sessionA)
+}
+
+void test('selected UI projects its session runtime while background streams remain isolated', () => {
+  resetStore()
+  useStore.getState().startStream(sessionA)
+  useStore.getState().appendToken(sessionA, 'foreground')
+  useStore.getState().startStream(sessionB)
+  useStore.getState().appendToken(sessionB, 'background')
+
+  assert.equal(useStore.getState().streamText, 'foreground')
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.streamText, 'background')
+
+  useStore.getState().setActiveSession(sessionB)
+  assert.equal(useStore.getState().streamText, 'background')
+  assert.equal(useStore.getState().streaming, true)
+
+  useStore.getState().appendToken(sessionA, ' update')
+  assert.equal(useStore.getState().streamText, 'background')
+  assert.equal(useStore.getState().sessionRuntimes[sessionA]?.streamText, 'foreground update')
 })
 
-void test('store persists usage on committed assistant messages', () => {
-  useStore.getState().resetTransientState()
-  useStore.getState().startStream()
-  useStore.getState().appendToken('answer')
-  const usage: StreamUsage = {
-    inputTokens: 12,
-    outputTokens: 4,
-    totalTokens: 16,
-    noCacheTokens: 10,
-    cacheReadTokens: 2,
-    cacheWriteTokens: 1,
-    stepCount: 3
-  }
-  const message = useStore.getState().commitStream('assistant-1', usage)
+void test('token batches update multiple session runtimes in one store notification', () => {
+  resetStore()
+  useStore.getState().startStream(sessionA)
+  useStore.getState().startStream(sessionB)
+  let notifications = 0
+  const unsubscribe = useStore.subscribe(() => { notifications += 1 })
+
+  useStore.getState().appendTokenBatch([
+    { sessionId: sessionA, runId: 'run-a', text: 'hello' },
+    { sessionId: sessionA, runId: 'run-a', text: ' world' },
+    { sessionId: sessionB, runId: 'run-b', text: 'background' }
+  ])
+  unsubscribe()
+
+  assert.equal(notifications, 1)
+  assert.equal(useStore.getState().streamText, 'hello world')
+  assert.equal(useStore.getState().runActivity.phase, 'streaming-text')
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.streamText, 'background')
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.runActivity.phase, 'streaming-text')
+})
+
+void test('reset and completion only clear the target session runtime', () => {
+  resetStore()
+  useStore.getState().startStream(sessionA)
+  useStore.getState().appendToken(sessionA, 'a')
+  useStore.getState().startStream(sessionB)
+  useStore.getState().appendToken(sessionB, 'b')
+  useStore.getState().resetTransientState(sessionA)
+
+  assert.equal(useStore.getState().sessionRuntimes[sessionA]?.streaming, false)
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.streamText, 'b')
+})
+
+void test('store persists usage and run mode on committed assistant messages', () => {
+  resetStore()
+  useStore.getState().setStreamRunMode(sessionA, 'research')
+  useStore.getState().startStream(sessionA)
+  useStore.getState().appendToken(sessionA, 'report')
+  const usage: StreamUsage = { inputTokens: 12, outputTokens: 4, totalTokens: 16 }
+  const message = useStore.getState().commitStream(sessionA, 'assistant-research', usage)
+  assert.equal(message?.runMode, 'research')
   assert.deepEqual(message?.usage, usage)
   assert.deepEqual(useStore.getState().messages.at(-1)?.usage, usage)
-  useStore.getState().setLatestUsage(usage)
-  useStore.getState().resetTransientState()
-  assert.equal(useStore.getState().latestUsage, null)
-})
-void test('store persists stream run mode on committed assistant messages and resets it', () => {
-  useStore.getState().resetTransientState()
-  useStore.getState().setActiveRunMode('research')
-  useStore.getState().setStreamRunMode('research')
-  useStore.getState().startStream()
-  useStore.getState().appendToken('report')
-  const message = useStore.getState().commitStream('assistant-research')
-  assert.equal(message?.runMode, 'research')
-  assert.equal(useStore.getState().streamRunMode, null)
-  assert.equal(useStore.getState().activeRunMode, 'research')
-  useStore.getState().setActiveRunMode('chat')
 })
 
-void test('store resolves tool results by toolCallId', () => {
-  useStore.getState().resetTransientState()
-  useStore.getState().addPendingToolCall({ toolCallId: 'call-a', toolName: 'Read', input: {}, status: 'running' })
-  useStore.getState().addPendingToolCall({ toolCallId: 'call-b', toolName: 'Read', input: {}, status: 'running' })
-  useStore.getState().resolveToolCall('call-b', 'Read', 'second')
+void test('tool results and pending messages are scoped by session', () => {
+  resetStore()
+  useStore.getState().startStream(sessionA)
+  useStore.getState().startStream(sessionB)
+  useStore.getState().addPendingToolCall(sessionA, { toolCallId: 'call-a', toolName: 'Read', input: {}, status: 'running' })
+  useStore.getState().addPendingToolCall(sessionB, { toolCallId: 'call-b', toolName: 'Read', input: {}, status: 'running' })
+  useStore.getState().resolveToolCall(sessionB, 'call-b', 'Read', 'second')
+  useStore.getState().setPendingUserMessages(sessionB, [{
+    mode: 'queue',
+    status: 'queued',
+    message: { id: 'queued-1', role: 'user', content: 'follow up', createdAt: 1 },
+    sequence: 1,
+    createdAt: 1
+  }])
 
-  const calls = useStore.getState().pendingToolCalls
-  assert.equal(calls[0]?.status, 'running')
-  assert.equal(calls[1]?.output, 'second')
-  useStore.getState().resetTransientState()
+  assert.equal(useStore.getState().sessionRuntimes[sessionA]?.pendingToolCalls[0]?.status, 'running')
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.pendingToolCalls[0]?.output, 'second')
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.pendingUserMessages[0]?.message.id, 'queued-1')
+  assert.deepEqual(useStore.getState().pendingUserMessages, [])
 })
 
-void test('store records tool failures by toolCallId', () => {
-  useStore.getState().resetTransientState()
-  useStore.getState().addPendingToolCall({ toolCallId: 'call-a', toolName: 'GenerateImage', input: {}, status: 'running' })
-  useStore.getState().addPendingToolCall({ toolCallId: 'call-b', toolName: 'GenerateImage', input: {}, status: 'running' })
-  useStore.getState().failToolCall('call-b', 'GenerateImage', 'permission denied')
+void test('sub-agent activity updates remain isolated by session and replace the same run', () => {
+  resetStore()
+  const base = {
+    id: 'subagent-1',
+    task: 'Inspect data flow',
+    status: 'queued' as const,
+    phase: 'queued' as const,
+    createdAt: 1,
+    updatedAt: 1,
+    currentStep: 0,
+    maxSteps: 20,
+    tools: []
+  }
+  useStore.getState().updateSubagentActivity(sessionB, base)
+  useStore.getState().updateSubagentActivity(sessionB, { ...base, status: 'running', phase: 'working', updatedAt: 2, currentStep: 1 })
 
-  const calls = useStore.getState().pendingToolCalls
-  assert.equal(calls[0]?.status, 'running')
-  assert.equal(calls[1]?.status, 'error')
-  assert.equal(calls[1]?.output, 'permission denied')
-  useStore.getState().resetTransientState()
+  assert.deepEqual(useStore.getState().subagentActivities, [])
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.subagentActivities.length, 1)
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.subagentActivities[0]?.status, 'running')
 })
 
-void test('store finalizes every running tool after a fatal stream error', () => {
-  useStore.getState().resetTransientState()
-  useStore.getState().addPendingToolCall({ toolCallId: 'call-a', toolName: 'GenerateImage', input: {}, status: 'running' })
-  useStore.getState().failRunningToolCalls('stream failed')
-  assert.equal(useStore.getState().pendingToolCalls[0]?.status, 'error')
-  assert.equal(useStore.getState().pendingToolCalls[0]?.output, 'stream failed')
-  useStore.getState().resetTransientState()
+void test('background approval changes only the matching runtime activity', () => {
+  resetStore()
+  useStore.getState().dispatchRunActivity(sessionA, { type: 'send-accepted', runId: 'run-a', sessionId: sessionA, runMode: 'chat' })
+  useStore.getState().dispatchRunActivity(sessionB, { type: 'send-accepted', runId: 'run-b', sessionId: sessionB, runMode: 'chat' })
+  useStore.getState().addApproval({
+    requestId: 'approval-b',
+    windowId: 1,
+    runId: 'run-b',
+    sessionId: sessionB,
+    toolName: 'Bash',
+    input: {}
+  })
+
+  assert.equal(useStore.getState().runActivity.phase, 'starting')
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.runActivity.phase, 'awaiting-approval')
+  assert.equal(useStore.getState().selectedApproval, null)
+  useStore.getState().setActiveSession(sessionB)
+  assert.equal(useStore.getState().selectedApproval?.requestId, 'approval-b')
+  assert.equal(useStore.getState().runActivity.phase, 'awaiting-approval')
 })
 
-void test('store keeps text before tools and text after tools as separate segments', () => {
-  useStore.getState().resetTransientState()
-  useStore.getState().startStream()
-  useStore.getState().appendToken('可以，我先查一下。')
-  useStore.getState().addPendingToolCall({ toolCallId: 'call-1', toolName: 'WebSearch', input: { query: 'grok' }, status: 'running' })
-  useStore.getState().resolveToolCall('call-1', 'WebSearch', 'results')
-  useStore.getState().appendToken('查完了。')
+void test('pending approval snapshots hydrate and resolved approvals clear runtime state', () => {
+  resetStore()
+  useStore.getState().dispatchRunActivity(sessionB, { type: 'send-accepted', runId: 'run-b', sessionId: sessionB, runMode: 'chat' })
+  useStore.getState().setApprovals([{
+    requestId: 'approval-b',
+    windowId: 1,
+    runId: 'run-b',
+    sessionId: sessionB,
+    toolName: 'Bash',
+    input: {}
+  }])
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.runActivity.phase, 'awaiting-approval')
+  useStore.getState().removeApproval('approval-b')
+  assert.equal(useStore.getState().approvalQueue.length, 0)
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.runActivity.phase, 'waiting-model')
+})
 
-  const segments = useStore.getState().streamSegments
-  assert.deepEqual(segments.map((segment) => segment.type), ['text', 'tools', 'text'])
-  assert.equal(useStore.getState().streamText, '可以，我先查一下。查完了。')
+void test('session summary upserts and deletes stay incremental', () => {
+  resetStore()
+  const summary = {
+    id: sessionA,
+    title: 'A',
+    createdAt: 1,
+    updatedAt: 2,
+    activity: {
+      status: 'completed' as const,
+      unread: true,
+      terminalRevision: 1,
+      seenTerminalRevision: 0,
+      pendingApprovalCount: 0
+    }
+  }
+  useStore.getState().upsertSessionSummary(summary)
+  useStore.getState().upsertSessionSummary({ ...summary, title: 'Updated' })
+  assert.equal(useStore.getState().sessions.length, 1)
+  assert.equal(useStore.getState().sessions[0]?.title, 'Updated')
+  useStore.getState().removeSessionSummary(sessionA)
+  assert.equal(useStore.getState().sessions.length, 0)
+})
 
-  const message = useStore.getState().commitStream('assistant-seg')
-  assert.deepEqual(message?.segments?.map((segment) => segment.type), ['text', 'tools', 'text'])
-  assert.equal(message?.content, '可以，我先查一下。查完了。')
-  assert.equal(message?.toolCalls?.length, 1)
-  useStore.getState().resetTransientState()
+void test('target-session gating only treats that session runtime as busy', () => {
+  resetStore()
+  useStore.getState().startStream(sessionA)
+  assert.equal(isSessionRuntimeBusy(useStore.getState().sessionRuntimes[sessionA]), true)
+  assert.equal(isSessionRuntimeBusy(useStore.getState().sessionRuntimes[sessionB]), false)
+  useStore.getState().setSendStarting(sessionB, true)
+  assert.equal(isSessionRuntimeBusy(useStore.getState().sessionRuntimes[sessionB]), true)
+})
+
+void test('messages remain selected-session data while runtime state is keyed', () => {
+  resetStore()
+  const message: ChatMessage = { id: 'm1', role: 'user', content: 'hello', createdAt: 1 }
+  useStore.getState().setMessages([message])
+  useStore.getState().startStream(sessionB)
+  assert.deepEqual(useStore.getState().messages, [message])
 })

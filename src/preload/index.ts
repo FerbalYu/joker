@@ -7,14 +7,19 @@ import type {
   ApprovalRequest,
   AppConfig,
   ChatMessage,
+  ChatIntent,
   FetchModelsResult,
   ProviderEntry,
   ProviderTestResult,
   SessionMeta,
+  SessionSummary,
+  SessionSummaryChangedEvent,
+  SessionCompactResult,
   McpServerConfig,
   McpServerRuntime,
   ReasoningLevel,
   SkillDescriptor,
+  SkillActionResult,
   ImageProviderConfig,
   ImageProviderEntry,
   ImageFetchModelsResult,
@@ -23,7 +28,23 @@ import type {
   GeneratedImageReadResult,
   ProjectState,
   GitStatus,
-  RunMode
+  GoalCas,
+  GoalCreateInput,
+  GoalTransitionResult,
+  RunMode,
+  GeneratedToolDetailResult,
+  GeneratedToolEditRequest,
+  GeneratedToolEditResult,
+  GeneratedToolPromoteInput,
+  GeneratedToolPromoteResult,
+  GeneratedToolsListResult,
+  GeneratedToolsQualificationOperationResult,
+  GeneratedToolContinuationListResult,
+  GeneratedToolLifecycleMutationResult,
+  GeneratedToolRevalidateInput,
+  GeneratedToolRevalidateResult,
+  GeneratedToolRemoveResult,
+  GeneratedToolExportResult
 } from '@shared/types'
 interface SessionRecord extends SessionMeta {
   messages: ChatMessage[]
@@ -39,8 +60,16 @@ const api = {
   chat: {
     onPort: (callback: (port: MessagePort) => void): (() => void) =>
       streamBridge.onPort(callback as (port: StreamPortLike) => void),
-    send: (_port: MessagePort, sessionId: string, messages: unknown[], reasoningLevel: ReasoningLevel, skillIds?: string[], projectId?: string, runId = crypto.randomUUID(), runMode: RunMode = 'chat'): boolean =>
-      streamBridge.send({ type: 'chat:send', sessionId, runId, messages, reasoningLevel, skillIds, projectId, runMode }),
+    send: (_port: MessagePort, sessionId: string, messages: unknown[], reasoningLevel: ReasoningLevel, skillIds?: string[], projectId?: string, runId = crypto.randomUUID(), runMode: RunMode = 'chat', intent?: ChatIntent): boolean =>
+      streamBridge.send({ type: 'chat:send', sessionId, runId, messages, reasoningLevel, skillIds, projectId, runMode, intent }),
+    enqueue: (_port: MessagePort, sessionId: string, message: ChatMessage, mode: 'queue' | 'steer', expectedRunId: string | undefined, request: { reasoningLevel: ReasoningLevel; skillIds?: string[]; projectId?: string; runMode: RunMode; intent?: ChatIntent }): boolean =>
+      streamBridge.send({ type: 'chat:enqueue', sessionId, message, mode, expectedRunId, request }),
+    cancelPending: (_port: MessagePort, sessionId: string, pendingMessageId: string): boolean =>
+      streamBridge.send({ type: 'chat:cancel-pending', sessionId, pendingMessageId }),
+    steerPending: (_port: MessagePort, sessionId: string, pendingMessageId: string, expectedRunId: string): boolean =>
+      streamBridge.send({ type: 'chat:steer-pending', sessionId, pendingMessageId, expectedRunId }),
+    startGoal: (_port: MessagePort, sessionId: string, runId = crypto.randomUUID()): boolean =>
+      streamBridge.send({ type: 'goal:start', sessionId, runId }),
     abort: (_port: MessagePort | null, runId?: string): boolean =>
       streamBridge.send({ type: 'chat:abort', runId }),
     onEvent: (_port: MessagePort, callback: (event: StreamEvent) => void): (() => void) =>
@@ -56,6 +85,12 @@ const api = {
     },
     respond: (requestId: string, approved: boolean, sessionId?: string, runId?: string): Promise<boolean> =>
       ipcRenderer.invoke('approval:response', { requestId, approved, sessionId, runId }),
+    listPending: (): Promise<ApprovalRequest[]> => ipcRenderer.invoke('approval:list-pending'),
+    onResolved: (callback: (event: Pick<ApprovalRequest, 'requestId' | 'sessionId' | 'runId'>) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, event: Pick<ApprovalRequest, 'requestId' | 'sessionId' | 'runId'>) => callback(event)
+      ipcRenderer.on('approval:resolved', listener)
+      return () => ipcRenderer.removeListener('approval:resolved', listener)
+    },
     pendingCount: (): Promise<number> => ipcRenderer.invoke('approval:pending-count'),
     setMode: (mode: 'suggest' | 'auto-edit' | 'full-auto'): void => {
       ipcRenderer.invoke('approval:set-mode', mode)
@@ -79,6 +114,21 @@ const api = {
     read: (ref: GeneratedImageRef): Promise<GeneratedImageReadResult> => ipcRenderer.invoke('generated-image:read', ref),
     reveal: (ref: GeneratedImageRef): Promise<{ success: boolean; error?: string }> => ipcRenderer.invoke('generated-image:reveal', ref)
   },
+  generatedTools: {
+    list: (): Promise<GeneratedToolsListResult> => ipcRenderer.invoke('generated-tools:list'),
+    get: (toolId: string): Promise<GeneratedToolDetailResult> => ipcRenderer.invoke('generated-tools:get', { toolId }),
+    promote: (input: GeneratedToolPromoteInput): Promise<GeneratedToolPromoteResult> => ipcRenderer.invoke('generated-tools:promote', input),
+    edit: (input: GeneratedToolEditRequest): Promise<GeneratedToolEditResult> => ipcRenderer.invoke('generated-tools:edit', input),
+    remove: (input: { toolId: string; expectedRevision: number; operationId: string }): Promise<GeneratedToolRemoveResult> => ipcRenderer.invoke('generated-tools:remove', input),
+    export: (input: { toolId: string; versionId: string }): Promise<GeneratedToolExportResult> => ipcRenderer.invoke('generated-tools:export', input),
+    disable: (input: { toolId: string; expectedRevision: number; operationId: string }): Promise<GeneratedToolLifecycleMutationResult> => ipcRenderer.invoke('generated-tools:disable', input),
+    reenable: (input: { toolId: string; expectedRevision: number; operationId: string; versionId: string }): Promise<GeneratedToolLifecycleMutationResult> => ipcRenderer.invoke('generated-tools:reenable', input),
+    revalidate: (input: GeneratedToolRevalidateInput): Promise<GeneratedToolRevalidateResult> => ipcRenderer.invoke('generated-tools:revalidate', input),
+    rollback: (input: { toolId: string; expectedRevision: number; operationId: string; versionId: string }): Promise<GeneratedToolLifecycleMutationResult> => ipcRenderer.invoke('generated-tools:rollback', input),
+    continuations: (): Promise<GeneratedToolContinuationListResult> => ipcRenderer.invoke('generated-tools:continuations'),
+    startQualification: (): Promise<GeneratedToolsQualificationOperationResult> => ipcRenderer.invoke('generated-tools:qualification-start'),
+    cancelQualification: (): Promise<GeneratedToolsQualificationOperationResult> => ipcRenderer.invoke('generated-tools:qualification-cancel')
+  },
   mcp: {
     list: (): Promise<McpServerRuntime[]> => ipcRenderer.invoke('mcp:list'),
     add: (config: McpServerConfig): Promise<{ success: boolean; error?: string; runtime?: McpServerRuntime }> => ipcRenderer.invoke('mcp:add', config),
@@ -91,8 +141,8 @@ const api = {
   },
   skill: {
     list: (): Promise<SkillDescriptor[]> => ipcRenderer.invoke('skill:list'),
-    enable: (id: string): Promise<boolean> => ipcRenderer.invoke('skill:enable', id),
-    disable: (id: string): Promise<boolean> => ipcRenderer.invoke('skill:disable', id),
+    enable: (id: string): Promise<SkillActionResult> => ipcRenderer.invoke('skill:enable', id),
+    disable: (id: string): Promise<SkillActionResult> => ipcRenderer.invoke('skill:disable', id),
     reload: (): Promise<SkillDescriptor[]> => ipcRenderer.invoke('skill:reload')
   },
   web: {
@@ -100,6 +150,8 @@ const api = {
   },
   file: {
     reveal: (url: string): Promise<{ success: boolean; error?: string }> => ipcRenderer.invoke('file:reveal', url),
+    showContextMenu: (url: string, language: 'zh' | 'en'): Promise<{ success: boolean; canceled?: boolean; action?: 'open' | 'reveal' | 'open-with' | 'copy-path' | 'copy-contents'; path?: string; error?: string }> =>
+      ipcRenderer.invoke('file:show-context-menu', url, language),
     readMarkdown: (url: string): Promise<{ success: boolean; title?: string; path?: string; content?: string; error?: string }> => ipcRenderer.invoke('file:read-markdown', url),
     saveMarkdown: (value: { title: string; content: string }): Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }> => ipcRenderer.invoke('file:save-markdown', value)
   },
@@ -116,12 +168,35 @@ const api = {
     create: (title?: string): Promise<SessionMeta> => ipcRenderer.invoke('session:create', title),
     get: (id: string): Promise<SessionRecord | null> => ipcRenderer.invoke('session:get', id),
     list: (): Promise<SessionMeta[]> => ipcRenderer.invoke('session:list'),
+    listSummaries: (): Promise<SessionSummary[]> => ipcRenderer.invoke('session:list-summaries'),
+    markSeen: (sessionId: string, observedTerminalRevision: number): Promise<SessionSummary | null> =>
+      ipcRenderer.invoke('session:mark-seen', sessionId, observedTerminalRevision),
+    onSummaryChanged: (callback: (event: SessionSummaryChangedEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, changed: SessionSummaryChangedEvent) => callback(changed)
+      ipcRenderer.on('session:summary-changed', listener)
+      return () => ipcRenderer.removeListener('session:summary-changed', listener)
+    },
     append: (sessionId: string, message: ChatMessage): Promise<boolean> =>
       ipcRenderer.invoke('session:append', sessionId, message),
     replaceMessages: (sessionId: string, messages: ChatMessage[]): Promise<boolean> => ipcRenderer.invoke('session:replace-messages', sessionId, messages),
+    pending: (sessionId: string): Promise<import('@shared/types').PendingUserMessageListResult> => ipcRenderer.invoke('session:pending', sessionId),
     delete: (id: string): Promise<boolean> => ipcRenderer.invoke('session:delete', id),
     rename: (id: string, title: string): Promise<boolean> =>
       ipcRenderer.invoke('session:rename', id, title),
+    goalInspect: (sessionId: string): Promise<GoalTransitionResult> =>
+      ipcRenderer.invoke('session:goal-inspect', sessionId),
+    goalCreate: (sessionId: string, input: GoalCreateInput): Promise<GoalTransitionResult> =>
+      ipcRenderer.invoke('session:goal-create', sessionId, input),
+    goalReplace: (sessionId: string, input: GoalCreateInput): Promise<GoalTransitionResult> =>
+      ipcRenderer.invoke('session:goal-replace', sessionId, input),
+    goalPause: (sessionId: string, input: GoalCas & { stopReason?: 'user-paused' }): Promise<GoalTransitionResult> =>
+      ipcRenderer.invoke('session:goal-pause', sessionId, input),
+    goalResume: (sessionId: string, input: GoalCas): Promise<GoalTransitionResult> =>
+      ipcRenderer.invoke('session:goal-resume', sessionId, input),
+    goalClear: (sessionId: string, input?: GoalCas): Promise<GoalTransitionResult> =>
+      ipcRenderer.invoke('session:goal-clear', sessionId, input),
+    compact: (sessionId: string): Promise<SessionCompactResult> =>
+      ipcRenderer.invoke('session:compact', sessionId),
     setProject: (sessionId: string, projectId: string | null): Promise<boolean> =>
       ipcRenderer.invoke('session:set-project', sessionId, projectId)
   }

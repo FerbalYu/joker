@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       enable_signed_release:
-        description: 'Run the fail-closed signed release contract'
+        description: 'Build, sign, qualify, and attest the final Windows release'
         required: true
         default: false
         type: boolean
@@ -13,40 +13,20 @@ on:
       - 'v*'
 
 jobs:
-  windows-native:
-    name: Windows native package qualification
+  windows-release:
+    if: github.event_name == 'push' || inputs.enable_signed_release == true
+    name: Windows build-once release qualification
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env:
       CI: true
       JOKER_DISABLE_EXTERNAL_SERVICES: '1'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - name: Build Windows NSIS package
-        run: npm run build:dist
-      - name: Release boundary audit
-        run: npm run test:qualification:release-boundaries
-      - name: Upload Windows evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-release-qualification
-          path: |
-            dist/*.exe
-          if-no-files-found: error
-
-  signed-release-contract:
-    name: Signed release contract (fail closed)
-    if: github.event_name == 'workflow_dispatch' && inputs.enable_signed_release == true
-    runs-on: windows-latest
-    timeout-minutes: 60
-    env:
-      CI: true
+      JOKER_RELEASE_EVIDENCE: ${{ runner.temp }}\joker-release-evidence
+      JOKER_RUNTIME_HOME: ${{ runner.temp }}\joker-runtime-home
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -61,19 +41,90 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD" || { echo 'CSC_LINK and CSC_KEY_PASSWORD are required.' >&2; exit 1; }
-      - name: Run sign and verify qualification
+          test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD" || { echo 'CSC_LINK and CSC_KEY_PASSWORD are required for a formal release.' >&2; exit 1; }
+      - name: Build signed Windows package once
         env:
-          JOKER_SIGNED_REPORT_DIR: ${{ runner.temp }}/joker-signed-release
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-        run: npm run test:qualification:signed-release
-      - name: Upload signed evidence
-        if: always()
+        run: npm run build:dist
+      - name: Resolve exact release artifacts
+        id: artifacts
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'dist\win-unpacked\JOKER.exe').Path
+          $asar = (Resolve-Path 'dist\win-unpacked\resources\app.asar').Path
+          $installer = Get-ChildItem 'dist\JOKER-*.exe' -File | Where-Object { $_.FullName -ne $exe }
+          if ($installer.Count -ne 1) { throw "Expected exactly one installer, found $($installer.Count)" }
+          "exe=$exe" >> $env:GITHUB_OUTPUT
+          "asar=$asar" >> $env:GITHUB_OUTPUT
+          "installer=$($installer[0].FullName)" >> $env:GITHUB_OUTPUT
+          New-Item -ItemType Directory -Path $env:JOKER_RELEASE_EVIDENCE -Force | Out-Null
+      - name: Verify final signatures before qualification
+        shell: pwsh
+        run: |
+          foreach ($path in @('${{ steps.artifacts.outputs.exe }}', '${{ steps.artifacts.outputs.installer }}')) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            if ($signature.Status -ne 'Valid' -or !$signature.SignerCertificate) { throw "Invalid Authenticode signature: $path ($($signature.Status))" }
+          }
+      - name: Runtime qualification against exact signed executable
+        run: >-
+          node --import=tsx scripts/runtime-qualification.mjs
+          --required-level L2 --no-build
+          --bundle out/main/index.js
+          --worker out/main/generated-tool-worker.js
+          --packaged-exe "${{ steps.artifacts.outputs.exe }}"
+          --app-asar "${{ steps.artifacts.outputs.asar }}"
+          --output "$env:JOKER_RUNTIME_HOME\.joker\qualification\runtime-qualification.json"
+      - name: Packaged ToolForge qualification
+        env:
+          JOKER_PACKAGED_EXECUTABLE: ${{ steps.artifacts.outputs.exe }}
+          JOKER_PACKAGED_TOOL_REPORT_DIR: ${{ runner.temp }}\joker-packaged-toolforge
+        run: npm run test:qualification:toolforge-package
+      - name: Packaged ToolForge Gate 2 qualification
+        env:
+          JOKER_PACKAGED_EXECUTABLE: ${{ steps.artifacts.outputs.exe }}
+          JOKER_PACKAGED_GATE2_REPORT_DIR: ${{ runner.temp }}\joker-packaged-toolforge-gate2
+          JOKER_PACKAGED_GATE2_QUALIFICATION_HOME: ${{ env.JOKER_RUNTIME_HOME }}
+        run: npm run test:qualification:toolforge-gate2-package
+      - name: Packaged ToolForge fixture restart qualification
+        env:
+          JOKER_PACKAGED_EXECUTABLE: ${{ steps.artifacts.outputs.exe }}
+          JOKER_PACKAGED_FIXTURE_ROOT: ${{ github.workspace }}\dist\win-unpacked\resources\toolforge-fixture
+          JOKER_PACKAGED_TOOLFORGE_FIXTURE_QUALIFICATION_HOME: ${{ env.JOKER_RUNTIME_HOME }}
+          JOKER_TOOLFORGE_FIXTURE_REPORT_DIR: ${{ runner.temp }}\joker-toolforge-fixture
+        run: npm run test:qualification:toolforge-fixture-package
+      - name: Packaged ToolForge Gate 4 edit qualification
+        env:
+          JOKER_PACKAGED_EXECUTABLE: ${{ steps.artifacts.outputs.exe }}
+          JOKER_PACKAGED_GATE4_REPORT_DIR: ${{ runner.temp }}\joker-packaged-toolforge-gate4
+          JOKER_PACKAGED_GATE4_QUALIFICATION_HOME: ${{ env.JOKER_RUNTIME_HOME }}
+        run: npm run test:qualification:toolforge-gate4-package
+
+      - name: Strict release boundary audit
+        env:
+          JOKER_RELEASE_ARTIFACT: ${{ steps.artifacts.outputs.installer }}
+        run: node scripts/release-boundary-audit.mjs --strict --artifact "${{ steps.artifacts.outputs.installer }}"
+      - name: Create and verify release provenance
+        shell: pwsh
+        run: |
+          $runtimeReport = "$env:JOKER_RUNTIME_HOME\.joker\qualification\runtime-qualification.json"
+          node scripts/release-provenance.mjs create --output "$env:JOKER_RELEASE_EVIDENCE\release-provenance.json" --artifact '${{ steps.artifacts.outputs.exe }}' --artifact '${{ steps.artifacts.outputs.asar }}' --artifact '${{ steps.artifacts.outputs.installer }}' --report $runtimeReport --report '${{ runner.temp }}\joker-packaged-toolforge\packaged-toolforge-report.json' --report '${{ runner.temp }}\joker-packaged-toolforge-gate2\packaged-gate2-report.json' --report '${{ runner.temp }}\joker-toolforge-fixture\toolforge-fixture-report.json' --report '${{ runner.temp }}\joker-packaged-toolforge-gate4\packaged-gate4-edit-report.json'
+          node scripts/release-provenance.mjs verify --manifest "$env:JOKER_RELEASE_EVIDENCE\release-provenance.json"
+      - name: Attest exact installer
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.artifacts.outputs.installer }}
+      - name: Upload exact signed release and evidence
         uses: actions/upload-artifact@v4
         with:
-          name: signed-release-qualification
+          name: signed-windows-release-${{ github.sha }}
           path: |
-            dist/*.exe
-            ${{ runner.temp }}/joker-signed-release/signed-release-report.json
+            ${{ steps.artifacts.outputs.installer }}
+            ${{ env.JOKER_RELEASE_EVIDENCE }}\release-provenance.json
+            ${{ env.JOKER_RUNTIME_HOME }}\.joker\qualification\
+            ${{ runner.temp }}\joker-packaged-toolforge\
+            ${{ runner.temp }}\joker-packaged-toolforge-gate2\
+            ${{ runner.temp }}\joker-toolforge-fixture\
+            ${{ runner.temp }}\joker-packaged-toolforge-gate4\
           if-no-files-found: error
+          retention-days: 30

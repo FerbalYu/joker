@@ -1,12 +1,18 @@
 import { z } from 'zod'
 import type { ToolDefinition, ToolResult } from './registry'
-import { assertPublicUrl, validatePublicUrl } from './url-policy'
+import { validatePublicUrl } from './url-policy'
+import { createSafeDispatcher, safeFetch } from './safe-fetch'
 import { readRenderedPage, type BrowserReadResult } from './web-browser'
 import { webSearchTool } from './web-search'
 import type { ResearchContext } from '../research/context'
 
 export const validateWebUrl = validatePublicUrl
-export const assertPublicWebUrl = assertPublicUrl
+export const assertPublicWebUrl = async (value: string | URL): Promise<URL> => {
+  const url = validatePublicUrl(value.toString())
+  const dispatcher = await createSafeDispatcher(url)
+  await dispatcher.close()
+  return url
+}
 
 const DEFAULT_TIMEOUT_MS = 12_000
 const MAX_TIMEOUT_MS = 30_000
@@ -65,13 +71,17 @@ interface ParsedDocument {
 
 type WebUrlPolicy = (value: string | URL) => Promise<URL>
 
+type SafeFetchLike = (input: string | URL, init?: RequestInit, options?: { maxRedirects?: number }) => Promise<Response>
+
 export interface WebReadDependencies {
   assertPublicUrl: WebUrlPolicy
+  fetch: SafeFetchLike
   readRenderedPage: typeof readRenderedPage
 }
 
 const defaultWebReadDependencies: WebReadDependencies = {
-  assertPublicUrl,
+  assertPublicUrl: assertPublicWebUrl,
+  fetch: safeFetch,
   readRenderedPage
 }
 
@@ -202,11 +212,11 @@ async function fetchPage(url: string, options: Required<WebReadOptions>, signal?
     if (signal?.aborted) controller.abort(signal.reason)
     const timer = setTimeout(() => controller.abort(), options.timeoutMs)
     try {
-      const response = await fetch(current, {
+      const response = await dependencies.fetch(current, {
         redirect: 'manual',
         signal: controller.signal,
         headers: { accept: 'text/html,application/xhtml+xml,text/plain;q=0.9' }
-      })
+      }, { maxRedirects: 0 })
       throwIfAborted(signal)
       const location = response.headers.get('location')
       if (response.status >= 300 && response.status < 400 && location) {

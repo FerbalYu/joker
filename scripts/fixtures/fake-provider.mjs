@@ -5,6 +5,7 @@ const port = Number(process.env.PORT || 18765)
 const logPath = process.env.LOG_PATH || '.qa/fake-provider.log'
 const scenario = process.env.JOKER_FAKE_SCENARIO || 'default'
 const requests = []
+const GENERATED_IMAGE_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEklEQVR4nGP4z8DAAMJgAsQAACnoA/2tJ5gCAAAAAElFTkSuQmCC'
 
 function writeLog(entry) {
   requests.push(entry)
@@ -42,8 +43,9 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function delayedStreamResponse(res, chunks, delayMs) {
+async function delayedStreamResponse(res, chunks, delayMs, initialDelayMs = 0) {
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+  if (initialDelayMs > 0) await sleep(initialDelayMs)
   for (const chunk of chunks) {
     res.write(`data: ${JSON.stringify(chunk)}\n\n`)
     await sleep(delayMs)
@@ -142,6 +144,61 @@ const TOOL_LIFECYCLE_CALLS = {
   Third: 'call_lifecycle_third'
 }
 
+const QUEUE_STEER_CALL = 'call_queue_steer_read'
+const QUEUE_STEER_BRIDGE_CALL = 'call_queue_steer_bridge'
+const MULTI_SESSION_CALLS = {
+  A: 'call_multi_session_a',
+  B: 'call_multi_session_b',
+  StopA: 'call_multi_session_stop_a',
+  StopB: 'call_multi_session_stop_b'
+}
+
+function userMessageText(message) {
+  if (typeof message?.content === 'string') return message.content
+  if (!Array.isArray(message?.content)) return ''
+  return message.content
+    .filter((part) => part?.type === 'text')
+    .map((part) => String(part.text ?? ''))
+    .join('')
+}
+
+function queueSteerResponse(messages) {
+  const history = researchToolHistory(messages)
+  const userTexts = messages.filter((message) => message?.role === 'user').map(userMessageText)
+  const latestUserText = userTexts.at(-1) ?? ''
+  if (latestUserText.includes('STEER_CURRENT_7781')) {
+    return textResponse('STEER_CURRENT_APPLIED_7781')
+  }
+  if (latestUserText.includes('QUEUE_FOLLOWUP_7781')) {
+    return textResponse('QUEUE_FOLLOWUP_APPLIED_7781')
+  }
+  if (history.calls.get(QUEUE_STEER_CALL) === 'Write' && history.results.has(QUEUE_STEER_CALL)) {
+    if (!(history.calls.get(QUEUE_STEER_BRIDGE_CALL) === 'Read' && history.results.has(QUEUE_STEER_BRIDGE_CALL))) {
+      return toolCall('Read', { filePath: 'queue-steer-bridge.txt' }, QUEUE_STEER_BRIDGE_CALL)
+    }
+    return textResponse('QUEUE_STEER_BASE_COMPLETED_7781')
+  }
+  return toolCall('Write', { filePath: 'queue-steer-approval.txt', content: 'approval boundary only' }, QUEUE_STEER_CALL)
+}
+
+function multiSessionResponse(messages) {
+  const history = researchToolHistory(messages)
+  const userTexts = messages.filter((message) => message?.role === 'user').map(userMessageText)
+  const prompt = userTexts.at(-1) ?? ''
+  const marker = prompt.includes('MULTI_SESSION_A_7781')
+    ? 'A'
+    : prompt.includes('MULTI_SESSION_B_7781')
+      ? 'B'
+      : prompt.includes('MULTI_SESSION_STOP_A_7781')
+        ? 'StopA'
+        : 'StopB'
+  const callId = MULTI_SESSION_CALLS[marker]
+  if (!(history.calls.get(callId) === 'Write' && history.results.has(callId))) {
+    return toolCall('Write', { filePath: `multi-session-${marker.toLowerCase()}.txt`, content: 'approval boundary only' }, callId)
+  }
+  return textResponse(`MULTI_SESSION_${marker === 'StopA' ? 'STOP_A' : marker === 'StopB' ? 'STOP_B' : marker}_COMPLETED_7781`)
+}
+
 function toolLifecycleResponse(messages) {
   const history = researchToolHistory(messages)
   if (!(history.calls.get(TOOL_LIFECYCLE_CALLS.First) === 'Read' && history.results.has(TOOL_LIFECYCLE_CALLS.First))) {
@@ -172,6 +229,296 @@ function contextOptimizationResponse(messages, tools) {
   return toolCall('ContextRetrieve', { contextId, keyword: 'CONTEXT_ELECTRON_SENTINEL_7781', maxChars: 12000 }, CONTEXT_RETRIEVE_CALL)
 }
 
+function planResponse(messages) {
+  const history = researchToolHistory(messages)
+  const planCallId = 'call_plan_todo'
+  if (!(history.calls.get(planCallId) === 'TodoWrite' && history.results.has(planCallId))) {
+    return toolCall('TodoWrite', {
+      todos: [
+        { content: 'Inspect the relevant repository context', status: 'in_progress', priority: 'high' },
+        { content: 'Describe the ordered implementation steps', status: 'pending', priority: 'high' },
+        { content: 'List the validation gates', status: 'pending', priority: 'medium' }
+      ]
+    }, planCallId)
+  }
+  return textResponse('Plan created without implementing changes.')
+}
+
+function goalEvaluationResponse(messages) {
+  const payloadMessage = [...messages].reverse().find((message) => message.role === 'user')
+  let payload = {}
+  try { payload = JSON.parse(String(payloadMessage?.content ?? '{}')) } catch { /* schema failure response below */ }
+  const executionMessage = payload.executionMessage ?? {}
+  const round = Number(payload.round ?? 1)
+  const complete = round >= 2
+  const quote = complete
+    ? 'Goal evidence: corrected Slash command flow verified in round 2.'
+    : 'Goal evidence: corrected Slash command flow needs a second verification round.'
+  return {
+    id: 'chatcmpl-goal-evaluation',
+    object: 'chat.completion',
+    model: 'gpt-4o',
+    choices: [{
+      index: 0,
+      message: {
+        role: 'assistant',
+        content: JSON.stringify({
+          decision: complete ? 'complete' : 'continue',
+          criteria: [{ criterion: 'The corrected Slash command flow is verified in a second round', satisfied: complete }],
+          evidenceReferences: complete ? [{
+            source: 'assistant_quote',
+            generation: payload.generation,
+            round: payload.round,
+            messageId: executionMessage.id,
+            quote
+          }] : [],
+          unmetCriteria: complete ? [] : ['The corrected Slash command flow needs a second verification round'],
+          nextFeedback: complete ? '' : 'Run a second verification round and provide final evidence.'
+        })
+      },
+      finish_reason: 'stop'
+    }],
+    usage: { prompt_tokens: 90, completion_tokens: 35, total_tokens: 125 }
+  }
+}
+
+function compactSummaryResponse() {
+  return {
+    id: 'chatcmpl-compact',
+    object: 'chat.completion',
+    model: 'gpt-4o',
+    choices: [{
+      index: 0,
+      message: {
+        role: 'assistant',
+        content: JSON.stringify({
+          confirmedFacts: ['Slash+ exposes goal, plan, compact, and Skills.'],
+          decisions: ['Preserve original session messages during compaction.'],
+          filesRead: [],
+          changesMade: [],
+          failedAttempts: [],
+          openTasks: ['Continue with the latest user request.'],
+          criticalIdentifiers: ['SESSION_GOAL', 'DEFAULT_CONTEXT_POLICY_VERSION']
+        })
+      },
+      finish_reason: 'stop'
+    }],
+    usage: { prompt_tokens: 120, completion_tokens: 40, total_tokens: 160 }
+  }
+}
+
+function toolForgeVerticalHistory(messages) {
+  const history = researchToolHistory(messages)
+  const calls = []
+  for (const message of messages) {
+    if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls)) continue
+    for (const call of message.tool_calls) {
+      const name = call?.function?.name
+      if (typeof name === 'string') {
+        let args = {}
+        try { args = JSON.parse(String(call.function.arguments ?? '{}')) } catch { /* host reports malformed input */ }
+        calls.push({ id: call.id, name, args })
+      }
+    }
+  }
+  return { ...history, calls }
+}
+
+function completedTool(history, name) {
+  return history.calls.some((call) => call.name === name && history.results.has(call.id))
+}
+
+function latestToolCall(history, name) {
+  return [...history.calls].reverse().find((call) => call.name === name)
+}
+
+function latestToolResult(messages, history, name) {
+  const call = latestToolCall(history, name)
+  return call ? history.results.get(call.id) ?? '' : ''
+}
+
+function parseToolJson(messages, history, name) {
+  const raw = latestToolResult(messages, history, name)
+  if (!raw) return {}
+  try {
+    const outer = JSON.parse(raw)
+    const value = outer && typeof outer === 'object' && 'output' in outer ? outer.output : outer
+    return typeof value === 'string' ? JSON.parse(value) : value
+  } catch {
+    return {}
+  }
+}
+
+const ELECTRON_TOOLFORGE_TOOL_ID = 'electron-vertical-slice-task-summary'
+const ELECTRON_TOOLFORGE_PROJECT_ID = 'electron-vertical-slice-project'
+const ELECTRON_TOOLFORGE_CALLS = {
+  search: 'call_electron_tool_search',
+  start: 'call_electron_tool_forge_start',
+  status: 'call_electron_tool_forge_status',
+  promote: 'call_electron_tool_promote'
+}
+
+const ELECTRON_TOOLFORGE_MANIFEST = {
+  schemaVersion: 1,
+  toolId: ELECTRON_TOOLFORGE_TOOL_ID,
+  displayName: 'ElectronVerticalSliceTaskSummary',
+  description: 'Reads project task JSON and returns deterministic status counts.',
+  sdkVersion: '1.0.0',
+  runtime: { id: 'quickjs-wasm', version: '0.32.0' },
+  entrypoint: 'source/tool.js',
+  inputSchema: { type: 'object', additionalProperties: false },
+  outputSchema: { type: 'string' },
+  errorContract: {
+    type: 'object',
+    properties: { message: { type: 'string' } },
+    required: ['message'],
+    additionalProperties: false
+  },
+  permissions: {
+    filesystem: { read: ['fixtures/tasks.json'], write: [] },
+    network: { hosts: [], methods: [] },
+    process: { commands: [] },
+    environment: { keys: [] },
+    secrets: { handles: [] }
+  },
+  dependencies: [],
+  limits: { timeoutMs: 1000, maxInputBytes: 4096, maxOutputBytes: 16384, maxMemoryBytes: 32000000 }
+}
+
+const ELECTRON_TOOLFORGE_SOURCE = `
+function summarize(tasks) {
+  const counts = {}
+  for (const task of tasks) {
+    const key = task && task.status ? String(task.status) : 'unknown'
+    counts[key] = (counts[key] || 0) + 1
+  }
+  return Object.keys(counts).sort((a, b) => counts[b] - counts[a] || (a < b ? -1 : a > b ? 1 : 0)).map((key) => key + ': ' + counts[key]).join('\\n')
+}
+try {
+  const rows = JSON.parse(tool.readFile('fixtures/tasks.json'))
+  if (!(rows instanceof Array)) tool.fail({ message: 'invalid-task-json' })
+  else tool.output(summarize(rows))
+} catch (error) {
+  if (error && error.message === 'invalid-task-json') throw error
+  tool.fail({ message: 'invalid-task-json' })
+}
+`
+
+function electronEditSource(failure, attempt) {
+  if (failure) return `tool.output('edited-invalid-attempt-${attempt}')
+`
+  return `${ELECTRON_TOOLFORGE_SOURCE}
+// gate4-edit-success-attempt-${attempt}
+`
+}
+
+function electronEditForgeAgentResponse(messages, failure) {
+  const history = toolForgeVerticalHistory(messages)
+  if (!completedTool(history, 'ForgeReadSpec')) return toolCall('ForgeReadSpec', {}, `call_electron_edit_read_spec_${failure ? 'failure' : 'success'}`)
+  const spec = parseToolJson(messages, history, 'ForgeReadSpec')
+  const attempt = Number(spec.forgeJobAttempt ?? 1)
+  const source = electronEditSource(failure, attempt)
+  const writes = history.calls.filter((call) => call.name === 'ForgeWriteFile' && history.results.has(call.id))
+  if (writes.length < 2) {
+    if (writes.length === 0) return toolCall('ForgeWriteFile', { path: 'source/tool.js', content: source }, `call_electron_edit_write_source_${attempt}`)
+    return toolCall('ForgeWriteFile', { path: 'dist/tool.js', content: source }, `call_electron_edit_write_dist_${attempt}`)
+  }
+  if (!completedTool(history, 'ForgeRunCheck')) return toolCall('ForgeRunCheck', {}, `call_electron_edit_run_check_${attempt}`)
+  if (!completedTool(history, 'ForgeSubmitCandidate')) {
+    return toolCall('ForgeSubmitCandidate', {
+      expectedRevision: Number(spec.forgeJobRevision ?? 2)
+    }, `call_electron_edit_submit_${attempt}`)
+  }
+  return textResponse('Forge edit candidate submitted without claiming trust or promotion.')
+}
+
+function electronToolForgeEditResponse(messages, tools, systemText, failure) {
+  if (/dedicated ToolForge manufacturing agent/i.test(systemText)) return electronEditForgeAgentResponse(messages, failure)
+  const history = toolForgeVerticalHistory(messages)
+  const generated = (Array.isArray(tools) ? tools : [])
+    .map((tool) => tool?.function?.name)
+    .find((name) => name === 'summarize-task-json')
+  if (generated) {
+    if (!history.calls.some((call) => call.name === generated && history.results.has(call.id))) {
+      return toolCall(generated, {}, `call_electron_edit_stable_${failure ? 'failure' : 'success'}`)
+    }
+    return textResponse('The stable Generated Tool remains executable: open: 4\ndone: 3\nin_progress: 2')
+  }
+  return textResponse('Edit qualification provider is ready.')
+}
+function electronForgeAgentResponse(messages) {
+  const history = toolForgeVerticalHistory(messages)
+  if (!completedTool(history, 'ForgeReadSpec')) return toolCall('ForgeReadSpec', {}, 'call_electron_forge_read_spec')
+  const spec = parseToolJson(messages, history, 'ForgeReadSpec')
+  const attempt = Number(spec.forgeJobAttempt ?? 1)
+  const source = attempt > 1
+    ? `${ELECTRON_TOOLFORGE_SOURCE}\n// repair-attempt-${attempt}`
+    : ELECTRON_TOOLFORGE_SOURCE
+  const writes = history.calls.filter((call) => call.name === 'ForgeWriteFile' && history.results.has(call.id))
+  if (writes.length < 3) {
+    if (writes.length === 0) return toolCall('ForgeWriteFile', { path: 'manifest.json', content: JSON.stringify(ELECTRON_TOOLFORGE_MANIFEST, null, 2) + '\n' }, 'call_electron_forge_write_manifest')
+    if (writes.length === 1) return toolCall('ForgeWriteFile', { path: 'source/tool.js', content: source }, 'call_electron_forge_write_source')
+    return toolCall('ForgeWriteFile', { path: 'dist/tool.js', content: source }, 'call_electron_forge_write_dist')
+  }
+  if (!completedTool(history, 'ForgeRunCheck')) return toolCall('ForgeRunCheck', {}, 'call_electron_forge_run_check')
+  if (!completedTool(history, 'ForgeSubmitCandidate')) {
+    return toolCall('ForgeSubmitCandidate', {
+      expectedRevision: Number(spec.forgeJobRevision ?? 2)
+    }, 'call_electron_forge_submit')
+  }
+  return textResponse('Forge candidate submitted without claiming trust or promotion.')
+}
+
+function electronToolForgeResponse(messages, tools, systemText) {
+  const history = toolForgeVerticalHistory(messages)
+  if (/dedicated ToolForge manufacturing agent/i.test(systemText)) return electronForgeAgentResponse(messages)
+  if (/tool-forge-continuation/i.test(systemText)) {
+    const generated = (Array.isArray(tools) ? tools : []).map((tool) => tool?.function?.name).find((name) => name === ELECTRON_TOOLFORGE_TOOL_ID)
+    if (!generated) return textResponse('Continuation could not find the promoted Generated Tool.')
+    if (!history.calls.some((call) => call.name === generated && history.results.has(call.id))) return toolCall(generated, {}, 'call_electron_generated_first_tool')
+    return textResponse('Electron ToolForge vertical slice completed: open: 2\ndone: 1')
+  }
+  if (!completedTool(history, 'ToolSearch')) return toolCall('ToolSearch', { query: 'zzqelectronverticalslice91x' }, ELECTRON_TOOLFORGE_CALLS.search)
+  if (!completedTool(history, 'ToolForgeStart')) {
+    return toolCall('ToolForgeStart', {
+      idempotencyKey: 'electron-toolforge-vertical-slice-start-1',
+      mode: 'create',
+      maxAttempts: 3,
+      spec: {
+        id: ELECTRON_TOOLFORGE_TOOL_ID,
+        displayName: ELECTRON_TOOLFORGE_MANIFEST.displayName,
+        goal: 'Read fixtures/tasks.json and return status counts.',
+        reason: 'The current task needs deterministic project task summarization.',
+        requestedBy: { sessionId: 'model-placeholder-session', runId: 'model-placeholder-run', userMessageId: 'model-placeholder-message' },
+        scope: 'project',
+        projectId: ELECTRON_TOOLFORGE_PROJECT_ID,
+        inputContract: ELECTRON_TOOLFORGE_MANIFEST.inputSchema,
+        outputContract: ELECTRON_TOOLFORGE_MANIFEST.outputSchema,
+        permissions: ELECTRON_TOOLFORGE_MANIFEST.permissions,
+        acceptance: ['Valid task JSON returns sorted status counts.', 'Invalid task JSON returns explicit invalid-task-json failure.'],
+        examples: [{ input: {}, expected: 'open: 2\\ndone: 1' }]
+      }
+    }, ELECTRON_TOOLFORGE_CALLS.start)
+  }
+  let status = parseToolJson(messages, history, 'ToolForgeStatus')
+  if (!status.jobId) {
+    const start = parseToolJson(messages, history, 'ToolForgeStart')
+    status = { ...status, ...start }
+  }
+  if (!completedTool(history, 'ToolForgeStatus') || !['awaiting-policy', 'promoting', 'completed'].includes(status.status)) {
+    return toolCall('ToolForgeStatus', { jobId: status.jobId ?? '' }, ELECTRON_TOOLFORGE_CALLS.status)
+  }
+  if (!completedTool(history, 'ToolPromote')) {
+    return toolCall('ToolPromote', {
+      jobId: status.jobId,
+      expectedJobRevision: status.jobRevision,
+      registryRevision: status.registryRevision,
+      expectedCandidateFingerprint: status.candidateFingerprint
+    }, ELECTRON_TOOLFORGE_CALLS.promote)
+  }
+  return textResponse('ToolForge promotion completed; the original task will continue with the promoted tool.')
+}
+
 const server = http.createServer((req, res) => {
   let body = ''
   req.on('data', (chunk) => { body += chunk })
@@ -183,20 +530,79 @@ const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/v1/models') {
       return json(res, 200, { object: 'list', data: [{ id: 'gpt-4o', object: 'model', owned_by: 'qa' }] })
     }
+    if (req.method === 'POST' && req.url === '/v1/images/generations' && scenario === 'image-generation' && parsed) {
+      return json(res, 200, {
+        created: 0,
+        data: [{ b64_json: GENERATED_IMAGE_PNG_BASE64, mime_type: 'image/png' }]
+      })
+    }
     if (req.method !== 'POST' || req.url !== '/v1/chat/completions' || !parsed || !Array.isArray(parsed.messages)) {
       return json(res, 404, { error: { message: 'not found' } })
     }
 
     const stream = parsed.stream === true
-    const respond = (chunks) => stream ? streamResponse(res, chunks) : json(res, 200, chunks.at(-1)?.choices?.[0]?.delta?.content ? { id: 'chatcmpl-qa', object: 'chat.completion', model: 'gpt-4o', choices: [{ index: 0, message: { role: 'assistant', content: chunks.map((chunk) => chunk.choices?.[0]?.delta?.content ?? '').join('') }, finish_reason: 'stop' }] } : { id: 'chatcmpl-qa', object: 'chat.completion', model: 'gpt-4o', choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 'call_read_qa', type: 'function', function: { name: 'Read', arguments: '{\"filePath\":\"package.json\"}' } }] }, finish_reason: 'tool_calls' }] })
+    const respond = (chunks) => stream ? streamResponse(res, chunks) : json(res, 200, chunks.at(-1)?.choices?.[0]?.delta?.content ? { id: 'chatcmpl-qa', object: 'chat.completion', model: 'gpt-4o', choices: [{ index: 0, message: { role: 'assistant', content: chunks.map((chunk) => chunk.choices?.[0]?.delta?.content ?? '').join('') }, finish_reason: 'stop' }] } : { id: 'chatcmpl-qa', object: 'chat.completion', model: 'gpt-4o', choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 'call_read_qa', type: 'function', function: { name: 'Read', arguments: '{"filePath":"package.json"}' } }] }, finish_reason: 'tool_calls' }] })
     const messages = parsed.messages
+    const systemText = messages.filter((message) => message.role === 'system').map((message) => String(message.content ?? '')).join('\n')
+    if (/Create a durable checkpoint summary of the older conversation history\./i.test(systemText)) return json(res, 200, compactSummaryResponse())
+    if (/independent read-only Goal evaluator/i.test(systemText)) return json(res, 200, goalEvaluationResponse(messages))
+    if (/<GOAL_OBJECTIVE\b/i.test(systemText)) {
+      const round = Number(systemText.match(/<GOAL_OBJECTIVE round="(\d+)">/i)?.[1] ?? 1)
+      return respond(textResponse(round >= 2
+        ? 'Goal evidence: corrected Slash command flow verified in round 2.'
+        : 'Goal evidence: corrected Slash command flow needs a second verification round.'))
+    }
+    if (/plan-only mode/i.test(systemText)) return respond(planResponse(messages))
+    if (scenario === 'toolforge-vertical-slice') return respond(electronToolForgeResponse(messages, parsed.tools, systemText))
+    if (scenario === 'toolforge-edit-success') return respond(electronToolForgeEditResponse(messages, parsed.tools, systemText, false))
+    if (scenario === 'toolforge-edit-failure') return respond(electronToolForgeEditResponse(messages, parsed.tools, systemText, true))
     if (scenario === 'research') return respond(researchResponse(messages))
     if (scenario === 'context-optimization') return respond(contextOptimizationResponse(messages, parsed.tools))
+    if (scenario === 'queue-steer') {
+      const chunks = queueSteerResponse(messages)
+      const hasToolResult = messages.some((message) => message?.role === 'tool')
+      return stream
+        ? delayedStreamResponse(
+            res,
+            chunks,
+            Number(process.env.JOKER_FAKE_STREAM_DELAY_MS || 500),
+            hasToolResult ? Number(process.env.JOKER_FAKE_NEXT_STEP_DELAY_MS || 2500) : 0
+          )
+        : respond(chunks)
+    }
+    if (scenario === 'multi-session') {
+      const chunks = multiSessionResponse(messages)
+      const hasToolResult = messages.some((message) => message?.role === 'tool')
+      return stream
+        ? delayedStreamResponse(
+            res,
+            chunks,
+            Number(process.env.JOKER_FAKE_STREAM_DELAY_MS || 300),
+            hasToolResult ? Number(process.env.JOKER_FAKE_NEXT_STEP_DELAY_MS || 1800) : 0
+          )
+        : respond(chunks)
+    }
     if (scenario === 'tool-lifecycle') {
       const chunks = toolLifecycleResponse(messages)
       return stream
         ? delayedStreamResponse(res, chunks, Number(process.env.JOKER_FAKE_STREAM_DELAY_MS || 220))
         : respond(chunks)
+    }
+    if (scenario === 'subagent-observability') {
+      const lastUserIndex = messages.findLastIndex((message) => message.role === 'user')
+      const currentTurnMessages = lastUserIndex >= 0 ? messages.slice(lastUserIndex + 1) : messages
+      const hasToolResult = currentTurnMessages.some((message) => message.role === 'tool')
+      const scenarioRespond = (chunks) => stream
+        ? delayedStreamResponse(res, chunks, Number(process.env.JOKER_FAKE_STREAM_DELAY_MS || 450))
+        : respond(chunks)
+      if (/focused read-only sub-agent/i.test(systemText)) {
+        return scenarioRespond(hasToolResult
+          ? textResponse('Subagent verified package.json and found the JOKER project configuration.')
+          : toolCall('Read', { filePath: 'package.json' }, 'call_subagent_read'))
+      }
+      return scenarioRespond(hasToolResult
+        ? textResponse('The subagent inspection completed and its observable work record is available.')
+        : toolCall('Agent', { prompt: 'Inspect package.json and report the project identity.' }, 'call_agent_observability'))
     }
 
     const lastUserIndex = messages.findLastIndex((message) => message.role === 'user')

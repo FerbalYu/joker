@@ -2,11 +2,14 @@ import { homedir } from 'node:os'
 import { basename, extname, join, resolve } from 'node:path'
 import { promises as fs } from 'node:fs'
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import sharp from 'sharp'
 import type { GeneratedImageRef, ImageProviderEntry } from '@shared/types'
 import type { GeneratedImagePayload } from '../providers/image'
-import { assertPublicUrl } from '../tools/url-policy'
+import { safeFetch } from '../tools/safe-fetch'
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024
+const MAX_IMAGE_PIXELS = 32_000_000
+const JPEG_QUALITY = 98
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/
 const MEDIA_TYPES = new Map([
   ['image/png', '.png'],
@@ -33,22 +36,23 @@ export async function saveGeneratedImage(
   if (!bytes) throw new Error('Image provider returned no image data')
   if (bytes.length > MAX_IMAGE_BYTES) throw new Error('Generated image is too large')
 
-  const mediaType = detectMediaType(bytes, payload.mediaType)
-  const extension = MEDIA_TYPES.get(mediaType)
-  if (!extension) throw new Error('Unsupported generated image format')
+  const sourceMediaType = detectMediaType(bytes, payload.mediaType)
+  const outputBytes = sourceMediaType === 'image/jpeg' ? bytes : await convertToJpeg(bytes)
+  if (outputBytes.length > MAX_IMAGE_BYTES) throw new Error('Generated image is too large')
   const id = crypto.randomUUID()
-  const filename = `${id}${extension}`
+  const filename = `${id}.jpg`
+  const mediaType = 'image/jpeg' as const
   const dir = getSessionImageDir(sessionId)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   const tempPath = join(dir, `.${filename}.${crypto.randomUUID()}.tmp`)
   try {
-    await fs.writeFile(tempPath, bytes, { flag: 'wx' })
+    await fs.writeFile(tempPath, outputBytes, { flag: 'wx' })
     await fs.rename(tempPath, join(dir, filename))
   } catch (error) {
     await fs.rm(tempPath, { force: true }).catch(() => undefined)
     throw error
   }
-  return { id, sessionId, filename, mediaType, sizeBytes: bytes.length, createdAt: Date.now() }
+  return { id, sessionId, filename, mediaType, sizeBytes: outputBytes.length, createdAt: Date.now() }
 }
 
 export function readGeneratedImage(ref: GeneratedImageRef): Buffer {
@@ -117,8 +121,7 @@ function decodeBase64(value: string): Buffer {
 async function downloadImage(url: string, config: ImageProviderEntry, signal?: AbortSignal): Promise<Buffer> {
   const target = resolveDownloadUrl(url, config.baseUrl)
   const providerOrigin = new URL(config.baseUrl).origin
-  const currentTarget = await assertPublicUrl(target)
-  let current = currentTarget
+  let current = new URL(target)
   for (let redirect = 0; redirect <= 3; redirect += 1) {
     const controller = new AbortController()
     const abort = (): void => controller.abort(signal?.reason)
@@ -131,11 +134,11 @@ async function downloadImage(url: string, config: ImageProviderEntry, signal?: A
       if (currentUrl.origin === providerOrigin && /^\/v1\/(?:images|media)\//.test(currentUrl.pathname)) {
         headers.Authorization = `Bearer ${config.apiKey}`
       }
-      const response = await fetch(current, { headers, signal: controller.signal, redirect: 'manual' })
+      const response = await safeFetch(current, { headers, signal: controller.signal, redirect: 'manual' }, { maxRedirects: 0 })
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location')
         if (!location) throw new Error('Image download redirect is missing a location')
-        current = await assertPublicUrl(new URL(location, current))
+        current = new URL(location, current)
         continue
       }
       if (!response.ok) throw new Error(`Image download failed (${response.status})`)
@@ -156,6 +159,20 @@ function resolveDownloadUrl(value: string, baseUrl: string): string {
   const url = new URL(value, `${baseUrl}/`)
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('Unsupported image URL')
   return url.toString()
+}
+
+async function convertToJpeg(bytes: Buffer): Promise<Buffer> {
+  try {
+    return await sharp(bytes, { limitInputPixels: MAX_IMAGE_PIXELS })
+      .rotate()
+      .flatten({ background: '#ffffff' })
+      .jpeg({ quality: JPEG_QUALITY })
+      .toBuffer()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/pixel limit|input image exceeds/i.test(message)) throw new Error('Generated image has too many pixels')
+    throw new Error(`Generated image could not be converted to JPEG: ${message}`)
+  }
 }
 
 function detectMediaType(bytes: Buffer, declared?: string): GeneratedImageRef['mediaType'] {

@@ -51,10 +51,17 @@ for (let index = 0; index < workers; index += 1) {
   children.push({ child, output })
   workerOutputs.push(output)
 }
-await Promise.all(children.map(({ child }) => new Promise((resolvePromise, reject) => {
-  const timer = setTimeout(() => reject(new Error('worker readiness timeout')), 10_000)
+await Promise.all(children.map(({ child, output }) => new Promise((resolvePromise, reject) => {
+  if (output.stdout.includes('READY')) {
+    resolvePromise()
+    return
+  }
+  const timer = setTimeout(() => {
+    child.stdout.off('data', onData)
+    reject(new Error(`worker readiness timeout: pid=${child.pid}; stderr=${output.stderr}`))
+  }, 10_000)
   const onData = () => {
-    if (!workerOutputs.find((item) => item.pid === child.pid)?.stdout.includes('READY')) return
+    if (!output.stdout.includes('READY')) return
     clearTimeout(timer)
     child.stdout.off('data', onData)
     resolvePromise()
@@ -78,10 +85,11 @@ const missingAcknowledged = acknowledged.map((record) => record.messageId).filte
 const files = await readdir(dataDir)
 const tempFiles = files.filter((file) => file.endsWith('.tmp'))
 const lockFiles = files.filter((file) => file.endsWith('.lock') || file.endsWith('.lock.tmp'))
-const validEnvelope = primary?.schemaVersion === 1 && primary?.data?.id === sessionId && Array.isArray(primary?.data?.messages)
-const backupValid = backup === null || (backup.schemaVersion === 1 && backup.data?.id === sessionId && Array.isArray(backup.data?.messages))
+const staleClaimFiles = files.filter((file) => file.includes('.lock.stale-'))
+const validEnvelope = primary?.schemaVersion === 7 && primary?.data?.id === sessionId && Array.isArray(primary?.data?.messages)
+const backupValid = backup === null || ([4, 5, 6, 7].includes(backup.schemaVersion) && backup.data?.id === sessionId && Array.isArray(backup.data?.messages))
 const observedOverlap = overlap(records)
-const failed = missingAcknowledged.length > 0 || exits.some((exit) => exit.code !== 0) || !validEnvelope || !backupValid || tempFiles.length > 0 || lockFiles.length > 0 || records.some((record) => record.error)
+const failed = missingAcknowledged.length > 0 || exits.some((exit) => exit.code !== 0) || !validEnvelope || !backupValid || tempFiles.length > 0 || lockFiles.length > 0 || staleClaimFiles.length > 0 || records.some((record) => record.error)
 const status = failed ? 'fail' : observedOverlap ? 'pass' : 'inconclusive'
 const report = {
   generatedAt: new Date().toISOString(),
@@ -99,7 +107,7 @@ const report = {
   exits,
   records,
   workerOutputs,
-  validation: { validEnvelope, backupValid, tempFiles, lockFiles, files, primaryMessageCount: finalMessages.length },
+  validation: { validEnvelope, backupValid, tempFiles, lockFiles, staleClaimFiles, files, primaryMessageCount: finalMessages.length },
   limitations: ['The session store serializes each session mutation with a cross-process lock directory and retains atomic temp/backup recovery. This qualification proves concurrent append preservation for the exercised workload; it does not extend the guarantee to unrelated config/project/image stores or stale full-snapshot replacement semantics.'],
   cleanup: { performed: !keep, status: keep ? 'retained-for-inspection' : 'pending' }
 }

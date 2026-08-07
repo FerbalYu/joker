@@ -77,6 +77,33 @@ void test('terminal reserve allows done after abort while normal sends are block
   await Promise.allSettled(normal)
 })
 
+void test('completed run telemetry retention is bounded', async () => {
+  const sent: StreamEventEnvelope[] = []
+  const transport = new StreamTransport({
+    highWaterMark: 4,
+    terminalReserve: 1,
+    maxCompletedRuns: 2,
+    postMessage: (message) => { if (message.type === 'stream:event') sent.push(message) }
+  })
+  transport.ready(4)
+  for (const runId of ['run-1', 'run-2', 'run-3', 'run-4']) {
+    await transport.send(done(runId))
+    const envelope = sent.at(-1)!
+    assert.equal(transport.ack(envelope.seq, runId), true)
+  }
+  assert.deepEqual(Object.keys(transport.snapshot().runs), ['run-3', 'run-4'])
+})
+
+void test('endpoint retirement cancellation never emits drain', async () => {
+  const { transport, flows } = createTransport(2, 1)
+  const runId = 'run-retired-endpoint'
+  await transport.send(token(runId, 0))
+  const blocked = transport.send(token(runId, 1))
+  transport.cancelRun(runId, { drain: false })
+  await assert.rejects(blocked, /cancelled/)
+  assert.equal(flows.filter((flow) => flow.event === 'drain').length, 0)
+})
+
 void test('aborted pending sends reject and close unblocks all waiters', async () => {
   const { transport } = createTransport(2, 1)
   const controller = new AbortController()

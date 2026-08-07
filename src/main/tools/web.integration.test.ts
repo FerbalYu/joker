@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createServer, type Server, type RequestListener } from 'node:http'
 import { once } from 'node:events'
 import { readWebPage, type WebReadDependencies } from './web'
-import { findBrowserExecutable, readRenderedPage } from './web-browser'
+import { readRenderedPage } from './web-browser'
 
 async function closeServer(server: Server): Promise<void> {
   if (!server.listening) return
@@ -22,33 +22,18 @@ async function startServer(handler: RequestListener): Promise<{ server: Server; 
 function localDependencies(browserText = 'browser rendered text'): WebReadDependencies {
   return {
     assertPublicUrl: async (value) => new URL(value),
+    fetch: async (input, init) => fetch(input, init),
     readRenderedPage: async (url) => ({ finalUrl: url, title: 'Rendered', text: browserText, status: 200, contentType: 'text/html' })
   }
 }
 
-void test('WebRead real browser fallback renders dynamic loopback content with request guard', async (t) => {
-  const executable = findBrowserExecutable()
-  if (!executable) {
-    t.skip('No supported Chrome or Edge executable is installed')
-    return
-  }
-  const { server, url } = await startServer((request, response) => {
-    if (request.url === '/private-target') {
-      response.writeHead(200, { 'Content-Type': 'text/html' }).end('<p>unexpected private target</p>')
-      return
-    }
-    response.writeHead(200, { 'Content-Type': 'text/html' }).end('<html><head><title>Real dynamic fixture</title></head><body><div id="root">loading</div><script>setTimeout(() => { document.querySelector("#root").textContent = "real browser dynamic content" }, 50)</script></body></html>')
-  })
-  try {
-    const result = await readRenderedPage(`${url}/dynamic`, { timeoutMs: 10_000, maxChars: 20_000 }, undefined, {
+void test('WebRead browser fallback is fail-closed and cannot autonomously access networks', async () => {
+  await assert.rejects(
+    readRenderedPage('https://example.com/dynamic', { timeoutMs: 10_000, maxChars: 20_000 }, undefined, {
       assertPublicUrl: async (value) => new URL(value)
-    })
-    assert.match(result.text, /real browser dynamic content/)
-    assert.equal(result.title, 'Real dynamic fixture')
-    assert.equal(result.status, 200)
-  } finally {
-    await closeServer(server)
-  }
+    }),
+    /network access is disabled/
+  )
 })
 void test('WebRead contract reads static HTML and follows public redirects', async () => {
   const { server, url } = await startServer((request, response) => {

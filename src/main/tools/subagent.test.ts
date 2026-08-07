@@ -72,10 +72,13 @@ void test('sub-agent cancels a queued request without starting it', async () => 
 void test('sub-agent returns output with cumulative usage details', async () => {
   const active = { count: 0, max: 0 }
   const controller = new AbortController()
+  const activities: import('../../shared/types').SubagentActivity[] = []
+  const toolContext = createContext(controller.signal)
+  toolContext.onSubagentActivity = (activity) => { activities.push(activity) }
   const result = await runSubagent({
     prompt: 'report usage',
     model: fakeModel(active, 0),
-    toolContext: createContext(controller.signal)
+    toolContext
   })
   assert.equal(result.output, 'done')
   assert.deepEqual(result.usage, {
@@ -87,6 +90,10 @@ void test('sub-agent returns output with cumulative usage details', async () => 
     cacheWriteTokens: undefined,
     stepCount: 1
   })
+  assert.equal(activities[0]?.status, 'queued')
+  assert.equal(activities.some((activity) => activity.status === 'running'), true)
+  assert.equal(activities.at(-1)?.status, 'completed')
+  assert.equal(result.activity.outputPreview, 'done')
 })
 
 void test('sub-agent concurrency is capped at four running providers', async () => {

@@ -8,7 +8,7 @@ const baseConfig: ImageProviderEntry = {
   enabled: true,
   name: 'Images',
   protocol: 'openai-images',
-  baseUrl: 'https://image.example.test/v1',
+  baseUrl: 'https://93.184.216.34/v1',
   apiKey: 'top-secret-key',
   model: 'image-model',
   modelsPath: '/models',
@@ -30,7 +30,7 @@ void test('generateImage sends OpenAI Images request and parses URL output', asy
 
   try {
     const result = await generateImage(baseConfig, { prompt: 'Draw a quiet lake' })
-    assert.equal(requestUrl, 'https://image.example.test/v1/images/generations')
+    assert.equal(requestUrl, 'https://93.184.216.34/v1/images/generations')
     assert.equal(new Headers(requestInit?.headers).get('Authorization'), 'Bearer top-secret-key')
     assert.deepEqual(JSON.parse(String(requestInit?.body)), {
       model: 'image-model',
@@ -69,6 +69,67 @@ void test('generateImage sends Grok aspect ratio and resolution', async () => {
       response_format: 'b64_json',
       aspect_ratio: '16:9',
       resolution: '2k'
+    })
+    assert.equal(result.base64, 'aW1hZ2U=')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+void test('generateImage sends Agnes size, ratio, and nested extra_body response format', async () => {
+  const originalFetch = globalThis.fetch
+  let requestUrl = ''
+  let requestInit: RequestInit | undefined
+  globalThis.fetch = (async (input, init) => {
+    requestUrl = String(input)
+    requestInit = init
+    return new Response(JSON.stringify({ data: [{ url: 'https://cdn.example.test/agnes.png', mime_type: 'image/png' }] }), { status: 200 })
+  }) as typeof fetch
+
+  try {
+    const result = await generateImage(
+      { ...baseConfig, protocol: 'agnes-images', model: 'agnes-image-2.1-flash', defaultAspectRatio: '16:9', defaultResolution: '2k' },
+      { prompt: '画一个安静湖泊', aspectRatio: '21:9', resolution: '3k' }
+    )
+    assert.equal(requestUrl, 'https://93.184.216.34/v1/images/generations')
+    assert.equal(new Headers(requestInit?.headers).get('Authorization'), 'Bearer top-secret-key')
+    assert.deepEqual(JSON.parse(String(requestInit?.body)), {
+      model: 'agnes-image-2.1-flash',
+      prompt: '画一个安静湖泊',
+      size: '3K',
+      ratio: '21:9',
+      extra_body: { response_format: 'url' }
+    })
+    assert.equal('n' in (JSON.parse(String(requestInit?.body)) as Record<string, unknown>), false)
+    assert.deepEqual(result, {
+      url: 'https://cdn.example.test/agnes.png',
+      base64: undefined,
+      mediaType: 'image/png'
+    })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+void test('generateImage Agnes b64_json response and fallback values', async () => {
+  const originalFetch = globalThis.fetch
+  let body: Record<string, unknown> = {}
+  globalThis.fetch = (async (_input, init) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    return new Response(JSON.stringify({ data: [{ b64_json: 'aW1hZ2U=' }] }), { status: 200 })
+  }) as typeof fetch
+
+  try {
+    const result = await generateImage(
+      { ...baseConfig, protocol: 'agnes-images', model: 'agnes-image-2.1-flash', responseFormat: 'b64_json', defaultAspectRatio: '7:5', defaultResolution: '9k' },
+      { prompt: 'Photo' }
+    )
+    assert.deepEqual(body, {
+      model: 'agnes-image-2.1-flash',
+      prompt: 'Photo',
+      size: '1K',
+      ratio: '1:1',
+      extra_body: { response_format: 'b64_json' }
     })
     assert.equal(result.base64, 'aW1hZ2U=')
   } finally {
@@ -116,7 +177,7 @@ void test('fetchImageProviderModels returns sorted unique model IDs without gene
     const result = await fetchImageProviderModels({ ...baseConfig, model: '', modelsPath: '/v1/models' })
     assert.equal(result.success, true)
     assert.deepEqual(result.models, ['a-image', 'nested-image', 'z-image'])
-    assert.equal(requestUrl, 'https://image.example.test/v1/models')
+    assert.equal(requestUrl, 'https://93.184.216.34/v1/models')
     assert.equal(requestInit?.method, 'GET')
     assert.equal(new Headers(requestInit?.headers).get('Authorization'), 'Bearer top-secret-key')
     assert.equal(requestUrl.includes('/images/generations'), false)
@@ -201,8 +262,31 @@ void test('testImageProvider uses model listing and never generates an image', a
   try {
     const result = await testImageProvider(baseConfig)
     assert.equal(result.success, true)
-    assert.deepEqual(requested, ['https://image.example.test/v1/models'])
+    assert.deepEqual(requested, ['https://93.184.216.34/v1/models'])
     assert.equal(requested.some((url) => url.includes('/images/generations')), false)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+void test('testImageProvider validates Agnes locally without remote calls', async () => {
+  const originalFetch = globalThis.fetch
+  let requested = false
+  globalThis.fetch = (async () => {
+    requested = true
+    return new Response('{}', { status: 200 })
+  }) as typeof fetch
+
+  try {
+    const result = await testImageProvider({
+      ...baseConfig,
+      protocol: 'agnes-images',
+      model: 'agnes-image-2.1-flash'
+    })
+    assert.equal(result.success, true)
+    assert.equal(result.status, 'available')
+    assert.equal(requested, false)
+    assert.match(result.message, /no image generation was performed/)
   } finally {
     globalThis.fetch = originalFetch
   }

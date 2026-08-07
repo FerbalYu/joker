@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { z } from 'zod'
 import { tool, type LanguageModel, type ModelMessage } from 'ai'
-import type { StreamEvent } from '../../shared/types'
+import type { ChatMessage, StreamEvent } from '../../shared/types'
 import { runAgent } from './loop'
 
 function usage(inputTokens: number, outputTokens: number, cacheReadTokens = 0, cacheWriteTokens = 0) {
@@ -80,6 +80,77 @@ function fakeModel(mode: FakeMode, chunks = ['first ', 'second ', 'third']): Lan
   } as unknown as LanguageModel
 }
 
+interface ExecutionCallSnapshot {
+  toolChoice: unknown
+  toolNames: string[]
+  prompt: unknown
+}
+
+function textOnlyExecutionModel(calls: ExecutionCallSnapshot[]): LanguageModel {
+  return {
+    specificationVersion: 'v3',
+    provider: 'test',
+    modelId: 'text-only-execution',
+    supportedUrls: {},
+    doGenerate: async () => { throw new Error('not used') },
+    doStream: async ({ toolChoice, tools, prompt }) => {
+      calls.push({
+        toolChoice,
+        toolNames: (tools ?? []).map((tool) => tool.name),
+        prompt
+      })
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: 'response-metadata', id: 'response-text-only', modelId: 'text-only-execution', timestamp: new Date(0) })
+            controller.enqueue({ type: 'text-start', id: 'text-only' })
+            controller.enqueue({ type: 'text-delta', id: 'text-only', delta: 'Everything is complete.' })
+            controller.enqueue({ type: 'text-end', id: 'text-only' })
+            controller.enqueue({ type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: v3Usage(10, 3) })
+            controller.close()
+          }
+        }),
+        response: { headers: {} }
+      }
+    }
+  } as unknown as LanguageModel
+}
+
+function exactGeneratedToolModel(toolName: string, input: unknown = {}): LanguageModel {
+  let call = 0
+  return {
+    specificationVersion: 'v3',
+    provider: 'test',
+    modelId: 'exact-generated-tool',
+    supportedUrls: {},
+    doGenerate: async () => { throw new Error('not used') },
+    doStream: async () => {
+      const step = call++
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: 'response-metadata', id: `response-${step}`, modelId: 'exact-generated-tool', timestamp: new Date(0) })
+            if (step === 0) {
+              controller.enqueue({ type: 'tool-input-start', id: 'call-generated', toolName })
+              controller.enqueue({ type: 'tool-input-delta', id: 'call-generated', delta: JSON.stringify(input) })
+              controller.enqueue({ type: 'tool-input-end', id: 'call-generated' })
+              controller.enqueue({ type: 'tool-call', toolCallId: 'call-generated', toolName, input: JSON.stringify(input) })
+              controller.enqueue({ type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool-calls' }, usage: v3Usage(10, 2) })
+            } else {
+              controller.enqueue({ type: 'text-start', id: 'text-final' })
+              controller.enqueue({ type: 'text-delta', id: 'text-final', delta: 'continued' })
+              controller.enqueue({ type: 'text-end', id: 'text-final' })
+              controller.enqueue({ type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: v3Usage(10, 2) })
+            }
+            controller.close()
+          }
+        }),
+        response: { headers: {} }
+      }
+    }
+  } as unknown as LanguageModel
+}
+
 function multiStepModel(requests: ModelMessage[][]): LanguageModel {
   let call = 0
   return {
@@ -123,7 +194,104 @@ function multiStepModel(requests: ModelMessage[][]): LanguageModel {
   } as unknown as LanguageModel
 }
 
-function runWith(model: LanguageModel, signal?: AbortSignal): Promise<StreamEvent[]> {
+function thinkingToolChoiceModel(calls: ExecutionCallSnapshot[]): LanguageModel {
+  let call = 0
+  return {
+    specificationVersion: 'v3',
+    provider: 'test',
+    modelId: 'thinking-tool-choice',
+    supportedUrls: {},
+    doGenerate: async () => { throw new Error('not used') },
+    doStream: async ({ toolChoice, tools, prompt }) => {
+      const step = call++
+      calls.push({ toolChoice, toolNames: (tools ?? []).map((tool) => tool.name), prompt })
+      if (step === 0) {
+        throw new Error('API 调用错误 (HTTP 400)：Thinking mode does not support this tool_choice')
+      }
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: 'response-metadata', id: `response-${step}`, modelId: 'thinking-tool-choice', timestamp: new Date(0) })
+            if (step === 1) {
+              controller.enqueue({ type: 'tool-input-start', id: 'call-read', toolName: 'Read' })
+              controller.enqueue({ type: 'tool-input-delta', id: 'call-read', delta: '{}' })
+              controller.enqueue({ type: 'tool-input-end', id: 'call-read' })
+              controller.enqueue({ type: 'tool-call', toolCallId: 'call-read', toolName: 'Read', input: '{}' })
+              controller.enqueue({ type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool-calls' }, usage: v3Usage(10, 2) })
+            } else {
+              controller.enqueue({ type: 'text-start', id: 'text-done' })
+              controller.enqueue({ type: 'text-delta', id: 'text-done', delta: 'finished' })
+              controller.enqueue({ type: 'text-end', id: 'text-done' })
+              controller.enqueue({ type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: v3Usage(20, 3) })
+            }
+            controller.close()
+          }
+        }),
+        response: { headers: {} }
+      }
+    }
+  } as unknown as LanguageModel
+}
+
+function failingThenTextModel(firstError: Error, calls: ExecutionCallSnapshot[]): LanguageModel {
+  let call = 0
+  return {
+    specificationVersion: 'v3',
+    provider: 'test',
+    modelId: 'failing-then-text',
+    supportedUrls: {},
+    doGenerate: async () => { throw new Error('not used') },
+    doStream: async ({ toolChoice, tools, prompt }) => {
+      const step = call++
+      calls.push({ toolChoice, toolNames: (tools ?? []).map((tool) => tool.name), prompt })
+      if (step === 0) throw firstError
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: 'response-metadata', id: `response-${step}`, modelId: 'failing-then-text', timestamp: new Date(0) })
+            controller.enqueue({ type: 'text-start', id: 'text-1' })
+            controller.enqueue({ type: 'text-delta', id: 'text-1', delta: 'recovered' })
+            controller.enqueue({ type: 'text-end', id: 'text-1' })
+            controller.enqueue({ type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: v3Usage(5, 2) })
+            controller.close()
+          }
+        }),
+        response: { headers: {} }
+      }
+    }
+  } as unknown as LanguageModel
+}
+
+function stepLimitModel(): LanguageModel {
+  let call = 0
+  return {
+    specificationVersion: 'v3',
+    provider: 'test',
+    modelId: 'step-limit',
+    supportedUrls: {},
+    doGenerate: async () => { throw new Error('not used') },
+    doStream: async () => {
+      const step = call++
+      const toolCallId = `call-${step}`
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: 'response-metadata', id: `response-${step}`, modelId: 'step-limit', timestamp: new Date(0) })
+            controller.enqueue({ type: 'tool-input-start', id: toolCallId, toolName: 'Again' })
+            controller.enqueue({ type: 'tool-input-delta', id: toolCallId, delta: '{}' })
+            controller.enqueue({ type: 'tool-input-end', id: toolCallId })
+            controller.enqueue({ type: 'tool-call', toolCallId, toolName: 'Again', input: '{}' })
+            controller.enqueue({ type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool-calls' }, usage: v3Usage(2, 1) })
+            controller.close()
+          }
+        }),
+        response: { headers: {} }
+      }
+    }
+  } as unknown as LanguageModel
+}
+
+function runWith(model: LanguageModel, signal?: AbortSignal): Promise<{ events: StreamEvent[]; result: Awaited<ReturnType<typeof runAgent>> }> {
   const events: StreamEvent[] = []
   return runAgent({
     sessionId: 'session-loop-contract',
@@ -133,11 +301,11 @@ function runWith(model: LanguageModel, signal?: AbortSignal): Promise<StreamEven
     model,
     signal,
     onEvent: (event) => { events.push(event) }
-  }).then(() => events)
+  }).then((result) => ({ events, result }))
 }
 
 void test('runAgent preserves long stream order and emits measured context updates', async () => {
-  const events = await runWith(fakeModel('normal', Array.from({ length: 256 }, (_, index) => `chunk-${index};`)))
+  const { events, result } = await runWith(fakeModel('normal', Array.from({ length: 256 }, (_, index) => `chunk-${index};`)))
   assert.equal(events[0]?.type, 'message-start')
   assert.equal(events.filter((event) => event.type === 'token').length, 256)
   assert.equal(events.filter((event) => event.type === 'message-end').length, 1)
@@ -147,21 +315,31 @@ void test('runAgent preserves long stream order and emits measured context updat
   assert.equal(events.filter((event) => event.type === 'done').length, 1)
   assert.equal(events.at(-1)?.type, 'done')
   assert.deepEqual(events.filter((event) => event.type === 'token').map((event) => event.type === 'token' ? event.text : ''), Array.from({ length: 256 }, (_, index) => `chunk-${index};`))
+  assert.equal(result.status, 'completed')
+  assert.equal(result.messageId, events[0]?.type === 'message-start' ? events[0].messageId : undefined)
+  assert.equal(result.text, Array.from({ length: 256 }, (_, index) => `chunk-${index};`).join(''))
+  assert.deepEqual(result.segments, [{ type: 'text', text: result.text }])
+  assert.equal(result.steps.count, 1)
+  assert.equal(result.steps.limit, 50)
+  assert.equal(result.finishReason, 'stop')
 })
 
 void test('runAgent emits one error and one done when the provider fails', async () => {
-  const events = await runWith(fakeModel('error'))
+  const { events, result } = await runWith(fakeModel('error'))
   assert.equal(events.filter((event) => event.type === 'error').length, 1)
   assert.equal(events.filter((event) => event.type === 'abort').length, 0)
   assert.equal(events.filter((event) => event.type === 'done').length, 1)
   assert.equal(events.at(-1)?.type, 'done')
+  assert.equal(result.status, 'error')
+  assert.ok(result.messageId)
+  assert.match(result.status === 'error' ? result.error : '', /fake provider failure/)
 })
 
 void test('runAgent emits abort and done without normal completion events', async () => {
   const controller = new AbortController()
   const pending = runWith(fakeModel('abort'), controller.signal)
   setTimeout(() => controller.abort(new Error('cancelled by contract')), 20)
-  const events = await pending
+  const { events, result } = await pending
   assert.equal(events.filter((event) => event.type === 'abort').length, 1)
   assert.equal(events.filter((event) => event.type === 'error').length, 0)
   assert.equal(events.filter((event) => event.type === 'message-end').length, 0)
@@ -170,16 +348,257 @@ void test('runAgent emits abort and done without normal completion events', asyn
   assert.equal(contextEvents[0]?.type === 'context-usage' ? contextEvents[0].usage.source : null, 'estimate')
   assert.equal(events.filter((event) => event.type === 'done').length, 1)
   assert.equal(events.at(-1)?.type, 'done')
+  assert.equal(result.status, 'aborted')
+  assert.ok(result.messageId)
 })
 
 void test('runAgent converts an empty provider completion into a visible error and done', async () => {
-  const events = await runWith(fakeModel('empty'))
+  const { events, result } = await runWith(fakeModel('empty'))
   assert.equal(events.filter((event) => event.type === 'message-end').length, 0)
   const error = events.find((event) => event.type === 'error')
   assert.ok(error?.type === 'error')
   assert.match(error.error, /empty response/i)
   assert.equal(events.filter((event) => event.type === 'done').length, 1)
   assert.equal(events.at(-1)?.type, 'done')
+  assert.equal(result.status, 'empty')
+})
+
+void test('runAgent stops and preserves output when the model enters a repetition loop', async () => {
+  const events: StreamEvent[] = []
+  const committed: ChatMessage[] = []
+  const repeatedChunks = Array.from({ length: 20 }, (_, index) => index % 2 === 0 ? '继续。\n' : '下一步。\n')
+  const result = await runAgent({
+    sessionId: 'session-repetition-loop',
+    runId: 'run-repetition-loop',
+    messages: [{ role: 'user', content: '继续开发项目' }],
+    reasoningLevel: 'auto',
+    model: fakeModel('normal', repeatedChunks),
+    onStepCommitted: (message) => { committed.push(message) },
+    onEvent: (event) => { events.push(event) }
+  })
+
+  assert.equal(result.status, 'repetition')
+  assert.match(result.text, /JOKER 已自动停止：检测到模型输出陷入重复循环/)
+  assert.ok(events.filter((event) => event.type === 'token').length < repeatedChunks.length + 1)
+  assert.equal(events.filter((event) => event.type === 'abort').length, 0)
+  assert.equal(events.filter((event) => event.type === 'error').length, 0)
+  assert.equal(events.filter((event) => event.type === 'message-end').length, 1)
+  assert.equal(events.filter((event) => event.type === 'done').length, 1)
+  assert.equal(committed.length, 1)
+  assert.match(committed[0]?.content ?? '', /重复循环/)
+})
+
+void test('execution contract requires a real first-step tool call and rejects text-only completion', async () => {
+  const calls: ExecutionCallSnapshot[] = []
+  const events: StreamEvent[] = []
+  const committed: ChatMessage[] = []
+  const result = await runAgent({
+    sessionId: 'session-execution-contract',
+    runId: 'run-execution-contract',
+    messages: [{ role: 'user', content: '进行下一步' }],
+    reasoningLevel: 'auto',
+    model: textOnlyExecutionModel(calls),
+    tools: {
+      Read: tool({ description: 'Read', inputSchema: z.object({}), execute: async () => ({ output: 'read' }) }),
+      Bash: tool({ description: 'Run', inputSchema: z.object({}), execute: async () => ({ output: 'ran' }) }),
+      TodoWrite: tool({ description: 'Plan', inputSchema: z.object({}), execute: async () => ({ output: 'planned' }) })
+    },
+    executionContract: {
+      taskKind: 'continuation',
+      requireToolCall: true,
+      activeToolNames: ['Read', 'Bash'],
+      reason: 'test contract'
+    },
+    onStepCommitted: (message) => { committed.push(message) },
+    onEvent: (event) => { events.push(event) }
+  })
+
+  assert.deepEqual(calls[0]?.toolChoice, { type: 'required' })
+  assert.deepEqual(calls[0]?.toolNames, ['Bash', 'Read'])
+  assert.match(JSON.stringify(calls[0]?.prompt), /HOST_EXECUTION_CONTRACT/)
+  assert.equal(result.status, 'error')
+  assert.match(result.status === 'error' ? result.error : '', /required a real tool call/i)
+  assert.equal(committed.length, 0)
+  assert.equal(events.filter((event) => event.type === 'message-end').length, 0)
+  assert.equal(events.filter((event) => event.type === 'error').length, 1)
+  assert.equal(events.at(-1)?.type, 'done')
+})
+
+void test('execution contract accepts exact generated-tool invocation metadata', async () => {
+  const generatedTool = {
+    toolId: 'tool-1',
+    versionId: 'version-1',
+    fingerprint: 'a'.repeat(64),
+    validationReportId: 'report-1',
+    pointerRevision: 4,
+    capabilityRevision: 7
+  }
+  const result = await runAgent({
+    sessionId: 'session-exact-generated-tool',
+    runId: 'run-exact-generated-tool',
+    messages: [{ role: 'user', content: 'continue with the promoted tool' }],
+    reasoningLevel: 'auto',
+    model: exactGeneratedToolModel('GeneratedTool', {}),
+    tools: { GeneratedTool: tool({ description: 'generated', inputSchema: z.object({}), execute: async () => ({ output: 'ok', metadata: { generatedTool } }) }) },
+    executionContract: {
+      taskKind: 'tool-forge-continuation',
+      requireToolCall: true,
+      activeToolNames: ['GeneratedTool'],
+      requiredFirstTool: { toolName: 'GeneratedTool', ...generatedTool },
+      reason: 'exact generated tool test'
+    },
+    onEvent: () => undefined
+  })
+  assert.equal(result.status, 'completed', JSON.stringify(result))
+  const generatedMetadata = result.toolCalls[0]?.metadata?.generatedTool as Record<string, unknown> | undefined
+  assert.equal(generatedMetadata?.versionId, 'version-1')
+})
+
+void test('execution contract rejects an exact generated-tool call without a matching result', async () => {
+  const result = await runAgent({
+    sessionId: 'session-exact-generated-tool-missing-result',
+    runId: 'run-exact-generated-tool-missing-result',
+    messages: [{ role: 'user', content: 'continue with the promoted tool' }],
+    reasoningLevel: 'auto',
+    model: exactGeneratedToolModel('GeneratedTool', {}),
+    tools: { GeneratedTool: tool({ description: 'generated', inputSchema: z.object({}), execute: async () => ({ output: 'ok' }) }) },
+    executionContract: {
+      taskKind: 'tool-forge-continuation',
+      requireToolCall: true,
+      activeToolNames: ['GeneratedTool'],
+      requiredFirstTool: {
+        toolName: 'GeneratedTool',
+        toolId: 'tool-1',
+        versionId: 'version-1',
+        fingerprint: 'a'.repeat(64),
+        capabilityRevision: 7
+      },
+      reason: 'missing result test'
+    },
+    onEvent: () => undefined
+  })
+  assert.equal(result.status, 'error')
+})
+
+void test('execution contract allows the normal tool-result then final-text path', async () => {
+  const requests: ModelMessage[][] = []
+  const result = await runAgent({
+    sessionId: 'session-execution-contract-success',
+    runId: 'run-execution-contract-success',
+    messages: [{ role: 'user', content: '继续验证' }],
+    reasoningLevel: 'auto',
+    model: multiStepModel(requests),
+    tools: {
+      Read: tool({ description: 'Read', inputSchema: z.object({}), execute: async () => ({ output: 'ok' }) })
+    },
+    executionContract: {
+      taskKind: 'workspace-validation',
+      requireToolCall: true,
+      activeToolNames: ['Read'],
+      reason: 'test contract'
+    },
+    onEvent: () => undefined
+  })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(result.toolCalls[0]?.status, 'done')
+  assert.equal(result.text, 'finished')
+})
+
+void test('execution contract retries step 0 without required tool choice when thinking mode rejects it', async () => {
+  const calls: ExecutionCallSnapshot[] = []
+  const events: StreamEvent[] = []
+  const result = await runAgent({
+    sessionId: 'session-thinking-tool-choice',
+    runId: 'run-thinking-tool-choice',
+    messages: [{ role: 'user', content: '修复问题' }],
+    reasoningLevel: 'auto',
+    model: thinkingToolChoiceModel(calls),
+    tools: {
+      Read: tool({ description: 'Read', inputSchema: z.object({}), execute: async () => ({ output: 'read' }) }),
+      Bash: tool({ description: 'Run', inputSchema: z.object({}), execute: async () => ({ output: 'ran' }) })
+    },
+    executionContract: {
+      taskKind: 'workspace-change',
+      requireToolCall: true,
+      activeToolNames: ['Read', 'Bash'],
+      reason: 'thinking-mode retry test'
+    },
+    onEvent: (event) => { events.push(event) }
+  })
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.text, 'finished')
+  assert.equal(result.toolCalls.length, 1)
+  assert.equal(result.toolCalls[0]?.status, 'done')
+  assert.equal(calls.length, 3)
+  assert.deepEqual(calls[0]?.toolChoice, { type: 'required' })
+  assert.deepEqual(calls[1]?.toolChoice, { type: 'auto' })
+  assert.deepEqual(calls[1]?.toolNames, ['Bash', 'Read'])
+  assert.match(JSON.stringify(calls[1]?.prompt), /HOST_EXECUTION_CONTRACT/)
+  assert.equal(events.filter((event) => event.type === 'error').length, 0)
+  assert.equal(events.filter((event) => event.type === 'step-start').length, 2)
+  assert.equal(events.filter((event) => event.type === 'message-end').length, 1)
+  assert.equal(events.filter((event) => event.type === 'done').length, 1)
+  assert.deepEqual(
+    events.filter((event) => event.type === 'context-usage').map((event) => event.type === 'context-usage' ? event.usage.source : null),
+    ['estimate', 'provider', 'estimate', 'provider', 'provider']
+  )
+})
+
+void test('execution contract does not retry when the first step fails with an unrelated error', async () => {
+  const calls: ExecutionCallSnapshot[] = []
+  const events: StreamEvent[] = []
+  const result = await runAgent({
+    sessionId: 'session-tool-choice-no-retry',
+    runId: 'run-tool-choice-no-retry',
+    messages: [{ role: 'user', content: '修复问题' }],
+    reasoningLevel: 'auto',
+    model: failingThenTextModel(new Error('fake provider failure'), calls),
+    tools: {
+      Read: tool({ description: 'Read', inputSchema: z.object({}), execute: async () => ({ output: 'read' }) })
+    },
+    executionContract: {
+      taskKind: 'workspace-change',
+      requireToolCall: true,
+      activeToolNames: ['Read'],
+      reason: 'no-retry test'
+    },
+    onEvent: (event) => { events.push(event) }
+  })
+
+  assert.equal(result.status, 'error')
+  assert.match(result.status === 'error' ? result.error : '', /fake provider failure/)
+  assert.equal(calls.length, 1)
+  assert.equal(events.filter((event) => event.type === 'error').length, 1)
+  assert.equal(events.filter((event) => event.type === 'step-start').length, 1)
+})
+
+void test('execution contract does not retry when a non-400 error mentions tool choice', async () => {
+  const calls: ExecutionCallSnapshot[] = []
+  const events: StreamEvent[] = []
+  const result = await runAgent({
+    sessionId: 'session-tool-choice-500',
+    runId: 'run-tool-choice-500',
+    messages: [{ role: 'user', content: '修复问题' }],
+    reasoningLevel: 'auto',
+    model: failingThenTextModel(Object.assign(new Error('tool_choice rejected by upstream'), { statusCode: 500 }), calls),
+    tools: {
+      Read: tool({ description: 'Read', inputSchema: z.object({}), execute: async () => ({ output: 'read' }) })
+    },
+    executionContract: {
+      taskKind: 'workspace-change',
+      requireToolCall: true,
+      activeToolNames: ['Read'],
+      reason: 'no-retry-500 test'
+    },
+    onEvent: (event) => { events.push(event) }
+  })
+
+  assert.equal(result.status, 'error')
+  assert.equal(calls.length, 1)
+  assert.equal(events.filter((event) => event.type === 'error').length, 1)
 })
 
 void test('runAgent emits error and done when startup fails before message-start', async () => {
@@ -215,6 +634,83 @@ void test('runAgent includes runMode in message-start', async () => {
   const start = events.find((event) => event.type === 'message-start')
   assert.ok(start?.type === 'message-start')
   assert.equal(start.runMode, 'research')
+})
+
+void test('runAgent reports configured step-limit exhaustion and keeps chronological tool segments', async () => {
+  const events: StreamEvent[] = []
+  const result = await runAgent({
+    sessionId: 'session-step-limit',
+    runId: 'run-step-limit',
+    messages: [{ role: 'user', content: 'keep using the tool' }],
+    reasoningLevel: 'auto',
+    maxSteps: 2,
+    model: stepLimitModel(),
+    tools: {
+      Again: tool({ description: 'Continue', inputSchema: z.object({}), execute: async () => ({ output: 'again' }) })
+    },
+    onEvent: (event) => { events.push(event) }
+  })
+
+  assert.equal(result.status, 'step-limit')
+  assert.equal(result.steps.count, 2)
+  assert.equal(result.steps.limit, 2)
+  assert.equal(result.finishReason, 'tool-calls')
+  assert.equal(result.text, '')
+  assert.deepEqual(result.toolCalls.map((call) => ({ id: call.toolCallId, output: call.output, status: call.status })), [
+    { id: 'call-0', output: 'again', status: 'done' },
+    { id: 'call-1', output: 'again', status: 'done' }
+  ])
+  assert.deepEqual(result.segments, [{ type: 'tools', tools: result.toolCalls }])
+  assert.equal(events.filter((event) => event.type === 'message-end').length, 1)
+  assert.equal(events.filter((event) => event.type === 'done').length, 1)
+  assert.equal(events.at(-1)?.type, 'done')
+})
+
+void test('runAgent replaces missing tool outputs with an explicit fallback', async () => {
+  const events: StreamEvent[] = []
+  await runAgent({
+    sessionId: 'session-missing-tool-output',
+    runId: 'run-missing-tool-output',
+    messages: [{ role: 'user', content: 'run the tool' }],
+    reasoningLevel: 'auto',
+    model: multiStepModel([]),
+    tools: {
+      Read: tool({
+        description: 'Return no output',
+        inputSchema: z.object({}),
+        execute: async () => undefined as unknown as string
+      })
+    },
+    onEvent: (event) => { events.push(event) }
+  })
+
+  const result = events.find((event) => event.type === 'tool-result')
+  assert.ok(result?.type === 'tool-result')
+  assert.equal(result.output, 'Tool returned no output.')
+  assert.doesNotMatch(result.output, /undefined/)
+})
+
+void test('next run consumes an already-projected checkpoint before automatic compression', async () => {
+  const requests: ModelMessage[][] = []
+  const checkpointSummary: ModelMessage = { role: 'system', content: 'Conversation checkpoint summary:\n- preserved history' }
+  await runAgent({
+    sessionId: 'session-checkpoint-consumption',
+    runId: 'run-checkpoint-consumption',
+    messages: [checkpointSummary, { role: 'user', content: 'latest current turn' }],
+    reasoningLevel: 'auto',
+    checkpointUsed: true,
+    model: multiStepModel(requests),
+    tools: {
+      Read: tool({ description: 'Return a short result', inputSchema: z.object({}), execute: async () => ({ output: 'ok' }) })
+    },
+    onEvent: () => undefined
+  })
+
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0]?.[0]?.content, checkpointSummary.content)
+  assert.ok(requests[0]?.some((message) => message.role === 'user' && (typeof message.content === 'string'
+    ? message.content === 'latest current turn'
+    : message.content.some((part) => part.type === 'text' && part.text === 'latest current turn'))))
 })
 
 void test('prepareStep compresses a giant tool result before the next model call', async () => {
@@ -254,6 +750,70 @@ void test('prepareStep compresses a giant tool result before the next model call
   const compressedContext = events.filter((event) => event.type === 'context-usage').find((event) => event.type === 'context-usage' && (event.usage.compressionCount ?? 0) > 0)
   assert.ok(compressedContext?.type === 'context-usage')
   assert.ok((compressedContext.usage.compressionBeforeTokens ?? 0) > (compressedContext.usage.compressionAfterTokens ?? 0))
+})
+
+void test('prepareStep applies steer messages at the next safe model step', async () => {
+  const requests: ModelMessage[][] = []
+  const appliedSteps: number[] = []
+  const events: StreamEvent[] = []
+  await runAgent({
+    sessionId: 'session-steer',
+    runId: 'run-steer',
+    messages: [{ role: 'user', content: 'start' }],
+    reasoningLevel: 'auto',
+    model: multiStepModel(requests),
+    tools: {
+      Read: tool({ description: 'Return a short result', inputSchema: z.object({}), execute: async () => ({ output: 'ok' }) })
+    },
+    takeSteerMessages: (stepNumber) => {
+      appliedSteps.push(stepNumber)
+      return stepNumber === 1 ? [{ id: 'steer-1', role: 'user', content: 'focus on the tests', createdAt: 1 }] : []
+    },
+    onEvent: (event) => { events.push(event) }
+  })
+
+  assert.deepEqual(appliedSteps, [0, 1])
+  assert.ok(requests[1]?.some((message) => message.role === 'user' && (typeof message.content === 'string'
+    ? message.content === 'focus on the tests'
+    : message.content.some((part) => part.type === 'text' && part.text === 'focus on the tests'))))
+  assert.deepEqual(events.filter((event) => event.type === 'step-start').map((event) => event.type === 'step-start' ? event.stepNumber : 0), [1, 2])
+})
+
+void test('onStepCommitted exposes replayable step messages after tool results close', async () => {
+  const requests: ModelMessage[][] = []
+  const committed: ChatMessage[] = []
+  const generatedImage = {
+    id: 'generated-image-1',
+    sessionId: 'session-step-commit',
+    filename: 'generated-image-1.jpg',
+    mediaType: 'image/jpeg',
+    sizeBytes: 1024,
+    createdAt: 123
+  }
+  await runAgent({
+    sessionId: 'session-step-commit',
+    runId: 'run-step-commit',
+    messages: [{ role: 'user', content: 'read then answer' }],
+    reasoningLevel: 'auto',
+    model: multiStepModel(requests),
+    tools: {
+      Read: tool({
+        description: 'Return a short result',
+        inputSchema: z.object({}),
+        execute: async () => ({ output: 'ok', metadata: { generatedImages: [generatedImage] } })
+      })
+    },
+    onStepCommitted: (message) => { committed.push(message) },
+    onEvent: () => undefined
+  })
+
+  assert.equal(committed.length, 2)
+  assert.equal(committed[0]?.segments?.[0]?.type, 'tools')
+  assert.equal(committed[0]?.toolCalls?.[0]?.status, 'done')
+  assert.equal(committed[0]?.toolCalls?.[0]?.output, 'ok')
+  assert.deepEqual(committed[0]?.toolCalls?.[0]?.metadata?.generatedImages, [generatedImage])
+  assert.deepEqual(committed[0]?.segments?.[0]?.type === 'tools' ? committed[0].segments[0].tools[0]?.metadata?.generatedImages : undefined, [generatedImage])
+  assert.equal(committed[1]?.content, 'finished')
 })
 
 void test('multi-step usage is cumulative while current context uses the final step', async () => {

@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Copy, Loader2, Pencil, Send, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Components } from 'react-markdown'
-import type { AssistantSegment, ChatMessage, RunMode, ToolCallInfo } from '@shared/types'
+import type { AssistantSegment, ChatMessage, RunMode } from '@shared/types'
 import { useStore } from '../store'
 import { t, type Language } from '../i18n'
 import ImagePreview from './ImagePreview'
@@ -11,11 +11,18 @@ import LinkPreview from './LinkPreview'
 import FileLink from './FileLink'
 import ToolCallList from './ToolCallList'
 import MessageMinimap from './MessageMinimap'
-import { segmentsFromLegacyMessage } from '../assistant-segments'
+import { mergeAdjacentSegments, segmentsFromLegacyMessage } from '../assistant-segments'
 import { splitUrls, classifyLink } from '../url-preview'
 import { extractResearchReports, visibleChatTools } from '../tool-visibility'
 import ResearchReportView from './research/ResearchReportView'
+import type { RunActivityState } from '../run-activity'
+import { toRunActivityViewModel } from '../run-activity'
+import { partitionStreamingMarkdown } from '../streaming-markdown'
+import { markdownUrlTransform } from '../markdown-links'
 import logoUrl from '../../../image/logo.png'
+
+const INITIAL_VISIBLE_MESSAGES = 60
+const MESSAGE_PAGE_SIZE = 40
 
 const markdownComponents = (onCopyLink?: (url: string) => void): Components => ({
   h1: ({ children }) => <h1 className="mb-3 mt-5 text-xl font-semibold text-[var(--color-text-primary)] first:mt-0">{children}</h1>,
@@ -33,7 +40,7 @@ const markdownComponents = (onCopyLink?: (url: string) => void): Components => (
   a: ({ href, children }) => {
     const classification = href ? classifyLink(href) : { kind: 'other' as const, isMarkdown: false }
     if (classification.kind === 'web' && href) return <LinkPreview url={href} onCopy={onCopyLink} />
-    if (classification.kind === 'file' && href) return <FileLink url={href} onCopy={onCopyLink} />
+    if (classification.kind === 'file' && href) return <FileLink url={href} />
     return <span className="break-words">{children}</span>
   },
   code: ({ className, children, ...props }) => {
@@ -64,7 +71,7 @@ interface Props {
   streamSegments: AssistantSegment[]
   streaming: boolean
   streamRunMode: RunMode | null
-  pendingToolCalls: ToolCallInfo[]
+  runActivity: RunActivityState
   onCopyLink?: (url: string) => void
   onCopyMessage?: (text: string) => void
   onEditMessage?: (messageId: string, text: string) => Promise<boolean>
@@ -76,7 +83,7 @@ export default function MessageStream({
   streamSegments,
   streaming,
   streamRunMode,
-  pendingToolCalls,
+  runActivity,
   onCopyLink,
   onCopyMessage,
   onEditMessage
@@ -84,7 +91,16 @@ export default function MessageStream({
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
+  const scrollFrameRef = useRef<number | null>(null)
+  const prependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
   const language = useStore((s) => s.language)
+  const mergedMessages = useMemo(() => mergeAssistantStepMessages(messages), [messages])
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_MESSAGES)
+  const visibleMessages = useMemo(
+    () => mergedMessages.slice(Math.max(0, mergedMessages.length - visibleCount)),
+    [mergedMessages, visibleCount]
+  )
+  const hiddenMessageCount = Math.max(0, mergedMessages.length - visibleMessages.length)
 
   useEffect(() => {
     const scrollElement = scrollRef.current
@@ -100,27 +116,66 @@ export default function MessageStream({
     return () => scrollElement.removeEventListener('scroll', updateNearBottom)
   }, [])
 
+  useLayoutEffect(() => {
+    const snapshot = prependSnapshotRef.current
+    const scrollElement = scrollRef.current
+    if (!snapshot || !scrollElement) return
+    scrollElement.scrollTop = snapshot.scrollTop + (scrollElement.scrollHeight - snapshot.scrollHeight)
+    prependSnapshotRef.current = null
+  }, [visibleMessages.length])
+
   useEffect(() => {
-    if (nearBottomRef.current) bottomRef.current?.scrollIntoView({ block: 'end' })
-  }, [messages, streamText, streamSegments, pendingToolCalls])
+    if (!nearBottomRef.current) return
+    if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      const scrollElement = scrollRef.current
+      if (scrollElement && nearBottomRef.current) scrollElement.scrollTop = scrollElement.scrollHeight
+      scrollFrameRef.current = null
+    })
+    return () => {
+      if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
+      scrollFrameRef.current = null
+    }
+  }, [messages, streamSegments])
+
+  const loadEarlierMessages = (): void => {
+    const scrollElement = scrollRef.current
+    if (scrollElement) {
+      prependSnapshotRef.current = { scrollHeight: scrollElement.scrollHeight, scrollTop: scrollElement.scrollTop }
+      nearBottomRef.current = false
+    }
+    setVisibleCount((count) => Math.min(mergedMessages.length, count + MESSAGE_PAGE_SIZE))
+  }
 
   return (
-    <div ref={scrollRef} className="relative flex min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+    <div ref={scrollRef} data-message-stream-scroll className="relative flex min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
       <MessageMinimap
-        messages={messages}
+        messages={visibleMessages}
         streamText={streamText}
         streaming={streaming}
-        pendingToolCalls={pendingToolCalls}
         scrollRef={scrollRef}
       />
-      <div className="mx-auto min-w-0 flex-1 px-[35px] pt-6">
+      <div data-message-stream-content className="mx-auto min-w-0 flex-1 px-[35px] pt-6">
         {messages.length === 0 && !streaming && (
           <div className="flex h-full min-h-[40vh] flex-col items-center justify-center text-center">
             <p className="text-sm text-[var(--color-text-muted)]">{t(language, 'message.welcome')}</p>
           </div>
         )}
 
-        {messages.map((message) => (
+        {hiddenMessageCount > 0 && (
+          <div className="mb-6 flex justify-center">
+            <button
+              data-history-window
+              type="button"
+              onClick={loadEarlierMessages}
+              className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-light)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+            >
+              {t(language, 'message.loadEarlier', { shown: visibleMessages.length, total: mergedMessages.length })}
+            </button>
+          </div>
+        )}
+
+        {visibleMessages.map((message) => (
           <MessageRow
             key={message.id}
             message={message}
@@ -136,6 +191,7 @@ export default function MessageStream({
           <StreamingReply
             streamSegments={streamSegments}
             runMode={streamRunMode}
+            activity={runActivity}
             language={language}
             onCopyLink={onCopyLink}
           />
@@ -150,27 +206,42 @@ export default function MessageStream({
 function StreamingReply({
   streamSegments,
   runMode,
+  activity,
   language,
   onCopyLink
 }: {
   streamSegments: AssistantSegment[]
   runMode: RunMode | null
+  activity: RunActivityState
   language: Language
   onCopyLink?: (url: string) => void
 }): React.JSX.Element | null {
+  const activityView = toRunActivityViewModel(activity, language)
   if (streamSegments.length === 0) {
     return (
-      <div className="mb-6 flex items-center gap-2 text-sm text-[var(--color-text-muted)]">
-        <Loader2 size={14} className="animate-spin text-[var(--color-accent)]" />
-        {t(language, 'message.thinking')}
+      <div className="mb-6 min-w-0">
+        <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-[var(--color-accent)]"><img src={logoUrl} alt="" className="h-4 w-4 rounded object-cover" />JOKER</div>
+        <RunStatusIndicator view={activityView} />
       </div>
     )
   }
 
   return (
-    <div className="mb-6 min-w-0">
+    <div data-streaming-reply className="mb-6 min-w-0">
       <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-[var(--color-accent)]"><img src={logoUrl} alt="" className="h-4 w-4 rounded object-cover" />JOKER</div>
       <AssistantSegmentsView segments={streamSegments} streaming runMode={runMode} onCopyLink={onCopyLink} />
+      <div className="mt-3"><RunStatusIndicator view={activityView} /></div>
+    </div>
+  )
+}
+
+function RunStatusIndicator({ view }: { view: ReturnType<typeof toRunActivityViewModel> }): React.JSX.Element {
+  const spinning = view.phase !== 'awaiting-approval' && view.phase !== 'failed' && view.phase !== 'cancelled'
+  return (
+    <div role="status" aria-live="polite" data-run-status={view.phase} data-status={view.dataStatus} className="flex min-h-6 items-center gap-2 text-xs text-[var(--color-text-muted)]">
+      {spinning ? <Loader2 size={13} className="animate-spin text-[var(--color-accent)] motion-reduce:animate-none" /> : <span className="h-2 w-2 rounded-full bg-[var(--color-accent)]" />}
+      <span>{view.label}</span>
+      {view.toolName && <span className="truncate text-[var(--color-text-secondary)]">· {view.toolName}{view.toolCount && view.toolCount > 1 ? ` +${view.toolCount - 1}` : ''}</span>}
     </div>
   )
 }
@@ -194,7 +265,9 @@ function AssistantSegmentsView({
           const isLiveTail = streaming && index === segments.length - 1
           return (
             <div key={`text-${index}`} className="text-sm leading-6 text-[var(--color-text-primary)]">
-              <MarkdownContent content={segment.text} onCopyLink={onCopyLink} />
+              {isLiveTail
+                ? <StreamingMarkdownContent content={segment.text} onCopyLink={onCopyLink} />
+                : <MarkdownContent content={segment.text} onCopyLink={onCopyLink} />}
               {isLiveTail && (
                 <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-[var(--color-accent)] align-middle" />
               )}
@@ -217,11 +290,51 @@ function AssistantSegmentsView({
   )
 }
 
-function MarkdownContent({ content, onCopyLink }: { content: string; onCopyLink?: (url: string) => void }): React.JSX.Element {
+function mergeAssistantStepMessages(messages: ChatMessage[]): ChatMessage[] {
+  const merged: ChatMessage[] = []
+  for (const message of messages) {
+    const previous = merged.at(-1)
+    if (message.role === 'assistant' && previous?.role === 'assistant' && isStepMessage(previous) && isStepMessage(message)) {
+      const previousSegments = previous.segments ?? segmentsFromLegacyMessage(previous.content, previous.toolCalls)
+      const nextSegments = message.segments ?? segmentsFromLegacyMessage(message.content, message.toolCalls)
+      const segments = mergeAdjacentSegments([...previousSegments, ...nextSegments])
+      merged[merged.length - 1] = {
+        ...previous,
+        id: `${previous.id}+${message.id}`,
+        content: previous.content + message.content,
+        toolCalls: segments.flatMap((segment) => segment.type === 'tools' ? segment.tools : []),
+        segments,
+        usage: message.usage ?? previous.usage,
+        durationMs: message.durationMs ?? previous.durationMs,
+        createdAt: message.createdAt
+      }
+      continue
+    }
+    merged.push(message)
+  }
+  return merged
+}
+
+function isStepMessage(message: ChatMessage): boolean {
+  return /-step-\d+$/.test(message.id)
+}
+
+const MarkdownContent = memo(function MarkdownContent({ content, onCopyLink }: { content: string; onCopyLink?: (url: string) => void }): React.JSX.Element {
+  const components = useMemo(() => markdownComponents(onCopyLink), [onCopyLink])
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents(onCopyLink)}>
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={markdownUrlTransform}>
       {content}
     </ReactMarkdown>
+  )
+})
+
+function StreamingMarkdownContent({ content, onCopyLink }: { content: string; onCopyLink?: (url: string) => void }): React.JSX.Element {
+  const partition = useMemo(() => partitionStreamingMarkdown(content), [content])
+  return (
+    <>
+      {partition.blocks.map((block, index) => <MarkdownContent key={`${index}-${block.length}`} content={block} onCopyLink={onCopyLink} />)}
+      {partition.tail && <span className="whitespace-pre-wrap break-words">{partition.tail}</span>}
+    </>
   )
 }
 
@@ -248,7 +361,7 @@ function UrlAwareText({ text, onCopyLink }: { text: string; onCopyLink?: (url: s
         if (token.type === 'url') {
           const classification = classifyLink(token.value)
           return classification.kind === 'file'
-            ? <FileLink key={`${token.value}-${index}`} url={token.value} onCopy={onCopyLink} />
+            ? <FileLink key={`${token.value}-${index}`} url={token.value} />
             : <LinkPreview key={`${token.value}-${index}`} url={token.value} onCopy={onCopyLink} />
         }
         return <span key={`${token.value}-${index}`}>{token.value}</span>
@@ -256,7 +369,7 @@ function UrlAwareText({ text, onCopyLink }: { text: string; onCopyLink?: (url: s
     </div>
   )
 }
-function MessageRow({ message, language, streaming, onCopyLink, onCopyMessage, onEditMessage }: { message: ChatMessage; language: Language; streaming: boolean; onCopyLink?: (url: string) => void; onCopyMessage?: (text: string) => void; onEditMessage?: (messageId: string, text: string) => Promise<boolean> }): React.JSX.Element {
+const MessageRow = memo(function MessageRow({ message, language, streaming, onCopyLink, onCopyMessage, onEditMessage }: { message: ChatMessage; language: Language; streaming: boolean; onCopyLink?: (url: string) => void; onCopyMessage?: (text: string) => void; onEditMessage?: (messageId: string, text: string) => Promise<boolean> }): React.JSX.Element {
   const isUser = message.role === 'user'
   const [editing, setEditing] = useState(false)
   const [editText, setEditText] = useState(message.content)
@@ -291,7 +404,7 @@ const assistantSegments = !isUser
   const duration = !isUser && message.durationMs !== undefined ? formatDuration(message.durationMs) : null
 
   return (
-    <div className={`group mb-6 flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div data-message-row data-message-role={message.role} className={`group mb-6 flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div className={`min-w-0 max-w-[calc(100%-70px)] ${isUser ? 'ml-auto items-end' : 'mr-auto items-start'} flex flex-col`}>
         <div className={`mb-1 flex w-full items-center gap-2 text-xs font-medium ${isUser ? 'justify-end text-[var(--color-text-secondary)]' : 'text-[var(--color-accent)]'} `}>
           <span>{isUser ? t(language, 'message.you') : 'JOKER'}</span>
@@ -316,7 +429,7 @@ const assistantSegments = !isUser
       </div>
     </div>
   )
-}
+})
 
 function formatDuration(durationMs: number): string {
   const totalSeconds = Math.max(0, Math.round(durationMs / 1000))

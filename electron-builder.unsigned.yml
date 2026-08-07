@@ -1,0 +1,8 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "extends": "./electron-builder.yml",
+  "win": {
+    "signAndEditExecutable": false,
+    "target": "dir"
+  }
+}

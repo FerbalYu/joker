@@ -16,10 +16,8 @@ export function findSlashToken(text: string, caret: number): SlashToken | null {
 
 export function filterSkills(skills: readonly SkillDescriptor[], query: string): SkillDescriptor[] {
   const normalized = query.trim().toLowerCase()
-  return skills
-    .filter((skill) => skill.enabled && skill.trusted)
-    .filter((skill) => {
-      if (!normalized) return true
-      return [skill.id, skill.name, skill.description].some((value) => value.toLowerCase().includes(normalized))
-    })
+  return skills.filter((skill) => {
+    if (!normalized) return true
+    return [skill.id, skill.name, skill.description].some((value) => value.toLowerCase().includes(normalized))
+  })
 }

@@ -1,0 +1,47 @@
+{
+  "id": "summarize-task-json",
+  "displayName": "SummarizeTaskJson",
+  "goal": "统计当前项目 fixtures/tasks.json 中各状态的任务数量，并按数量排序",
+  "reason": "现有工具缺少对项目内结构化任务数据的统计能力（ToolForge P0 vertical slice fixture）",
+  "requestedBy": {
+    "sessionId": "qualification-p0",
+    "runId": "runtime-qualification",
+    "userMessageId": "qualification-p0"
+  },
+  "scope": "project",
+  "projectId": "qualification-p0",
+  "inputContract": {},
+  "outputContract": {
+    "format": "text",
+    "lines": "每行一个状态统计，按数量降序（同数量按名称升序）"
+  },
+  "permissions": {
+    "filesystem": {
+      "read": ["fixtures/tasks.json"],
+      "write": []
+    },
+    "network": {
+      "hosts": []
+    },
+    "process": {
+      "commands": []
+    },
+    "environment": {
+      "keys": []
+    },
+    "secrets": {
+      "handles": []
+    }
+  },
+  "acceptance": [
+    "读取 workspace 内 fixtures/tasks.json",
+    "按 status 分组计数并按数量降序输出",
+    "文件缺失或 JSON 非法时报错"
+  ],
+  "examples": [
+    {
+      "input": {},
+      "expected": "open: 4\ndone: 3\nin_progress: 2"
+    }
+  ]
+}

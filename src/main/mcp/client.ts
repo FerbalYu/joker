@@ -5,6 +5,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
 import type { McpServerConfig, McpServerRuntime, McpServerStatus, McpRecoveryState } from '../../shared/types'
+import { createSafeDispatcher } from '../tools/safe-fetch'
 import { formatSafeError } from '../agent/diagnostics'
 import { writeMcpAudit } from './audit'
 import { mcpIdentityFingerprint, normalizedMcpTrust } from './identity'
@@ -208,7 +209,21 @@ class McpManager {
       transport = new StdioClientTransport({ command: config.command, args: config.args ?? [] })
     } else {
       if (!config.url) throw new Error('http transport requires a url')
-      transport = new StreamableHTTPClientTransport(new URL(config.url), { requestInit: config.headers ? { headers: config.headers } : undefined })
+      const target = new URL(config.url)
+      const dispatcher = await createSafeDispatcher(target)
+      const guardedFetch: typeof globalThis.fetch = async (input, init) => {
+        const requested = new URL(typeof input === 'string' || input instanceof URL ? input.toString() : input.url)
+        if (requested.origin !== target.origin) throw new Error('MCP HTTP transport cannot redirect to a different origin')
+        return globalThis.fetch(requested, {
+          ...init,
+          redirect: 'error',
+          ...({ dispatcher } as unknown as RequestInit)
+        })
+      }
+      transport = new StreamableHTTPClientTransport(target, {
+        requestInit: config.headers ? { headers: config.headers } : undefined,
+        fetch: guardedFetch
+      })
     }
     const timeoutMs = config.initializeTimeoutMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS
     try {

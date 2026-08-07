@@ -31,6 +31,7 @@ export interface StreamTransportOptions {
   highWaterMark?: number
   terminalReserve?: number
   maxPending?: number
+  maxCompletedRuns?: number
   postMessage: (message: StreamEventEnvelope | { type: 'stream:flow'; flow: StreamFlowState }) => void
   onFlow?: (flow: StreamFlowState) => void
 }
@@ -72,6 +73,7 @@ export class StreamTransport {
   private readonly highWaterMark: number
   private readonly terminalReserve: number
   private readonly maxPending: number
+  private readonly maxCompletedRuns: number
   private readonly postMessage: StreamTransportOptions['postMessage']
   private readonly onFlow?: StreamTransportOptions['onFlow']
   private readonly pending: PendingSend[] = []
@@ -98,6 +100,7 @@ export class StreamTransport {
     const requestedReserve = Math.floor(options.terminalReserve ?? STREAM_TERMINAL_RESERVE)
     this.terminalReserve = Math.max(1, Math.min(this.highWaterMark - 1, requestedReserve))
     this.maxPending = Math.max(1, Math.floor(options.maxPending ?? this.highWaterMark))
+    this.maxCompletedRuns = Math.max(0, Math.floor(options.maxCompletedRuns ?? 64))
     this.postMessage = options.postMessage
     this.onFlow = options.onFlow
   }
@@ -166,17 +169,20 @@ export class StreamTransport {
     this.promoteBlocked()
     this.pump()
     this.maybeDrain(runId)
+    this.pruneCompletedRuns()
     return true
   }
 
-  cancelRun(runId: string): void {
+  cancelRun(runId: string, options: { drain?: boolean } = {}): void {
     this.rejectMatching(this.pending, runId, 'Stream run cancelled')
     this.rejectMatching(this.blocked, runId, 'Stream run cancelled')
     // Already-posted envelopes remain in-flight so their renderer ACKs are
-    // still valid. This avoids accounting leaks during run replacement.
+    // still valid. Endpoint retirement passes drain:false because that
+    // renderer document no longer owns the queue lifecycle.
     this.emitFlow('cancelled', runId)
     this.pump()
-    this.maybeDrain(runId)
+    if (options.drain !== false) this.maybeDrain(runId)
+    this.pruneCompletedRuns()
   }
 
   close(reason = 'Stream transport closed'): void {
@@ -297,6 +303,16 @@ export class StreamTransport {
       this.runs.set(runId, counters)
     }
     return counters
+  }
+
+  private pruneCompletedRuns(): void {
+    if (this.maxCompletedRuns < 0) return
+    const activeRunIds = new Set<string>()
+    for (const item of this.pending) activeRunIds.add(item.runId)
+    for (const item of this.blocked) activeRunIds.add(item.runId)
+    for (const item of this.inFlight.values()) activeRunIds.add(item.runId)
+    const completed = [...this.runs.keys()].filter((runId) => !activeRunIds.has(runId))
+    for (const runId of completed.slice(0, Math.max(0, completed.length - this.maxCompletedRuns))) this.runs.delete(runId)
   }
 
   private rejectMatching(items: PendingSend[], runId: string, message: string): void {

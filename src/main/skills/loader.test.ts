@@ -17,7 +17,31 @@ void test('parses external Skills with BOM, CRLF, and folder-id fallback', () =>
     assert.equal(skill.id, 'external-qa')
     assert.equal(skill.source, 'external')
     assert.equal(skill.trusted, false)
+    assert.equal(skill.trustState, 'untrusted')
+    assert.match(skill.fingerprint, /^[a-f0-9]{64}$/)
     assert.equal(skill.instructions, 'Use the browser.')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+void test('Skill fingerprints are stable and content-bound', () => {
+  const root = mkdtempSync(join(tmpdir(), 'joker-skills-'))
+  try {
+    const skillDir = join(root, 'fingerprint-skill')
+    mkdirSync(skillDir)
+    const skillPath = join(skillDir, 'SKILL.md')
+    const original = '---\nid: fingerprint-skill\nname: Fingerprint Skill\ndescription: Test\n---\nOriginal instructions.\n'
+    writeFileSync(skillPath, original, 'utf8')
+
+    const first = parseSkillFile(skillPath, 'user')
+    const second = parseSkillFile(skillPath, 'user')
+    assert.equal(first.fingerprint, second.fingerprint)
+
+    writeFileSync(skillPath, original.replace('Original', 'Changed'), 'utf8')
+    const changed = parseSkillFile(skillPath, 'user')
+    assert.notEqual(changed.fingerprint, first.fingerprint)
+    assert.notEqual(parseSkillFile(skillPath, 'external').fingerprint, changed.fingerprint)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

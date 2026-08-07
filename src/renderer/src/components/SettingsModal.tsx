@@ -4,18 +4,28 @@ import type { ApiFormat, AppConfig, ContextOptimizationMode, ImageProviderConfig
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '@shared/types'
 import { useStore } from '../store'
 import { localizeError, t } from '../i18n'
+import GeneratedToolsSettings from './generated-tools/GeneratedToolsSettings'
 
 interface Props {
   onClose: () => void
+  onCreateInConversation?: () => void
+  initialTab?: SettingsTab
+  initialGeneratedToolId?: string
+  initialGeneratedToolFocus?: 'overview' | 'edit'
+  initialGeneratedToolRequestedFrom?: 'settings' | 'conversation'
 }
 
-type SettingsTab = 'provider' | 'image' | 'mcp' | 'skills'
+type SettingsTab = 'provider' | 'image' | 'generated-tools' | 'mcp' | 'skills'
 
 const API_FORMATS: ApiFormat[] = ['anthropic-messages', 'chat-completions', 'responses']
 const COMPRESSION_TRIGGER_RATIO = 0.8
 const COMPRESSION_SAFETY_RESERVE = 4096
 const DEFAULT_OUTPUT_TOKEN_RESERVE = 8192
 const CONTEXT_OPTIMIZATION_MODES: ContextOptimizationMode[] = ['legacy', 'observe', 'v2', 'disabled']
+
+const AGNES_DEFAULT_MODEL = 'agnes-image-2.1-flash'
+const AGNES_DEFAULT_BASE_URL = 'https://apihub.agnes-ai.com/v1'
+const AGNES_RATIOS = ['1:1', '3:4', '4:3', '16:9', '9:16', '2:3', '3:2', '21:9'] as const
 
 function compressionThreshold(maxContextTokens: number): number {
   return Math.max(1, Math.min(
@@ -64,7 +74,14 @@ function createImageProvider(index: number): ImageProviderEntry {
   }
 }
 
-export default function SettingsModal({ onClose }: Props): React.JSX.Element {
+export default function SettingsModal({
+  onClose,
+  onCreateInConversation,
+  initialTab = 'provider',
+  initialGeneratedToolId,
+  initialGeneratedToolFocus = 'overview',
+  initialGeneratedToolRequestedFrom = 'settings'
+}: Props): React.JSX.Element {
   const storeConfig = useStore((s) => s.config)
   const setStoreConfig = useStore((s) => s.setConfig)
   const language = useStore((s) => s.language)
@@ -77,7 +94,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
   const [fetchingModels, setFetchingModels] = useState(false)
   const [testingProvider, setTestingProvider] = useState(false)
   const [statusMessage, setStatusMessage] = useState('')
-  const [activeTab, setActiveTab] = useState<SettingsTab>('provider')
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab)
   const [mcpServers, setMcpServers] = useState<McpServerRuntime[]>([])
   const [skills, setSkills] = useState<SkillDescriptor[]>([])
   const [imageConfig, setImageConfig] = useState<ImageProviderConfig | null>(null)
@@ -164,6 +181,27 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
     })
   }
 
+  const updateImageProtocol = (protocol: ImageProviderEntry['protocol']): void => {
+    if (!selectedImageProvider || protocol === selectedImageProvider.protocol) return
+    const updates: Partial<ImageProviderEntry> = { protocol }
+    if (protocol === 'agnes-images') {
+      const otherModelDefaults = ['gpt-image-1', 'grok-imagine-image']
+      if (!selectedImageProvider.model || otherModelDefaults.includes(selectedImageProvider.model)) {
+        updates.model = AGNES_DEFAULT_MODEL
+      }
+      if (selectedImageProvider.baseUrl === 'https://api.openai.com/v1') {
+        updates.baseUrl = AGNES_DEFAULT_BASE_URL
+      }
+      if (!(AGNES_RATIOS as readonly string[]).includes(selectedImageProvider.defaultAspectRatio)) {
+        updates.defaultAspectRatio = '1:1'
+      }
+      if (!/^(1k|2k|3k|4k)$/.test(selectedImageProvider.defaultResolution)) {
+        updates.defaultResolution = '1k'
+      }
+    }
+    updateImageProvider(updates)
+  }
+
   const addImageProvider = (): void => {
     if (!imageConfig) return
     const provider = createImageProvider(imageConfig.providers.length)
@@ -224,9 +262,20 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
     await refreshMcpServers()
   }
 
+  const refreshSkills = async (): Promise<void> => {
+    setSkills(await window.joker.skill.list())
+  }
+
   const toggleSkill = async (skill: SkillDescriptor): Promise<void> => {
-    const changed = skill.enabled ? await window.joker.skill.disable(skill.id) : await window.joker.skill.enable(skill.id)
-    if (changed) setSkills(await window.joker.skill.list())
+    setError('')
+    const result = skill.enabled
+      ? await window.joker.skill.disable(skill.id)
+      : await window.joker.skill.enable(skill.id)
+    if (!result.success) {
+      setError(localizeError(language, result.error ?? t(language, 'settings.skillEnableFailed')))
+      return
+    }
+    await refreshSkills()
   }
 
   const reloadSkills = async (): Promise<void> => {
@@ -463,7 +512,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
         </header>
 
         <nav className="flex border-b border-[var(--color-border)] px-6" aria-label={t(language, 'settings.sections')}>
-          {(['provider', 'image', 'mcp', 'skills'] as const).map((tab) => (
+          {(['provider', 'image', 'generated-tools', 'mcp', 'skills'] as const).map((tab) => (
             <button
               key={tab}
               type="button"
@@ -707,14 +756,15 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
                 </div>
                 {imageStatus && <p className="mb-3 text-xs text-[var(--color-accent)]">{imageStatus}</p>}
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageProtocol')}</span><select value={selectedImageProvider.protocol} onChange={(event) => updateImageProvider({ protocol: event.target.value as ImageProviderEntry['protocol'] })} className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]"><option value="openai-images">OpenAI Images</option><option value="grok-images">Grok Images Compatible</option></select></label>
+                  <label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageProtocol')}</span><select value={selectedImageProvider.protocol} onChange={(event) => updateImageProtocol(event.target.value as ImageProviderEntry['protocol'])} className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]"><option value="openai-images">OpenAI Images</option><option value="grok-images">Grok Images Compatible</option><option value="agnes-images">Agnes Images</option></select></label>
                   <div ref={imageModelMenuRef} className="relative text-xs text-[var(--color-text-muted)]">
                     <div className="mb-1 flex items-center justify-between gap-2">
                       <span>{t(language, 'settings.imageModel')}</span>
                       <button
                         type="button"
                         onClick={() => void fetchImageModels()}
-                        disabled={imageFetchingModels[selectedImageProvider.id] === true}
+                        disabled={selectedImageProvider.protocol === 'agnes-images' || imageFetchingModels[selectedImageProvider.id] === true}
+                        title={selectedImageProvider.protocol === 'agnes-images' ? t(language, 'settings.imageModelsUnavailable') : undefined}
                         className="rounded px-2 py-1 text-[11px] text-[var(--color-accent)] hover:bg-[var(--color-surface-hover)] disabled:opacity-40"
                       >
                         {imageFetchingModels[selectedImageProvider.id]
@@ -742,7 +792,7 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
                           if (selectedImageModels.length > 0) setImageModelMenuOpen(true)
                         }}
                         onKeyDown={handleImageModelKeyDown}
-                        placeholder={selectedImageProvider.protocol === 'grok-images' ? 'grok-imagine-image' : 'gpt-image-1'}
+                        placeholder={selectedImageProvider.protocol === 'grok-images' ? 'grok-imagine-image' : selectedImageProvider.protocol === 'agnes-images' ? AGNES_DEFAULT_MODEL : 'gpt-image-1'}
                         className="min-w-0 flex-1 rounded-l-md border-0 bg-transparent px-3 py-2 text-sm text-[var(--color-text-primary)] outline-none"
                       />
                       <button
@@ -791,11 +841,21 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
                   <label className="text-xs text-[var(--color-text-muted)] sm:col-span-2"><span className="mb-1 block">{t(language, 'settings.baseUrl')}</span><input value={selectedImageProvider.baseUrl} onChange={(event) => updateImageProvider({ baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]" /></label>
                   <label className="text-xs text-[var(--color-text-muted)] sm:col-span-2"><span className="mb-1 block">{t(language, 'settings.apiKey')}</span><input type="password" value={selectedImageProvider.apiKey} onChange={(event) => updateImageProvider({ apiKey: event.target.value })} placeholder="sk-..." className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]" /></label>
                   <label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.modelsPath')}</span><input value={selectedImageProvider.modelsPath} onChange={(event) => updateImageProvider({ modelsPath: event.target.value })} className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]" /></label>
-                  {selectedImageProvider.protocol === 'openai-images' ? <label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageDefaultSize')}</span><input value={selectedImageProvider.defaultSize} onChange={(event) => updateImageProvider({ defaultSize: event.target.value })} placeholder="1024x1024" className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]" /></label> : <><label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageAspectRatio')}</span><input value={selectedImageProvider.defaultAspectRatio} onChange={(event) => updateImageProvider({ defaultAspectRatio: event.target.value })} placeholder="1:1" className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]" /></label><label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageResolution')}</span><select value={selectedImageProvider.defaultResolution} onChange={(event) => updateImageProvider({ defaultResolution: event.target.value })} className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]"><option value="1k">1K</option><option value="2k">2K</option><option value="4k">4K</option></select></label></>}
+                  {selectedImageProvider.protocol === 'openai-images' ? <label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageDefaultSize')}</span><input value={selectedImageProvider.defaultSize} onChange={(event) => updateImageProvider({ defaultSize: event.target.value })} placeholder="1024x1024" className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]" /></label> : selectedImageProvider.protocol === 'agnes-images' ? <><label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageAspectRatio')}</span><select value={selectedImageProvider.defaultAspectRatio} onChange={(event) => updateImageProvider({ defaultAspectRatio: event.target.value })} className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]">{AGNES_RATIOS.map((ratio) => <option key={ratio} value={ratio}>{ratio}</option>)}</select></label><label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageResolution')}</span><select value={selectedImageProvider.defaultResolution} onChange={(event) => updateImageProvider({ defaultResolution: event.target.value })} className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]"><option value="1k">1K</option><option value="2k">2K</option><option value="3k">3K</option><option value="4k">4K</option></select></label></> : <><label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageAspectRatio')}</span><input value={selectedImageProvider.defaultAspectRatio} onChange={(event) => updateImageProvider({ defaultAspectRatio: event.target.value })} placeholder="1:1" className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]" /></label><label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageResolution')}</span><select value={selectedImageProvider.defaultResolution} onChange={(event) => updateImageProvider({ defaultResolution: event.target.value })} className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]"><option value="1k">1K</option><option value="2k">2K</option><option value="4k">4K</option></select></label></>}
                   <label className="text-xs text-[var(--color-text-muted)]"><span className="mb-1 block">{t(language, 'settings.imageResponseFormat')}</span><select value={selectedImageProvider.responseFormat} onChange={(event) => updateImageProvider({ responseFormat: event.target.value as ImageProviderEntry['responseFormat'] })} className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text-primary)]"><option value="url">URL</option><option value="b64_json">Base64 JSON</option></select></label>
                 </div>
                 <div className="mt-4 flex items-center justify-between rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2"><span className="text-sm text-[var(--color-text-primary)]">{t(language, 'settings.imageEnabled')}</span><button type="button" onClick={() => updateImageProvider({ enabled: !selectedImageProvider.enabled })} className={`rounded-full px-3 py-1 text-xs font-medium ${selectedImageProvider.enabled ? 'bg-[var(--color-accent)] text-[var(--color-bg)]' : 'bg-[var(--color-surface-active)] text-[var(--color-text-secondary)]'}`}>{selectedImageProvider.enabled ? t(language, 'settings.enabled') : t(language, 'settings.disabled')}</button></div>
               </section>
+            )}
+
+            {activeTab === 'generated-tools' && (
+              <GeneratedToolsSettings
+                language={language}
+                initialToolId={initialGeneratedToolId}
+                initialFocus={initialGeneratedToolFocus}
+                editRequestedFrom={initialGeneratedToolRequestedFrom}
+                onCreateInConversation={onCreateInConversation}
+              />
             )}
 
             {activeTab === 'mcp' && (
@@ -853,18 +913,44 @@ export default function SettingsModal({ onClose }: Props): React.JSX.Element {
                 </div>
                 <div className="space-y-2 rounded-md border border-[var(--color-border)] p-3">
                   {skills.length === 0 && <div className="space-y-2 rounded-md bg-[var(--color-bg)] p-3 text-sm text-[var(--color-text-muted)]"><p>{t(language, 'settings.noSkills')}</p><p>{t(language, 'settings.skillDirectories')}</p><code className="block whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 text-xs">{t(language, 'settings.skillExample')}</code><p>{t(language, 'settings.skillSafety')}</p></div>}
-                  {skills.map((skill) => <div key={skill.id} className="flex items-center gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3"><div className="min-w-0 flex-1"><p className="truncate font-medium text-[var(--color-text-primary)]">{skill.name}</p><p className="mt-1 text-sm text-[var(--color-text-muted)]">{skill.description}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{skill.source === 'external' ? t(language, 'settings.skillSourceExternal') : skill.source}{skill.version ? ` · v${skill.version}` : ''}</p></div><button type="button" onClick={() => void toggleSkill(skill)} className={`min-h-10 rounded px-3 py-2 text-sm ${skill.enabled ? 'bg-[var(--color-accent)] text-[var(--color-bg)]' : 'bg-[var(--color-surface-active)] text-[var(--color-text-secondary)]'}`}>{skill.enabled ? t(language, 'settings.enabled') : t(language, 'settings.disabled')}</button></div>)}
+                  {skills.map((skill) => {
+                    const trustState = skill.trustState ?? (skill.enabled ? 'trusted' : 'untrusted')
+                    return (
+                      <div key={skill.id} data-skill-card={skill.id} className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
+                        <div className="flex items-start gap-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-medium text-[var(--color-text-primary)]">{skill.name}</p>
+                            <p className="mt-1 text-sm text-[var(--color-text-muted)]">{skill.description}</p>
+                            <p className="mt-1 text-xs text-[var(--color-text-muted)]">{skill.source === 'external' ? t(language, 'settings.skillSourceExternal') : skill.source}{skill.version ? ` · v${skill.version}` : ''}</p>
+                            {trustState === 'changed' && <p data-testid={`skill-changed-${skill.id}`} className="mt-2 text-xs text-amber-400">{t(language, 'settings.skillChangedHint')}</p>}
+                          </div>
+                          <span data-testid={`skill-enabled-state-${skill.id}`} className={`shrink-0 text-xs ${skill.enabled ? 'text-[var(--color-accent)]' : trustState === 'changed' ? 'text-amber-400' : 'text-[var(--color-text-muted)]'}`}>
+                            {trustState === 'changed' ? t(language, 'settings.skillChanged') : skill.enabled ? t(language, 'settings.enabled') : t(language, 'settings.disabled')}
+                          </span>
+                        </div>
+                        <div className="mt-3 flex justify-end">
+                          <button type="button" data-testid={`skill-toggle-${skill.id}`} onClick={() => void toggleSkill(skill)} className={`min-h-10 rounded px-3 py-2 text-sm ${skill.enabled ? 'bg-[var(--color-accent)] text-[var(--color-bg)]' : 'bg-[var(--color-surface-active)] text-[var(--color-text-secondary)]'}`}>
+                            {skill.enabled ? t(language, 'settings.disableSkill') : trustState === 'changed' ? t(language, 'settings.reenableSkill') : t(language, 'settings.enableSkill')}
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               </section>
             )}
           </main>
         </div>
 
-        <footer className="flex items-center justify-end gap-3 border-t border-[var(--color-border)] px-6 py-3">
-          {error && <span className="mr-auto text-xs text-red-400">{error}</span>}
-          {saved && <span className="mr-auto flex items-center gap-1 text-sm text-[var(--color-accent)]"><Check size={14} /> {t(language, 'settings.saved')}</span>}
-          <button onClick={handleSave} disabled={saving} className="rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-bg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40">{saving ? t(language, 'settings.saving') : t(language, 'settings.save')}</button>
-        </footer>
+        {(activeTab === 'provider' || activeTab === 'image') ? (
+          <footer className="flex items-center justify-end gap-3 border-t border-[var(--color-border)] px-6 py-3">
+            {error && <span className="mr-auto text-xs text-red-400">{error}</span>}
+            {saved && <span className="mr-auto flex items-center gap-1 text-sm text-[var(--color-accent)]"><Check size={14} /> {t(language, 'settings.saved')}</span>}
+            <button onClick={handleSave} disabled={saving} className="rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-[var(--color-bg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40">{saving ? t(language, 'settings.saving') : t(language, 'settings.save')}</button>
+          </footer>
+        ) : error ? (
+          <footer className="border-t border-[var(--color-border)] px-6 py-3 text-xs text-red-400">{error}</footer>
+        ) : null}
       </div>
     </div>
   )

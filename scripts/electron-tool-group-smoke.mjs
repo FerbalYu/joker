@@ -1,6 +1,6 @@
 import { chromium } from 'playwright-core'
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -181,7 +181,7 @@ try {
   const textarea = page.locator('textarea').first()
   await textarea.fill('Run the deterministic tool lifecycle smoke.')
   await textarea.press('Enter')
-  await page.waitForFunction(() => document.querySelector('textarea')?.disabled === true, undefined, { timeout: 10_000 })
+  await page.waitForFunction(() => document.querySelector('textarea')?.disabled === false && Boolean(document.querySelector('[data-run-status]')), undefined, { timeout: 10_000 })
 
   await waitFor(async () => {
     const snapshot = await lifecycleSnapshot(page)
@@ -207,9 +207,32 @@ try {
   await detailToggle.click()
   check('manual click collapses both tool groups', await chatToggle.getAttribute('aria-expanded') === 'false' && await detailToggle.getAttribute('aria-expanded') === 'false')
 
-  await page.waitForFunction(() => document.querySelector('textarea')?.disabled === false, undefined, { timeout: 60_000 })
+  await page.waitForFunction(() => !document.querySelector('[data-run-status]'), undefined, { timeout: 60_000 })
+  await waitFor(async () => {
+    const snapshot = await lifecycleSnapshot(page)
+    return snapshot.chat?.text.includes('3') && snapshot.chat.expanded === 'false'
+  }, 20_000, 'persisted collapsed three-tool group')
   const completed = await lifecycleSnapshot(page)
-  check('tool completion does not override manual collapsed chat state', completed.chat?.expanded === 'false', completed)
+  check(
+    'completed step tools remain visible and collapsed in chat',
+    completed.chat?.expanded === 'false' &&
+      completed.chat.text.includes('3') &&
+      completed.chat.text.includes('读取') &&
+      completed.chat.text.includes('Git 状态') &&
+      completed.chat.text.includes('Git 日志'),
+    completed
+  )
+  const sessionFiles = (await readdir(join(home, '.joker', 'sessions'))).filter((name) => name.endsWith('.json'))
+  check('tool lifecycle persisted exactly one session file', sessionFiles.length === 1, sessionFiles)
+  const sessionEnvelope = JSON.parse(await readFile(join(home, '.joker', 'sessions', sessionFiles[0]), 'utf8'))
+  const persistedTools = sessionEnvelope.data.messages.flatMap((message) => message.toolCalls ?? [])
+  check(
+    'persisted session retains every completed lifecycle tool',
+    persistedTools.length === 3 &&
+      persistedTools.map((tool) => tool.toolCallId).join(',') === 'call_lifecycle_first,call_lifecycle_second,call_lifecycle_third' &&
+      persistedTools.every((tool) => tool.status === 'done' || tool.status === 'error'),
+    persistedTools
+  )
   check('completed tools leave the pending-only detail panel', completed.detail === null, completed)
   check('renderer has no relevant console errors', consoleErrors.length === 0, consoleErrors)
   check('renderer has no page errors', pageErrors.length === 0, pageErrors)

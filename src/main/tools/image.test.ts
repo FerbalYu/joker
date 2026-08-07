@@ -9,6 +9,7 @@ void test('GenerateImage is a dedicated built-in tool with bounded input', () =>
   assert.doesNotThrow(() => tool.inputSchema.parse({ prompt: 'Draw a cat', size: '1024x1024' }))
   assert.throws(() => tool.inputSchema.parse({ prompt: '', size: '1024x1024' }))
   assert.throws(() => tool.inputSchema.parse({ prompt: 'Draw a cat', resolution: '8k' }))
+  assert.doesNotThrow(() => tool.inputSchema.parse({ prompt: 'Draw a cat', resolution: '3k', aspectRatio: '21:9' }))
 })
 
 void test('image provider collections remain separate from chat provider types', () => {

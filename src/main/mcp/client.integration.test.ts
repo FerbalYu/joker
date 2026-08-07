@@ -93,7 +93,7 @@ void test('MCP stdio runtime connects, lists, calls, reports errors, and cleans 
   }
 })
 
-void test('MCP streamable HTTP runtime sends headers, lists, calls, and disconnects', async () => {
+void test('MCP streamable HTTP fails closed for private network URLs before connecting', async () => {
   const id = uniqueId('http')
   const receivedHeaders: string[] = []
   const methods: string[] = []
@@ -158,14 +158,10 @@ void test('MCP streamable HTTP runtime sends headers, lists, calls, and disconne
   })
 
   try {
-    await mcpManager.connect(config)
-    assert.equal(mcpManager.getRuntime(id)?.status, 'connected')
-    assert.equal(mcpManager.getRuntime(id)?.toolCount, 1)
-    const result = await mcpManager.callTool(id, 'echo', { message: 'hello http' }) as { content: Array<{ type: string; text: string }> }
-    assert.equal(result.content[0]?.text, 'hello http')
-    assert.ok(receivedHeaders.includes('Bearer contract-secret'))
-    assert.ok(methods.includes('GET'))
-    assert.ok(methods.filter((method) => method === 'POST').length >= 3)
+    await assert.rejects(mcpManager.connect(config), /local, private, or non-public/)
+    assert.equal(mcpManager.getRuntime(id)?.status, 'error')
+    assert.equal(methods.length, 0)
+    assert.equal(receivedHeaders.length, 0)
   } finally {
     await mcpManager.disconnect(id).catch(() => undefined)
     await closeHttpServer(server)

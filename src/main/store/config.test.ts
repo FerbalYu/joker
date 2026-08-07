@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeConfig } from './config'
+import { normalizeConfig, preserveSkillConfigState } from './config'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../../shared/types'
 
 void test('normalizeConfig adds and validates model context limits', () => {
@@ -15,13 +15,85 @@ void test('normalizeConfig adds and validates model context limits', () => {
   assert.equal(config.providers[0].models[1].maxContextTokens, DEFAULT_MAX_CONTEXT_TOKENS)
 })
 
-void test('normalizeConfig defaults Skills to enabled unless disabled', () => {
+void test('normalizeConfig stores one canonical fingerprint-bound Skill state', () => {
   const config = normalizeConfig({
     providers: [{ id: 'p', name: 'P', type: 'openai', models: [{ id: 'm', name: 'm', enabled: true }], currentModelId: 'm' }],
     activeProviderId: 'p',
-    disabledSkills: ['offline-skill']
+    trustedSkills: [{ id: 'enabled-skill', fingerprint: 'a'.repeat(64) }]
   })
-  assert.deepEqual(config.disabledSkills, ['offline-skill'])
+  assert.equal(config.skillStateVersion, 1)
+  assert.equal(config.disabledSkills, undefined)
+  assert.deepEqual(config.trustedSkills, [{ id: 'enabled-skill', fingerprint: 'a'.repeat(64) }])
+})
+
+void test('normalizeConfig safely repairs legacy disabled and trusted conflicts', () => {
+  const config = normalizeConfig({
+    providers: [{ id: 'p', name: 'P', type: 'openai', models: [{ id: 'm', name: 'm', enabled: true }], currentModelId: 'm' }],
+    activeProviderId: 'p',
+    disabledSkills: ['conflicted-skill'],
+    trustedSkills: [
+      { id: 'conflicted-skill', fingerprint: 'a'.repeat(64) },
+      { id: 'enabled-skill', fingerprint: 'b'.repeat(64) }
+    ]
+  })
+  assert.equal(config.disabledSkills, undefined)
+  assert.deepEqual(config.trustedSkills, [{ id: 'enabled-skill', fingerprint: 'b'.repeat(64) }])
+})
+
+void test('normalizeConfig safely repairs oversized legacy disabled and trusted conflicts', () => {
+  const config = normalizeConfig({
+    providers: [{ id: 'p', name: 'P', type: 'openai', models: [{ id: 'm', name: 'm', enabled: true }], currentModelId: 'm' }],
+    activeProviderId: 'p',
+    disabledSkills: [...Array.from({ length: 100 }, (_, index) => `disabled-${index}`), 'conflicted-skill'],
+    trustedSkills: [{ id: 'conflicted-skill', fingerprint: 'a'.repeat(64) }]
+  })
+  assert.deepEqual(config.trustedSkills, [])
+})
+
+void test('normalizeConfig preserves more than 100 enabled Skill fingerprints', () => {
+  const records = Array.from({ length: 101 }, (_, index) => ({
+    id: `skill-${index}`,
+    fingerprint: index.toString(16).padStart(64, '0')
+  }))
+  const config = normalizeConfig({
+    providers: [{ id: 'p', name: 'P', type: 'openai', models: [{ id: 'm', name: 'm', enabled: true }], currentModelId: 'm' }],
+    activeProviderId: 'p',
+    trustedSkills: records
+  })
+  assert.equal(config.trustedSkills?.length, 101)
+  assert.deepEqual(config.trustedSkills?.[100], records[100])
+})
+
+void test('normalizeConfig validates and de-duplicates enabled Skill fingerprint records', () => {
+  const config = normalizeConfig({
+    providers: [{ id: 'p', name: 'P', type: 'openai', models: [{ id: 'm', name: 'm', enabled: true }], currentModelId: 'm' }],
+    activeProviderId: 'p',
+    trustedSkills: [
+      { id: 'safe-skill', fingerprint: 'a'.repeat(64) },
+      { id: 'safe-skill', fingerprint: 'b'.repeat(64) },
+      { id: '../unsafe', fingerprint: 'c'.repeat(64) },
+      { id: 'bad-fingerprint', fingerprint: 'not-a-hash' }
+    ]
+  })
+  assert.deepEqual(config.trustedSkills, [{ id: 'safe-skill', fingerprint: 'a'.repeat(64) }])
+})
+
+void test('config save state preserves only canonical Skill fingerprint records', () => {
+  const existing = normalizeConfig({
+    providers: [{ id: 'p', name: 'P', type: 'openai', models: [{ id: 'm', name: 'm', enabled: true }], currentModelId: 'm' }],
+    activeProviderId: 'p',
+    trustedSkills: [{ id: 'enabled-skill', fingerprint: 'a'.repeat(64) }]
+  })
+  const incoming = normalizeConfig({
+    providers: [{ id: 'p2', name: 'P2', type: 'openai', models: [{ id: 'm2', name: 'm2', enabled: true }], currentModelId: 'm2' }],
+    activeProviderId: 'p2'
+  })
+
+  const preserved = preserveSkillConfigState(incoming, existing)
+  assert.equal(preserved.disabledSkills, undefined)
+  assert.equal(preserved.skillStateVersion, 1)
+  assert.deepEqual(preserved.trustedSkills, existing.trustedSkills)
+  assert.equal(preserved.activeProviderId, 'p2')
 })
 
 void test('normalizeConfig defaults usage reporting and prompt cache to enabled', () => {

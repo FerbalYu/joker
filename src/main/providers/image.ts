@@ -1,4 +1,5 @@
 import type { ImageFetchModelsResult, ImageProviderEntry, ImageProviderTestResult } from '@shared/types'
+import { safeFetch } from '../tools/safe-fetch'
 
 export interface GeneratedImagePayload {
   url?: string
@@ -22,18 +23,7 @@ export async function generateImage(
   if (!prompt) throw new Error('Image prompt is required')
   if (prompt.length > MAX_PROMPT_LENGTH) throw new Error('Image prompt is too long')
 
-  const body: Record<string, unknown> = {
-    model: config.model,
-    prompt,
-    n: 1,
-    response_format: config.responseFormat
-  }
-  if (config.protocol === 'grok-images') {
-    body.aspect_ratio = normalizeAspectRatio(input.aspectRatio ?? config.defaultAspectRatio)
-    body.resolution = normalizeResolution(input.resolution ?? config.defaultResolution)
-  } else {
-    body.size = normalizeSize(input.size ?? config.defaultSize)
-  }
+  const body = buildGenerationBody(config, input, prompt)
 
   const response = await fetchWithTimeout(`${config.baseUrl}/images/generations`, {
     method: 'POST',
@@ -91,6 +81,17 @@ export async function fetchImageProviderModels(config: ImageProviderEntry): Prom
 export async function testImageProvider(config: ImageProviderEntry): Promise<ImageProviderTestResult> {
   if (!config.baseUrl.trim() || !config.model.trim()) {
     return { success: false, status: 'unconfigured', modelId: config.model, message: 'Image provider is not configured' }
+  }
+
+  if (config.protocol === 'agnes-images') {
+    // Agnes has not published a model-list endpoint; validate local
+    // configuration without issuing a paid generation or a remote call.
+    return {
+      success: true,
+      status: 'available',
+      modelId: config.model,
+      message: 'Agnes configuration is valid; no image generation was performed and remote generation is unverified'
+    }
   }
 
   const result = await fetchImageProviderModels(config)
@@ -182,6 +183,35 @@ function buildModelsUrl(config: ImageProviderEntry): string {
   return `${base}${safePath}`
 }
 
+function buildGenerationBody(
+  config: ImageProviderEntry,
+  input: { size?: string; aspectRatio?: string; resolution?: string },
+  prompt: string
+): Record<string, unknown> {
+  if (config.protocol === 'agnes-images') {
+    return {
+      model: config.model,
+      prompt,
+      size: normalizeAgnesSize(input.resolution ?? config.defaultResolution),
+      ratio: normalizeAgnesRatio(input.aspectRatio ?? config.defaultAspectRatio),
+      extra_body: { response_format: config.responseFormat }
+    }
+  }
+  const body: Record<string, unknown> = {
+    model: config.model,
+    prompt,
+    n: 1,
+    response_format: config.responseFormat
+  }
+  if (config.protocol === 'grok-images') {
+    body.aspect_ratio = normalizeAspectRatio(input.aspectRatio ?? config.defaultAspectRatio)
+    body.resolution = normalizeResolution(input.resolution ?? config.defaultResolution)
+  } else {
+    body.size = normalizeSize(input.size ?? config.defaultSize)
+  }
+  return body
+}
+
 function normalizeSize(value: string): string {
   return /^\d{2,5}x\d{2,5}$/.test(value) ? value : '1024x1024'
 }
@@ -194,6 +224,16 @@ function normalizeResolution(value: string): string {
   return /^(1k|2k|4k)$/i.test(value) ? value.toLowerCase() : '1k'
 }
 
+function normalizeAgnesSize(value: string): string {
+  return /^(1k|2k|3k|4k)$/i.test(value) ? value.toUpperCase() : '1K'
+}
+
+function normalizeAgnesRatio(value: string): string {
+  return (['1:1', '3:4', '4:3', '16:9', '9:16', '2:3', '3:2', '21:9'] as const).includes(value as '1:1')
+    ? value
+    : '1:1'
+}
+
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -201,7 +241,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   const abort = (): void => controller.abort()
   external?.addEventListener('abort', abort, { once: true })
   try {
-    return await fetch(url, { ...init, signal: controller.signal, redirect: 'manual' })
+    return await safeFetch(url, { ...init, signal: controller.signal, redirect: 'manual' }, { maxRedirects: 0 })
   } finally {
     clearTimeout(timer)
     external?.removeEventListener('abort', abort)

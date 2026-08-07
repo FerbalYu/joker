@@ -28,7 +28,15 @@ jobs:
       - name: Lint
         run: npm run lint
       - name: Script syntax
-        run: node --check scripts/lint.mjs && node --check scripts/run-tests.mjs
+        run: node --check scripts/lint.mjs && node --check scripts/run-tests.mjs && node --check scripts/runtime-qualification.mjs && node --check scripts/release-provenance.mjs && node --check scripts/toolforge-persistence-qualification.mjs && node --check scripts/fixtures/toolforge-persistence-worker.mjs && node --check scripts/packaged-toolforge-qualification.mjs && node --check scripts/fixtures/runtime-qualification-suite.mjs
+      - name: ToolForge persistence qualification
+        env:
+          JOKER_HOME: ${{ runner.temp }}/joker-toolforge-persistence
+        run: npm run test:qualification:toolforge-persistence -- --workers 8
+      - name: Runtime qualification (dev environment)
+        env:
+          JOKER_RUNTIME_QUALIFICATION_DIR: ${{ runner.temp }}/joker-runtime-qualification
+        run: node --import=tsx scripts/runtime-qualification.mjs --required-level L1 --skip-packaged
       - name: Unit tests
         run: npm run test:unit
       - name: Integration tests
@@ -43,6 +51,20 @@ jobs:
         with:
           name: coverage-windows
           path: coverage/
+          if-no-files-found: warn
+      - name: Upload ToolForge persistence evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolforge-persistence-windows
+          path: ${{ runner.temp }}/joker-toolforge-persistence/.joker/generated-tools/qualification/
+          if-no-files-found: warn
+      - name: Upload runtime qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-qualification-dev-windows
+          path: ${{ runner.temp }}/joker-runtime-qualification/
           if-no-files-found: warn
       - name: Upload build artifact
         if: always()

@@ -26,7 +26,8 @@ const capabilities: CapabilitySnapshot = {
   activeSkillIds: [],
   skillTokens: 25,
   mcpTokens: 50,
-  toolDefinitionTokens: 100
+  toolDefinitionTokens: 100,
+  generatedToolVersions: []
 }
 
 void test('streamUsageFromModelUsage preserves cache details and step count', () => {
@@ -41,19 +42,23 @@ void test('streamUsageFromModelUsage preserves cache details and step count', ()
   })
 })
 
-void test('addStreamUsage aggregates reported fields without inventing missing values', () => {
+void test('addStreamUsage aggregates reported fields and derives a conservative total', () => {
   assert.deepEqual(addStreamUsage(
     { inputTokens: 10, cacheReadTokens: 2, stepCount: 1 },
     { inputTokens: 20, outputTokens: 4, cacheWriteTokens: 3, stepCount: 2 }
   ), {
     inputTokens: 30,
     outputTokens: 4,
-    totalTokens: undefined,
+    totalTokens: 34,
     noCacheTokens: undefined,
     cacheReadTokens: 2,
     cacheWriteTokens: 3,
     stepCount: 3
   })
+  assert.equal(addStreamUsage(
+    { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    { inputTokens: 20, outputTokens: 4 }
+  ).totalTokens, 39)
 })
 
 void test('provider context uses the current step input and cache ratio, not cumulative usage', () => {

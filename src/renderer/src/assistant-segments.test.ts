@@ -5,6 +5,7 @@ import {
   appendToolSegment,
   flattenSegmentText,
   flattenToolCalls,
+  mergeAdjacentSegments,
   segmentsFromLegacyMessage,
   updateToolInSegments
 } from './assistant-segments'
@@ -50,6 +51,21 @@ void test('assistant segments update tools by toolCallId without collapsing text
   assert.equal(segments[1]?.type === 'tools' ? segments[1].tools[0]?.status : '', 'done')
   assert.equal(segments[1]?.type === 'tools' ? segments[1].tools[0]?.output : '', 'ok')
   assert.equal(flattenSegmentText(segments), 'beforeafter')
+})
+
+void test('adjacent persisted step segments coalesce without crossing text boundaries', () => {
+  const segments = mergeAdjacentSegments([
+    { type: 'tools', tools: [{ toolCallId: 'a', toolName: 'Read', input: {}, status: 'done' }] },
+    { type: 'tools', tools: [{ toolCallId: 'b', toolName: 'GitStatus', input: {}, status: 'done' }] },
+    { type: 'text', text: 'done' },
+    { type: 'text', text: ' now' },
+    { type: 'tools', tools: [{ toolCallId: 'c', toolName: 'GitLog', input: {}, status: 'done' }] }
+  ])
+
+  assert.deepEqual(segments.map((segment) => segment.type), ['tools', 'text', 'tools'])
+  assert.equal(segments[0]?.type === 'tools' ? segments[0].tools.length : 0, 2)
+  assert.equal(segments[1]?.type === 'text' ? segments[1].text : '', 'done now')
+  assert.equal(segments[2]?.type === 'tools' ? segments[2].tools[0]?.toolCallId : '', 'c')
 })
 
 void test('legacy messages place tools after content when timeline is unknown', () => {

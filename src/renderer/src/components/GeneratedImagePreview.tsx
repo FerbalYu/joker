@@ -17,14 +17,21 @@ export default function GeneratedImagePreview({ image }: Props): React.JSX.Eleme
 
   useEffect(() => {
     let active = true
-    void window.joker.generatedImage.read(image).then((result) => {
-      if (!active) return
-      if (!result.success || !result.data || !result.mediaType) {
-        setError(localizeError(language, result.error ?? t(language, 'image.generatedLoadFailed')))
-        return
-      }
-      setUrl(`data:${result.mediaType};base64,${result.data}`)
-    })
+    setUrl(null)
+    setError(null)
+    void window.joker.generatedImage.read(image)
+      .then((result) => {
+        if (!active) return
+        if (!result.success || !result.data || !result.mediaType) {
+          setError(localizeError(language, result.error ?? t(language, 'image.generatedLoadFailed')))
+          return
+        }
+        setUrl(`data:${result.mediaType};base64,${result.data}`)
+      })
+      .catch((readError: unknown) => {
+        if (!active) return
+        setError(localizeError(language, readError instanceof Error ? readError.message : t(language, 'image.generatedLoadFailed')))
+      })
     return () => { active = false }
   }, [image, language])
 

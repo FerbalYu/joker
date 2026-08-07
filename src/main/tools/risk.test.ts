@@ -9,8 +9,9 @@ void test('classifyToolRisk assigns intrinsic risks to built-in tools', () => {
   assert.equal(classifyToolRisk('WebRead'), 'external')
 })
 
-void test('classifyToolRisk treats MCP and unknown tools conservatively', () => {
+void test('classifyToolRisk treats MCP, generated, and unknown tools conservatively', () => {
   assert.equal(classifyToolRisk('mcp_files_read', undefined, { type: 'mcp' }), 'external')
+  assert.equal(classifyToolRisk('generated-read', undefined, { type: 'generated' }), 'external')
   assert.equal(classifyToolRisk('UnknownBuiltin'), 'external')
 })
 

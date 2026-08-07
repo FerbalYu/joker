@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { ParsedSkill } from './types'
@@ -30,6 +31,7 @@ export function parseSkillFile(path: string, source: SkillSource, fallbackId?: s
   if (!ID_PATTERN.test(id)) throw new Error('Invalid skill id')
   if (!name || !description || !body) throw new Error('Skill requires id, name, description, and instructions')
   const allowedMcpTools = (fields.allowedMcpTools ?? '').split(',').map((item) => item.trim()).filter(Boolean).slice(0, 100)
+  const fingerprint = createHash('sha256').update(source).update('\0').update(id).update('\0').update(raw).digest('hex')
   return {
     id,
     name: name.slice(0, 120),
@@ -39,7 +41,9 @@ export function parseSkillFile(path: string, source: SkillSource, fallbackId?: s
     instructions: body,
     allowedMcpTools,
     enabled: false,
-    trusted: source === 'builtin',
+    trusted: false,
+    fingerprint,
+    trustState: 'untrusted',
     path
   }
 }

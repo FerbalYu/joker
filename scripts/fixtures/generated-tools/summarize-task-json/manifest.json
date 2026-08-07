@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "toolId": "summarize-task-json",
+  "displayName": "SummarizeTaskJson",
+  "description": "读取项目内固定格式任务 JSON 并输出状态统计",
+  "sdkVersion": "1.0.0",
+  "runtime": {
+    "id": "quickjs-wasm",
+    "version": "0.32.0"
+  },
+  "entrypoint": "source/tool.js",
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "string"
+  },
+  "errorContract": {
+    "type": "object",
+    "properties": {
+      "message": { "type": "string" }
+    },
+    "required": ["message"],
+    "additionalProperties": false
+  },
+  "permissions": {
+    "filesystem": {
+      "read": ["fixtures/tasks.json"],
+      "write": []
+    },
+    "network": {
+      "hosts": [],
+      "methods": []
+    },
+    "process": {
+      "commands": []
+    },
+    "environment": {
+      "keys": []
+    },
+    "secrets": {
+      "handles": []
+    }
+  },
+  "dependencies": [],
+  "limits": {
+    "timeoutMs": 3000,
+    "maxInputBytes": 16384,
+    "maxOutputBytes": 65536,
+    "maxMemoryBytes": 33554432
+  }
+}

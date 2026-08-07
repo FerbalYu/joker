@@ -4,19 +4,21 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import type { LanguageModel } from 'ai'
 import type { ApiFormat, ModelConfig, ProviderConfig, ProviderEntry, ProviderTestResult } from '../../shared/types'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../../shared/types'
+import { normalizeOpenAIStreamingToolCallFetch } from './stream-normalizer'
 
 export function createLanguageModel(config: ProviderConfig): LanguageModel {
   switch (config.apiFormat) {
     case 'chat-completions': {
       if (config.provider === 'openai') {
-        const openai = createOpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl })
+        const openai = createOpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl, fetch: normalizeOpenAIStreamingToolCallFetch() })
         return openai.chat(config.model)
       }
       const compatible = createOpenAICompatible({
         baseURL: config.baseUrl ?? 'https://api.openai.com/v1',
         apiKey: config.apiKey,
         name: config.provider,
-        includeUsage: config.includeUsage !== false
+        includeUsage: config.includeUsage !== false,
+        fetch: normalizeOpenAIStreamingToolCallFetch()
       })
       return compatible.chatModel(config.model)
     }

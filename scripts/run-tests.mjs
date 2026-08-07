@@ -56,7 +56,7 @@ for (const key of Object.keys(env)) {
   if (isCredentialVariable(key)) delete env[key]
 }
 
-const args = ['--test', '--import=tsx']
+const args = ['--test', '--test-concurrency=1', '--import=tsx']
 if (coverage) args.push('--experimental-test-coverage')
 args.push(...selectedTestFiles)
 

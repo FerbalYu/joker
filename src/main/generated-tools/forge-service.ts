@@ -1,0 +1,305 @@
+import { randomUUID } from 'node:crypto'
+
+import type { LanguageModel } from 'ai'
+
+import type { ForgeJob } from '../../shared/generated-tools'
+import type { ToolContext } from '../tools/registry'
+import { runForgeAgent, type ForgeAgentRunResult } from './forge-agent'
+import {
+  listForgeJobs,
+  readForgeJob,
+  recoverInterruptedForgeJobs,
+  updateForgeJob
+} from './forge-job-store'
+import {
+  resumeAndValidateGeneratedToolCandidate,
+  resumeInterruptedForgeJob
+} from './validator-recovery'
+import { validateGeneratedToolCandidate } from './validator'
+import { resolveGeneratedToolValidationSuite } from './validation-suite'
+
+const DEFAULT_MAX_CONCURRENCY = 1
+
+export interface ForgeServiceMakerInput {
+  jokerHome: string
+  jobId: string
+  job: ForgeJob
+  validationSuiteId: string
+  validationSuiteHash: string
+  prompt: string
+  toolContext: ToolContext
+  model?: LanguageModel
+  now?: () => number
+  createValidationRunId?: () => string
+}
+
+export type ForgeServiceMaker = (input: ForgeServiceMakerInput) => Promise<ForgeAgentRunResult>
+
+export interface ForgeServiceOptions {
+  jokerHome: string
+  model?: LanguageModel
+  maker?: ForgeServiceMaker
+  validateCandidate?: typeof validateGeneratedToolCandidate
+  resumeValidation?: typeof resumeAndValidateGeneratedToolCandidate
+  now?: () => number
+  createValidationRunId?: () => string
+  maxConcurrency?: number
+}
+
+export interface ForgeController {
+  enqueue(jobId: string): void
+  cancel(jobId: string, expectedRevision: number): Promise<ForgeJob>
+}
+
+interface ActiveForgeJob {
+  controller: AbortController
+  promise: Promise<void>
+}
+
+function terminal(status: ForgeJob['status']): boolean {
+  return ['completed', 'cancelled', 'awaiting-policy'].includes(status)
+}
+
+function cancelledJob(current: ForgeJob, cancelledAt: number): ForgeJob {
+  return {
+    ...current,
+    revision: current.revision + 1,
+    status: 'cancelled',
+    updatedAt: Math.max(current.updatedAt, cancelledAt),
+    finishedAt: Math.max(current.updatedAt, cancelledAt),
+    candidateId: undefined,
+    candidateFingerprint: undefined,
+    attemptRecordId: undefined,
+    validationRunId: undefined,
+    validationReportId: undefined,
+    error: 'cancelled-by-user',
+    currentPhase: 'cancelled'
+  }
+}
+
+function failedJob(current: ForgeJob, failedAt: number, error: string): ForgeJob {
+  return {
+    ...current,
+    revision: current.revision + 1,
+    status: 'failed',
+    updatedAt: Math.max(current.updatedAt, failedAt),
+    finishedAt: Math.max(current.updatedAt, failedAt),
+    error: error.slice(0, 16_000),
+    currentPhase: 'forge-failed'
+  }
+}
+
+function interruptedJob(current: ForgeJob, interruptedAt: number): ForgeJob {
+  return {
+    ...current,
+    revision: current.revision + 1,
+    status: 'interrupted',
+    updatedAt: Math.max(current.updatedAt, interruptedAt),
+    finishedAt: Math.max(current.updatedAt, interruptedAt),
+    error: 'forge-service-stopped',
+    resumeHint: `resume-from-${current.status}`,
+    currentPhase: 'interrupted'
+  }
+}
+
+export class ForgeService implements ForgeController {
+  private readonly active = new Map<string, ActiveForgeJob>()
+  private readonly pending = new Set<string>()
+  private readonly now: () => number
+  private readonly maker: ForgeServiceMaker
+  private readonly maxConcurrency: number
+  private stopping = false
+
+  constructor(private readonly options: ForgeServiceOptions) {
+    this.now = options.now ?? Date.now
+    this.maxConcurrency = Math.max(1, Math.floor(options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY))
+    this.maker = options.maker ?? ((input) => runForgeAgent(input))
+  }
+
+  start(): void {
+    this.stopping = false
+    recoverInterruptedForgeJobs(this.options.jokerHome, this.now())
+    for (const job of listForgeJobs(this.options.jokerHome).jobs) {
+      if (job.status === 'promoting') continue
+      if (job.status === 'queued' || job.status === 'interrupted') this.enqueue(job.id)
+    }
+  }
+
+  enqueue(jobId: string): void {
+    if (this.stopping || this.active.has(jobId) || this.pending.has(jobId)) return
+    const job = readForgeJob(this.options.jokerHome, jobId)
+    if (!job || (!['queued', 'interrupted'].includes(job.status))) return
+    this.pending.add(jobId)
+    queueMicrotask(() => this.drain())
+  }
+
+  async cancel(jobId: string, expectedRevision: number): Promise<ForgeJob> {
+    const cancelled = updateForgeJob(
+      this.options.jokerHome,
+      jobId,
+      expectedRevision,
+      (current) => cancelledJob(current, this.now())
+    )
+    this.pending.delete(jobId)
+    this.active.get(jobId)?.controller.abort(new DOMException('ForgeJob cancelled by user', 'AbortError'))
+    return cancelled
+  }
+
+  async stop(): Promise<void> {
+    this.stopping = true
+    this.pending.clear()
+    const active = [...this.active.values()]
+    for (const item of active) item.controller.abort(new DOMException('ForgeService stopped', 'AbortError'))
+    await Promise.allSettled(active.map((item) => item.promise))
+  }
+
+  async waitForIdle(): Promise<void> {
+    while (this.pending.size > 0 || this.active.size > 0) {
+      await Promise.allSettled([...this.active.values()].map((item) => item.promise))
+      if (this.pending.size > 0) await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  }
+
+  private drain(): void {
+    if (this.stopping) return
+    while (this.active.size < this.maxConcurrency) {
+      const jobId = this.pending.values().next().value as string | undefined
+      if (!jobId) return
+      this.pending.delete(jobId)
+      if (this.active.has(jobId)) continue
+      const controller = new AbortController()
+      const promise = this.runJob(jobId, controller.signal)
+        .catch((error) => this.handleRunError(jobId, error))
+        .finally(() => {
+          this.active.delete(jobId)
+          this.drain()
+        })
+      this.active.set(jobId, { controller, promise })
+    }
+  }
+
+  private async runJob(jobId: string, signal: AbortSignal): Promise<void> {
+    let job = readForgeJob(this.options.jokerHome, jobId)
+    if (!job || terminal(job.status) || job.status === 'failed' || job.status === 'cancelled') return
+
+    if (job.status === 'interrupted') {
+      if (job.resumeHint?.includes('validating')) {
+        await (this.options.resumeValidation ?? resumeAndValidateGeneratedToolCandidate)(
+          this.options.jokerHome,
+          job.id,
+          job.revision,
+          signal
+        )
+        return
+      }
+      job = resumeInterruptedForgeJob(this.options.jokerHome, job.id, job.revision, this.now())
+    }
+
+    if (job.status === 'queued') {
+      job = updateForgeJob(this.options.jokerHome, job.id, job.revision, (current) => ({
+        ...current,
+        revision: current.revision + 1,
+        status: 'planning',
+        startedAt: this.now(),
+        updatedAt: Math.max(current.updatedAt, this.now()),
+        currentPhase: 'planning'
+      }))
+    }
+
+    if (job.status === 'planning') {
+      resolveGeneratedToolValidationSuite(job.toolId)
+      job = updateForgeJob(this.options.jokerHome, job.id, job.revision, (current) => ({
+        ...current,
+        revision: current.revision + 1,
+        status: 'building',
+        updatedAt: Math.max(current.updatedAt, this.now()),
+        currentPhase: 'building-candidate'
+      }))
+    }
+
+    if (job.status === 'building') {
+      const validation = resolveGeneratedToolValidationSuite(job.toolId)
+      await this.maker({
+        jokerHome: this.options.jokerHome,
+        jobId: job.id,
+        job,
+        validationSuiteId: validation.suite.id,
+        validationSuiteHash: validation.hash,
+        prompt: this.promptFor(job),
+        toolContext: {
+          workspacePath: null,
+          sessionId: job.spec.requestedBy.sessionId,
+          runId: `forge-agent-${job.id}-${job.attempt}`,
+          approvalGate: async () => ({ outcome: 'deny', risk: 'external', reason: 'ForgeService has no ambient approval authority' }),
+          abortSignal: signal
+        },
+        model: this.options.model,
+        now: this.now,
+        createValidationRunId: this.options.createValidationRunId ?? (() => `validation-${randomUUID()}`)
+      })
+      const submitted = readForgeJob(this.options.jokerHome, job.id)
+      if (!submitted) throw new Error(`ForgeJob disappeared: ${job.id}`)
+      if (submitted.status === 'cancelled') return
+      if (submitted.status !== 'validating' || !submitted.candidateId) {
+        throw new Error('ForgeAgent ended without submitting an immutable candidate')
+      }
+      job = submitted
+    }
+
+    if (job.status === 'validating') {
+      const result = await (this.options.validateCandidate ?? validateGeneratedToolCandidate)(this.options.jokerHome, job.id, job.revision, signal)
+      const retryableFailure = result.report?.status === 'failed' && result.job.attempt < result.job.maxAttempts
+      if (result.outcome === 'completed' && retryableFailure) {
+        const retryAt = this.now()
+        const repair = updateForgeJob(this.options.jokerHome, result.job.id, result.job.revision, (current) => ({
+          ...current,
+          revision: current.revision + 1,
+          status: 'building',
+          attempt: current.attempt + 1,
+          updatedAt: Math.max(current.updatedAt, retryAt),
+          finishedAt: undefined,
+          candidateId: undefined,
+          candidateFingerprint: undefined,
+          attemptRecordId: undefined,
+          validationRunId: undefined,
+          validationReportId: undefined,
+          error: undefined,
+          currentPhase: 'repairing-validation-failure'
+        }))
+        this.pending.add(repair.id)
+      }
+    }
+  }
+
+  private async handleRunError(jobId: string, error: unknown): Promise<void> {
+    const job = readForgeJob(this.options.jokerHome, jobId)
+    if (!job || terminal(job.status) || job.status === 'failed' || job.status === 'cancelled') return
+    try {
+      if (this.stopping && ['planning', 'building', 'validating', 'promoting'].includes(job.status)) {
+        updateForgeJob(this.options.jokerHome, job.id, job.revision, (current) => interruptedJob(current, this.now()))
+        return
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      updateForgeJob(this.options.jokerHome, job.id, job.revision, (current) => failedJob(current, this.now(), message))
+    } catch (persistError) {
+      const latest = readForgeJob(this.options.jokerHome, jobId)
+      if (!latest || terminal(latest.status) || latest.status === 'cancelled') return
+      console.error('ForgeService failed to persist ForgeJob failure', persistError)
+    }
+  }
+
+  private promptFor(job: ForgeJob): string {
+    return [
+      `Manufacture Generated Tool ${job.toolId} for attempt ${job.attempt} of ${job.maxAttempts}.`,
+      `Mode: ${job.mode}.`,
+        ...(job.baseVersionId ? [
+          `Base stable version: ${job.baseVersionId}. Preserve the stable version until this edit is independently validated and promoted.`
+        ] : []),
+
+      `Goal: ${job.spec.goal}`,
+      `Edit instruction: ${job.spec.reason}`,
+      `Acceptance: ${job.spec.acceptance.join(' | ')}`,
+      'Read the immutable spec, create manifest.json plus source and dist artifacts, run the host check, then submit the candidate.'
+    ].join('\n')
+  }
+}

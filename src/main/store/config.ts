@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
-import type { ApiFormat, AppConfig, McpServerConfig, ModelConfig, ProviderConfig, ProviderEntry, ProviderType } from '../../shared/types'
+import type { ApiFormat, AppConfig, McpServerConfig, ModelConfig, ProviderConfig, ProviderEntry, ProviderType, TrustedSkillRecord } from '../../shared/types'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../../shared/types'
 import { normalizeContextOptimizationMode } from '../../shared/context'
 import { getJokerHomeDir } from './paths'
@@ -65,6 +65,22 @@ function normalizeMcpServers(value: unknown): McpServerConfig[] {
   })
 }
 
+function normalizeTrustedSkills(value: unknown): TrustedSkillRecord[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const records: TrustedSkillRecord[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue
+    const candidate = item as Partial<TrustedSkillRecord>
+    if (typeof candidate.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(candidate.id)) continue
+    if (typeof candidate.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(candidate.fingerprint)) continue
+    if (seen.has(candidate.id)) continue
+    seen.add(candidate.id)
+    records.push({ id: candidate.id, fingerprint: candidate.fingerprint })
+  }
+  return records
+}
+
 function defaultApiFormat(type: ProviderType): ApiFormat {
   return type === 'anthropic' ? 'anthropic-messages' : type === 'openai' ? 'responses' : 'chat-completions'
 }
@@ -90,7 +106,8 @@ function getDefaults(): AppConfig {
     activeProviderId: 'openai-default',
     contextOptimizationMode: 'legacy',
     mcpServers: [],
-    disabledSkills: []
+    trustedSkills: [],
+    skillStateVersion: 1
   }
 }
 
@@ -148,12 +165,20 @@ export function normalizeConfig(raw: unknown): AppConfig {
     const activeProviderId = safeProviders.some((provider) => provider.id === value.activeProviderId)
       ? (value.activeProviderId as string)
       : safeProviders[0].id
+    const disabledSkills = new Set(
+      Array.isArray(value.disabledSkills)
+        ? value.disabledSkills.filter((skill): skill is string => typeof skill === 'string')
+        : []
+    )
+    const trustedSkills = normalizeTrustedSkills(value.trustedSkills)
+      .filter((record) => !disabledSkills.has(record.id))
     return {
       providers: safeProviders,
       activeProviderId,
       contextOptimizationMode: normalizeContextOptimizationMode(value.contextOptimizationMode),
       mcpServers: normalizeMcpServers(value.mcpServers),
-      disabledSkills: Array.isArray(value.disabledSkills) ? value.disabledSkills.filter((skill): skill is string => typeof skill === 'string').slice(0, 100) : []
+      trustedSkills,
+      skillStateVersion: 1
     }
   }
 
@@ -178,10 +203,18 @@ export function normalizeConfig(raw: unknown): AppConfig {
       models: [createModel(modelName)],
       currentModelId: modelName
     }
-    return { providers: [migrated], activeProviderId: migrated.id, contextOptimizationMode: 'legacy', mcpServers: [], disabledSkills: [] }
+    return { providers: [migrated], activeProviderId: migrated.id, contextOptimizationMode: 'legacy', mcpServers: [], trustedSkills: [], skillStateVersion: 1 }
   }
 
   return getDefaults()
+}
+
+export function preserveSkillConfigState(incoming: AppConfig, existing: AppConfig): AppConfig {
+  return {
+    ...incoming,
+    trustedSkills: existing.trustedSkills,
+    skillStateVersion: 1
+  }
 }
 
 export function loadConfig(): AppConfig {

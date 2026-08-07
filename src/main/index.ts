@@ -1,7 +1,7 @@
 import { app, shell, BrowserWindow } from 'electron'
 import { join } from 'node:path'
 import { is, optimizer } from '@electron-toolkit/utils'
-import { setupStreaming } from './stream'
+import { retireStreaming, setupStreaming } from './stream'
 import { registerApprovalIpc } from './agent/approval'
 import { registerConfigIpc } from './ipc/config'
 import { registerMcpIpc, restoreMcpServers } from './ipc/mcp'
@@ -12,11 +12,28 @@ import { registerFileIpc } from './ipc/file-register'
 import { registerMarkdownIpc } from './ipc/markdown'
 import { registerImageConfigIpc } from './ipc/image-config'
 import { registerGeneratedImageIpc } from './ipc/generated-image'
+import { registerGeneratedToolsIpc } from './ipc/generated-tools'
 import { registerProjectIpc } from './ipc/projects'
 import { closeMarkdownWindow } from './markdown-window'
+import { runPackagedGeneratedToolQualification } from './generated-tools/runtime/packaged-qualification'
+import { runPackagedGeneratedToolFixtureQualification } from './generated-tools/runtime/packaged-fixture-qualification'
+import { runPackagedGate2Qualification } from './generated-tools/runtime/packaged-gate2-qualification'
+import { runPackagedGate4EditQualification } from './generated-tools/runtime/packaged-gate4-edit-qualification'
+import { ForgeService } from './generated-tools/forge-service'
+import { PromotionService } from './generated-tools/promotion-service'
+import { setDefaultForgeService, setDefaultPromotionService, stopDefaultForgeService } from './generated-tools/forge-service-runtime'
+import { ContinuationScheduler } from './generated-tools/continuation-scheduler'
+import { setDefaultContinuationScheduler } from './generated-tools/continuation-scheduler-runtime'
+import { installSummarizeTaskJsonFixture } from './generated-tools/fixture'
+import { RuntimeQualificationService } from './generated-tools/runtime-qualification-service'
+import { setDefaultRuntimeQualificationService, stopDefaultRuntimeQualificationService } from './generated-tools/runtime-qualification-service-runtime'
+import { getJokerHomeDir } from './store/paths'
+
+
+let shuttingDown = false
 
 const STREAM_QA_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>JOKER Stream QA</title></head><body><main id="status">stream QA loading</main><script>
-(() => {
+(function () {
   const runs = new Map()
   let port = null
   let consumerDelayMs = 0
@@ -77,14 +94,22 @@ const STREAM_QA_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>
   }
   window.__jokerStreamQa = {
     setConsumerDelay(ms) { consumerDelayMs = Math.max(0, Number(ms) || 0) },
-    send(sessionId, messages, runId) {
+    async send(sessionId, messages, runId) {
       if (!port) throw new Error('stream port is not ready')
-      window.joker.chat.send(port, sessionId, messages, 'auto', undefined, undefined, runId)
+      const durableMessages = messages.map((message) => ({
+        ...message,
+        id: message.id || 'stream-qa-' + runId + '-' + Math.random().toString(36).slice(2),
+        createdAt: message.createdAt || Date.now()
+      }))
+      for (const message of durableMessages) {
+        if (!(await window.joker.session.append(sessionId, message))) throw new Error('failed to persist stream QA message')
+      }
+      window.joker.chat.send(port, sessionId, durableMessages, 'auto', undefined, undefined, runId)
     },
     abort(runId) { window.joker.chat.abort(port, runId) },
     snapshot
   }
-    window.joker.chat.onPort((receivedPort) => {
+  window.joker.chat.onPort((receivedPort) => {
     port = receivedPort
     window.joker.chat.onEvent(receivedPort, record)
     window.joker.chat.onFlow((flow) => {
@@ -114,9 +139,27 @@ function createWindow(): BrowserWindow {
     }
   })
 
+  let streamingInstalled = false
+  const installStreaming = (): void => {
+    if (streamingInstalled || win.webContents.isDestroyed()) return
+    streamingInstalled = true
+    setupStreaming(win)
+  }
+  win.webContents.on('did-start-loading', () => {
+    if (!streamingInstalled) return
+    streamingInstalled = false
+    retireStreaming(win.id, 'Renderer document reloading')
+  })
+  win.webContents.on('did-finish-load', installStreaming)
+  win.webContents.on('render-process-gone', () => {
+    streamingInstalled = false
+    retireStreaming(win.id, 'Renderer process exited')
+  })
+  win.webContents.on('destroyed', () => retireStreaming(win.id, 'Renderer WebContents destroyed'))
+
   win.on('ready-to-show', () => {
     win.show()
-    setupStreaming(win)
+    installStreaming()
   })
 
   win.webContents.setWindowOpenHandler((details) => {
@@ -142,6 +185,30 @@ function createWindow(): BrowserWindow {
 
 app.whenReady().then(async () => {
   if (process.env['JOKER_HOME']?.trim()) app.setPath('home', process.env['JOKER_HOME'].trim())
+  if (await runPackagedGeneratedToolQualification()) return
+  if (await runPackagedGeneratedToolFixtureQualification()) return
+  if (await runPackagedGate2Qualification()) return
+  if (await runPackagedGate4EditQualification()) return
+  const jokerHome = getJokerHomeDir()
+  const qualificationService = new RuntimeQualificationService({ jokerHome })
+  qualificationService.recover()
+  setDefaultRuntimeQualificationService(qualificationService)
+  const forgeService = new ForgeService({ jokerHome })
+  const promotionService = new PromotionService({ jokerHome })
+  const continuationScheduler = new ContinuationScheduler({ jokerHome })
+  setDefaultForgeService(forgeService)
+  setDefaultPromotionService(promotionService)
+  setDefaultContinuationScheduler(continuationScheduler)
+  continuationScheduler.recover()
+  await promotionService.recover()
+  forgeService.start()
+  if (process.env['JOKER_INSTALL_TOOLFORGE_FIXTURE'] === '1') {
+    installSummarizeTaskJsonFixture(jokerHome, Date.now(), {
+      fixtureRoot: app.isPackaged
+        ? join(process.resourcesPath, 'toolforge-fixture')
+        : undefined
+    })
+  }
   app.setAppUserModelId('com.joker.app')
   registerConfigIpc()
   registerMcpIpc()
@@ -152,6 +219,7 @@ app.whenReady().then(async () => {
   registerMarkdownIpc()
   registerImageConfigIpc()
   registerGeneratedImageIpc()
+  registerGeneratedToolsIpc()
   registerProjectIpc()
   await registerApprovalIpc()
   await restoreMcpServers()
@@ -169,6 +237,14 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+app.on('before-quit', (event) => {
+  if (shuttingDown) return
+  event.preventDefault()
+  shuttingDown = true
+  stopDefaultRuntimeQualificationService()
+  void stopDefaultForgeService().finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

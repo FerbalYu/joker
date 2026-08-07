@@ -7,8 +7,15 @@ import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const args = new Set(process.argv.slice(2))
+const argv = process.argv.slice(2)
+const args = new Set(argv)
 const strict = args.has('--strict')
+const artifactFlagIndex = argv.indexOf('--artifact')
+const explicitArtifact = artifactFlagIndex >= 0 && argv[artifactFlagIndex + 1]
+  ? resolve(argv[artifactFlagIndex + 1])
+  : process.env.JOKER_RELEASE_ARTIFACT
+    ? resolve(process.env.JOKER_RELEASE_ARTIFACT)
+    : null
 const runDir = await mkdtemp(join(tmpdir(), 'joker-release-boundaries-'))
 const reportPath = join(runDir, 'release-boundary-report.json')
 const checks = []
@@ -60,7 +67,7 @@ const artifactCandidates = existsSync(distDir)
     .map((name) => join(distDir, name))
     .sort((left, right) => right.localeCompare(left))
   : []
-const artifact = artifactCandidates[0] ?? join(distDir, `JOKER-${packageJson.version}-${process.arch}.exe`)
+const artifact = explicitArtifact ?? artifactCandidates[0] ?? join(distDir, `JOKER-${packageJson.version}-${process.arch}.exe`)
 const releaseVerification = join(root, 'release-verification.md')
 const upgradeEvidence = join(root, 'release-verification.md')
 const artifactExists = existsSync(artifact)
@@ -75,7 +82,7 @@ check('windows.builder.target', /["']?target["']?\s*:\s*(?:\[\s*)?["']?nsis/i.te
 
 const signature = artifactExists ? powershellSignature(artifact) : { status: 'not-verified', reason: 'Artifact missing' }
 const signingStatus = signature.Status === 'Valid' ? 'pass' : 'not-verified'
-check('windows.signing.authenticode', signingStatus, 'Authenticode signature is valid', signature, { config: 'signAndEditExecutable: false', artifact: artifactInfo })
+check('windows.signing.authenticode', signingStatus, 'Authenticode signature is valid', signature, { config: 'formal release uses signAndEditExecutable: true', artifact: artifactInfo })
 
 const lifecycleEvidenceExists = existsSync(releaseVerification) && existsSync(upgradeEvidence)
 check('windows.install.startup.upgrade.uninstall', lifecycleEvidenceExists ? 'pass' : 'not-verified', 'isolated Windows install, startup, upgrade, uninstall and user-data retention are evidenced', lifecycleEvidenceExists ? 'Verified in release-verification.md' : 'Required historical evidence is missing', {
@@ -103,7 +110,7 @@ const report = {
   checks,
   statusSummary: Object.fromEntries(['pass', 'fail', 'skip', 'not-verified', 'contract-gap'].map((status) => [status, checks.filter((item) => item.status === status).length])),
   limitations: [
-    'The current Windows artifact is unsigned because electron-builder.yml sets signAndEditExecutable: false; unsigned packaging is not formal signing evidence.',
+    'Formal release qualification requires an explicit final installer path and valid Authenticode signature.',
     'Historical Windows lifecycle evidence is referenced explicitly and is not mislabeled as a fresh install run.'
   ]
 }

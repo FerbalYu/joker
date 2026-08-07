@@ -1,7 +1,18 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import type { ImageProviderConfig, ImageProviderEntry } from '@shared/types'
+import type { ImageProviderConfig, ImageProviderEntry, ImageProviderProtocol } from '@shared/types'
+
+const AGNES_DEFAULT_MODEL = 'agnes-image-2.1-flash'
+const AGNES_RATIOS = ['1:1', '3:4', '4:3', '16:9', '9:16', '2:3', '3:2', '21:9'] as const
+
+function isAgnesRatio(value: string): boolean {
+  return (AGNES_RATIOS as readonly string[]).includes(value)
+}
+
+function protocolOf(value: unknown): ImageProviderProtocol {
+  return value === 'grok-images' || value === 'agnes-images' ? value : 'openai-images'
+}
 
 const DEFAULT_PROVIDER: ImageProviderEntry = {
   id: 'image-default',
@@ -35,7 +46,18 @@ export function getImageConfigPath(): string {
 
 export function normalizeImageProvider(raw: unknown, index = 0, fallbackId?: string): ImageProviderEntry {
   const value = raw && typeof raw === 'object' ? raw as Partial<ImageProviderEntry> : {}
-  const protocol = value.protocol === 'grok-images' ? 'grok-images' : 'openai-images'
+  const protocol = protocolOf(value.protocol)
+  const defaultModel = protocol === 'grok-images' ? 'grok-imagine-image'
+    : protocol === 'agnes-images' ? AGNES_DEFAULT_MODEL
+    : DEFAULT_PROVIDER.model
+  const rawResolution = typeof value.defaultResolution === 'string' ? value.defaultResolution : ''
+  const defaultResolution = protocol === 'agnes-images'
+    ? /^(1k|2k|3k|4k)$/i.test(rawResolution) ? rawResolution.toLowerCase() : '1k'
+    : /^(1k|2k|4k)$/i.test(rawResolution) ? rawResolution.toLowerCase() : DEFAULT_PROVIDER.defaultResolution
+  const rawRatio = typeof value.defaultAspectRatio === 'string' ? value.defaultAspectRatio : ''
+  const defaultAspectRatio = protocol === 'agnes-images'
+    ? isAgnesRatio(rawRatio) ? rawRatio : '1:1'
+    : /^\d{1,3}:\d{1,3}$/.test(rawRatio) ? rawRatio : DEFAULT_PROVIDER.defaultAspectRatio
   return {
     id: normalizeId(value.id, fallbackId ?? `image-provider-${index + 1}`),
     enabled: value.enabled === true,
@@ -43,11 +65,11 @@ export function normalizeImageProvider(raw: unknown, index = 0, fallbackId?: str
     protocol,
     baseUrl: safeText(value.baseUrl, DEFAULT_PROVIDER.baseUrl, 2048).replace(/\/+$/, ''),
     apiKey: typeof value.apiKey === 'string' ? value.apiKey.slice(0, 4096) : '',
-    model: safeText(value.model, protocol === 'grok-images' ? 'grok-imagine-image' : DEFAULT_PROVIDER.model, 240),
+    model: safeText(value.model, defaultModel, 240),
     modelsPath: normalizePath(value.modelsPath, DEFAULT_PROVIDER.modelsPath),
     defaultSize: /^\d{2,5}x\d{2,5}$/.test(value.defaultSize ?? '') ? value.defaultSize as string : DEFAULT_PROVIDER.defaultSize,
-    defaultAspectRatio: /^\d{1,3}:\d{1,3}$/.test(value.defaultAspectRatio ?? '') ? value.defaultAspectRatio as string : DEFAULT_PROVIDER.defaultAspectRatio,
-    defaultResolution: /^(1k|2k|4k)$/i.test(value.defaultResolution ?? '') ? (value.defaultResolution as string).toLowerCase() : DEFAULT_PROVIDER.defaultResolution,
+    defaultAspectRatio,
+    defaultResolution,
     responseFormat: value.responseFormat === 'b64_json' ? 'b64_json' : 'url'
   }
 }

@@ -9,6 +9,10 @@
     {
       "from": "src/image/logo.ico",
       "to": "logo.ico"
+    },
+    {
+      "from": "scripts/fixtures/generated-tools/summarize-task-json",
+      "to": "toolforge-fixture"
     }
   ],
   "files": [
@@ -16,7 +20,7 @@
   ],
   "win": {
     "icon": "src/image/logo.ico",
-    "signAndEditExecutable": false,
+    "signAndEditExecutable": true,
     "target": ["nsis"],
     "artifactName": "${productName}-${version}-${arch}.${ext}"
   },

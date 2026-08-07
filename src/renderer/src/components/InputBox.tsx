@@ -1,17 +1,40 @@
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef, type ClipboardEvent, type KeyboardEvent } from 'react'
-import { ArrowLeft, Brain, Check, ChevronDown, FileText, FolderOpen, GitBranch, Globe, MessageSquare, PencilLine, SearchCheck, Send, ShieldAlert, ShieldCheck, Square, X } from 'lucide-react'
-import type { AppConfig, ChatImagePart, ContextUsage, GitStatus, ProviderEntry, ReasoningLevel, RunMode, SkillDescriptor } from '@shared/types'
+import { ArrowLeft, Brain, Check, ChevronDown, FileText, FolderOpen, GitBranch, Globe, ListChecks, MessageSquare, PencilLine, Plus, SearchCheck, Send, ShieldAlert, ShieldCheck, Sparkles, Square, Target, X, Zap } from 'lucide-react'
+import type { AppConfig, ChatImagePart, ContextUsage, GitStatus, PendingUserMessage, ProviderEntry, ReasoningLevel, RunMode, SkillDescriptor } from '@shared/types'
 import { ALLOWED_IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_IMAGES_PER_MESSAGE, MAX_MESSAGE_IMAGE_BYTES, base64ByteSize, getImageResizeDimensions } from '@shared/messages'
 import { useStore } from '../store'
 import { t } from '../i18n'
 import ImagePreview from './ImagePreview'
 import ContextUsageIndicator from './ContextUsageIndicator'
-import { filterSkills, findSlashToken, type SlashToken } from '../slash'
+import { findSlashToken, type SlashToken } from '../slash'
+import {
+  filterSlashCommands,
+  insertSlashToken,
+  nativeCommandItems,
+  parseNativeSlashCommand,
+  removeSlashToken,
+  skillCommandItems,
+  type GoalCommandMatch,
+  type NativeSlashCommandId,
+  type SlashCommandItem
+} from '../slash-commands'
 import { classifyLink, linkLabel, splitUrls } from '../url-preview'
 
 type ApprovalMode = 'suggest' | 'auto-edit' | 'full-auto'
 
+export type InputCommandIntent = 'plan'
+
+export interface InputDraft {
+  text: string
+  images: ChatImagePart[]
+  skillIds?: string[]
+  links?: string[]
+  runMode: RunMode
+  command?: { type: InputCommandIntent }
+}
+
 export interface InputBoxHandle {
+  focus: () => void
   insertLink: (url: string) => void
   insertText: (value: string) => void
 }
@@ -23,10 +46,17 @@ type InputLink = {
   label: string
 }
 
-interface Props {
-  onSend: (draft: { text: string; images: ChatImagePart[]; skillIds?: string[]; links?: string[]; runMode: RunMode }) => boolean | Promise<boolean>
+export interface Props {
+  onSend: (draft: InputDraft, action?: 'send' | 'queue' | 'steer') => boolean | Promise<boolean>
+  onCancelPending?: (pendingMessageId: string) => void | Promise<void>
+  onSteerPending?: (pendingMessageId: string) => void | Promise<void>
+  pendingUserMessages?: PendingUserMessage[]
+  onGoal?: (command: GoalCommandMatch, draft: Omit<InputDraft, 'command'>) => boolean | Promise<boolean>
+  onCompact?: () => boolean | Promise<boolean>
+  planCommandAvailable?: boolean
   onAbort: () => void
   streaming: boolean
+  goalActive?: boolean
   contextUsage: ContextUsage | null
   reasoningLevel: ReasoningLevel
   onReasoningLevelChange: (level: ReasoningLevel) => void
@@ -41,16 +71,20 @@ interface Props {
 
 const MAX_INPUT_LINKS = 16
 
-const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, onAbort, streaming, contextUsage, reasoningLevel, onReasoningLevelChange, runMode, onRunModeChange, onProjectChange, onProjectClear, onProjectPick, gitStatus, gitStatusLoading }, ref): React.JSX.Element {
+const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, onCancelPending, onSteerPending, pendingUserMessages = [], onGoal, onCompact, planCommandAvailable = false, onAbort, streaming, goalActive = false, contextUsage, reasoningLevel, onReasoningLevelChange, runMode, onRunModeChange, onProjectChange, onProjectClear, onProjectPick, gitStatus, gitStatusLoading }, ref): React.JSX.Element {
   const [text, setText] = useState('')
   const [images, setImages] = useState<ChatImagePart[]>([])
   const [imageError, setImageError] = useState<string | null>(null)
   const [mode, setMode] = useState<ApprovalMode>('suggest')
   const [skills, setSkills] = useState<SkillDescriptor[]>([])
   const [selectedSkills, setSelectedSkills] = useState<SkillDescriptor[]>([])
+  const [selectedCommand, setSelectedCommand] = useState<NativeSlashCommandId | null>(null)
   const [links, setLinks] = useState<InputLink[]>([])
   const [slashToken, setSlashToken] = useState<SlashToken | null>(null)
   const [slashIndex, setSlashIndex] = useState(0)
+  const [slashLoading, setSlashLoading] = useState(false)
+  const [slashStatus, setSlashStatus] = useState<string | null>(null)
+  const [slashExecuting, setSlashExecuting] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuView, setMenuView] = useState<'providers' | 'models'>('providers')
@@ -67,9 +101,28 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   const projectMenuRef = useRef<HTMLDivElement>(null)
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
   const slashMenuRef = useRef<HTMLDivElement>(null)
+  const slashOptionRefs = useRef(new Map<string, HTMLButtonElement>())
+  const slashMenuId = 'input-slash-command-list'
+
+  const refreshSlashSources = async (): Promise<void> => {
+    setSlashLoading(true)
+    try {
+      const loadedSkills = await window.joker.skill.list()
+      setSkills(loadedSkills)
+      const enabledById = new Map(loadedSkills.filter((skill) => skill.enabled).map((skill) => [skill.id, skill]))
+      setSelectedSkills((current) => current.flatMap((skill) => {
+        const enabled = enabledById.get(skill.id)
+        return enabled ? [enabled] : []
+      }))
+    } catch {
+      setSlashStatus(t(language, 'input.commandsLoadFailed'))
+    } finally {
+      setSlashLoading(false)
+    }
+  }
 
   useEffect(() => {
-    void window.joker.skill.list().then(setSkills)
+    void refreshSlashSources()
   }, [])
 
   useEffect(() => {
@@ -79,6 +132,8 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
     setLinks((current) => current.filter((link) => link.kind === 'web'))
     setImageError(null)
     setSlashToken(null)
+    setSelectedCommand(null)
+    setSlashStatus(null)
   }, [runMode])
 
   useEffect(() => {
@@ -121,17 +176,52 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
     }
   }, [menuOpen])
 
-  const filteredSkills = useMemo(
-    () => runMode === 'chat'
-      ? filterSkills(skills.filter((skill) => !selectedSkills.some((selected) => selected.id === skill.id)), slashToken?.query ?? '')
-      : [],
-    [runMode, selectedSkills, skills, slashToken?.query]
-  )
   const activeProvider = config ? resolveActiveProvider(config) : null
   const activeModel = activeProvider ? resolveActiveModel(activeProvider) : null
   const hoveredProvider =
     config?.providers.find((provider) => provider.id === hoveredProviderId && provider.enabled) ??
     activeProvider
+  const selectedSkillIds = useMemo(() => selectedSkills.map((skill) => skill.id), [selectedSkills])
+  const slashCommands = useMemo(() => buildSlashCommands({
+    language,
+    skills,
+    selectedSkillIds,
+    goalAvailable: Boolean(onGoal),
+    planAvailable: planCommandAvailable,
+    compactAvailable: Boolean(onCompact),
+    busy: streaming || submitting || slashExecuting
+  }), [language, onCompact, onGoal, planCommandAvailable, selectedSkillIds, skills, slashExecuting, streaming, submitting])
+  const filteredSlashCommands = useMemo(
+    () => filterSlashCommands(slashCommands, slashToken?.query ?? ''),
+    [slashCommands, slashToken?.query]
+  )
+  const nativeSlashCommands = filteredSlashCommands.filter((command) => command.section === 'commands')
+  const skillSlashCommands = filteredSlashCommands.filter((command) => command.section === 'skills')
+  const activeSlashCommand = filteredSlashCommands[slashIndex]
+  const skillsEmpty = !slashToken?.query && !slashLoading && !slashCommands.some((command) => command.section === 'skills')
+
+  useEffect(() => {
+    if (!slashToken) return
+    setSlashIndex((current) => Math.min(current, Math.max(0, filteredSlashCommands.length - 1)))
+  }, [filteredSlashCommands.length, slashToken])
+
+  useEffect(() => {
+    if (!activeSlashCommand) return
+    slashOptionRefs.current.get(activeSlashCommand.id)?.scrollIntoView({ block: 'nearest' })
+  }, [activeSlashCommand])
+
+  useEffect(() => {
+    if (!slashToken) return
+    const handlePointerDown = (event: PointerEvent): void => {
+      const target = event.target as Node
+      if (!slashMenuRef.current?.contains(target) && !textareaRef.current?.contains(target)) setSlashToken(null)
+    }
+    const timeoutId = window.setTimeout(() => document.addEventListener('pointerdown', handlePointerDown), 0)
+    return () => {
+      window.clearTimeout(timeoutId)
+      document.removeEventListener('pointerdown', handlePointerDown)
+    }
+  }, [slashToken])
 
   const addLink = (url: string): boolean => {
     const classification = classifyLink(url)
@@ -143,6 +233,9 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   }
 
   useImperativeHandle(ref, () => ({
+    focus: (): void => {
+      requestAnimationFrame(() => textareaRef.current?.focus())
+    },
     insertLink: (url: string): void => {
       if (!addLink(url)) return
       requestAnimationFrame(() => textareaRef.current?.focus())
@@ -166,26 +259,32 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   }), [links, text])
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (slashToken && filteredSkills.length > 0) {
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        event.preventDefault()
-        setSlashIndex((current) => (current + (event.key === 'ArrowDown' ? 1 : -1) + filteredSkills.length) % filteredSkills.length)
+    if (event.nativeEvent.isComposing) return
+    if (streaming && event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      void handleSend(event.ctrlKey || event.metaKey ? 'steer' : 'queue')
+      return
+    }
+    if (slashToken) {
+      if (event.key === 'Escape' || event.key === 'Tab') {
+        setSlashToken(null)
+        if (event.key === 'Escape') event.preventDefault()
         return
       }
-      if (event.key === 'Escape') {
+      if (filteredSlashCommands.length > 0 && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
         event.preventDefault()
-        setSlashToken(null)
+        setSlashIndex((current) => (current + (event.key === 'ArrowDown' ? 1 : -1) + filteredSlashCommands.length) % filteredSlashCommands.length)
         return
       }
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault()
-        selectSkill(filteredSkills[slashIndex])
+        if (activeSlashCommand && !activeSlashCommand.disabled) void executeSlashCommand(activeSlashCommand)
         return
       }
     }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
-      handleSend()
+      void handleSend()
     }
   }
 
@@ -195,40 +294,173 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
       return
     }
     const token = findSlashToken(value, caret)
+    if (token && !slashToken) void refreshSlashSources()
     setSlashToken(token)
     setSlashIndex(0)
+    setSlashStatus(null)
   }
 
-  const selectSkill = (skill: SkillDescriptor): void => {
-    if (!slashToken) return
-    const nextText = text.slice(0, slashToken.start) + text.slice(slashToken.end)
-    setText(nextText)
-    setSelectedSkills((current) => [...current, skill])
-    setSlashToken(null)
-    setSlashIndex(0)
+  const focusTextareaAt = (caret: number): void => {
     requestAnimationFrame(() => {
       const element = textareaRef.current
       if (!element) return
-      const caret = slashToken.start + text.slice(slashToken.end).length
       element.focus()
       element.setSelectionRange(caret, caret)
+      element.style.height = 'auto'
+      element.style.height = `${Math.min(element.scrollHeight, 200)}px`
     })
   }
 
-  const handleSend = (): void => {
+  const closeSlashMenu = (removeToken = true): void => {
+    if (removeToken) {
+      const element = textareaRef.current
+      const currentText = element?.value ?? text
+      const caret = element?.selectionStart ?? currentText.length
+      const currentToken = findSlashToken(currentText, caret) ?? slashToken
+      if (currentToken) {
+        const next = removeSlashToken(currentText, currentToken)
+        setText(next.text)
+        focusTextareaAt(next.caret)
+      }
+    }
+    setSlashToken(null)
+    setSlashIndex(0)
+  }
+
+  const openSlashMenu = (): void => {
+    if (runMode !== 'chat' || streaming || submitting) return
+    const element = textareaRef.current
+    const start = element?.selectionStart ?? text.length
+    const end = element?.selectionEnd ?? start
+    const currentToken = findSlashToken(text, start)
+    if (currentToken && start === end) {
+      setSlashToken(currentToken)
+      setSlashIndex(0)
+      setSlashStatus(null)
+      void refreshSlashSources()
+      focusTextareaAt(start)
+      return
+    }
+    const next = insertSlashToken(text, start, end)
+    setText(next.text)
+    setSlashToken(next.token)
+    setSlashIndex(0)
+    setSlashStatus(null)
+    void refreshSlashSources()
+    focusTextareaAt(next.caret)
+  }
+
+  const selectSkill = (skill: SkillDescriptor): void => {
+    if (!slashToken || selectedSkills.some((selected) => selected.id === skill.id)) return
+    const next = removeSlashToken(text, slashToken)
+    setText(next.text)
+    setSelectedSkills((current) => [...current, skill])
+    setSlashToken(null)
+    setSlashIndex(0)
+    focusTextareaAt(next.caret)
+  }
+
+  const selectNativeCommand = (command: NativeSlashCommandId): void => {
+    if (!slashToken) return
+    if (command === 'compact') {
+      if (!onCompact) return
+      closeSlashMenu()
+      setSlashExecuting(true)
+      void Promise.resolve(onCompact()).finally(() => setSlashExecuting(false))
+      return
+    }
+    const nextText = text.slice(0, slashToken.start) + text.slice(slashToken.end)
+    const caret = slashToken.start
+    setText(nextText)
+    setSelectedCommand(command)
+    setSlashToken(null)
+    setSlashIndex(0)
+    focusTextareaAt(caret)
+  }
+
+  const executeSlashCommand = (command: SlashCommandItem): void => {
+    if (command.disabled || slashExecuting) return
+    setSlashStatus(null)
+    if (command.action === 'select-native' && command.nativeCommand) {
+      selectNativeCommand(command.nativeCommand)
+      return
+    }
+    if (command.action === 'select-skill') {
+      const skill = skills.find((candidate) => candidate.id === command.value)
+      if (skill) selectSkill(skill)
+    }
+  }
+
+  const handleSend = async (action: 'send' | 'queue' | 'steer' = streaming ? 'queue' : 'send'): Promise<void> => {
     const trimmed = text.trim()
-    if ((!trimmed && images.length === 0 && links.length === 0) || streaming || submitting) return
-    const commandText = runMode === 'chat' && selectedSkills.length > 0 ? text.replace(/(?:^|\s)\/[A-Za-z0-9._-]+/g, ' ').replace(/\s{2,}/g, ' ').trim() : trimmed
+    const parsedCommand = runMode === 'chat' ? parseNativeSlashCommand(trimmed) : null
+    const command = selectedCommand ?? parsedCommand?.command ?? null
+    const commandText = parsedCommand ? parsedCommand.argument : trimmed
+    const goalCommand: GoalCommandMatch | null = command === 'goal'
+      ? parsedCommand?.command === 'goal'
+        ? parsedCommand
+        : commandText
+          ? { command: 'goal', action: 'create', argument: commandText }
+          : { command: 'goal', action: 'inspect', argument: '' }
+      : null
+    if ((command === 'goal' && !onGoal) || (command === 'plan' && !planCommandAvailable)) return
+    if (parsedCommand?.command === 'compact') {
+      if (!onCompact || streaming || submitting) return
+      setSubmitting(true)
+      void Promise.resolve(onCompact()).finally(() => setSubmitting(false))
+      return
+    }
+    if (((!commandText && images.length === 0 && links.length === 0) && command !== 'goal' && command !== 'plan') || submitting) return
+    if (streaming && (command !== null || selectedSkills.length > 0)) {
+      setSlashStatus(t(language, 'input.commandUnavailableBusy'))
+      return
+    }
+
+    setSubmitting(true)
+    let currentSkills = selectedSkills
+    if (runMode === 'chat' && selectedSkills.length > 0) {
+      try {
+        const loadedSkills = await window.joker.skill.list()
+        setSkills(loadedSkills)
+        const enabledById = new Map(loadedSkills.filter((skill) => skill.enabled).map((skill) => [skill.id, skill]))
+        currentSkills = selectedSkills.flatMap((skill) => {
+          const enabled = enabledById.get(skill.id)
+          return enabled ? [enabled] : []
+        })
+        if (currentSkills.length !== selectedSkills.length) {
+          setSelectedSkills(currentSkills)
+          setSlashStatus(t(language, 'input.selectedSkillsUnavailable'))
+          setSubmitting(false)
+          return
+        }
+      } catch {
+        setSlashStatus(t(language, 'input.commandsLoadFailed'))
+        setSubmitting(false)
+        return
+      }
+    }
+
     const linkText = links.map((link) => link.url).join('\n')
     const messageText = [commandText, linkText].filter(Boolean).join('\n')
-    setSubmitting(true)
-    void Promise.resolve(onSend({ text: messageText, images: runMode === 'chat' ? images : [], skillIds: runMode === 'chat' ? selectedSkills.map((skill) => skill.id) : undefined, links: links.map((link) => link.url), runMode }))
+    const draft = {
+      text: messageText,
+      images: runMode === 'chat' ? images : [],
+      skillIds: runMode === 'chat' ? currentSkills.map((skill) => skill.id) : undefined,
+      links: links.map((link) => link.url),
+      runMode
+    }
+    const send = goalCommand && onGoal
+      ? onGoal(goalCommand, draft)
+      : onSend({ ...draft, ...(command === 'plan' ? { command: { type: command } } : {}) }, action)
+    void Promise.resolve(send)
       .then((accepted) => {
         if (!accepted) return
         setText('')
         setSelectedSkills([])
+        setSelectedCommand(null)
         setLinks([])
         setSlashToken(null)
+        setSlashStatus(null)
         setImages([])
         setImageError(null)
         if (textareaRef.current) textareaRef.current.style.height = 'auto'
@@ -237,7 +469,6 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   }
 
   const handlePaste = async (event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> => {
-    if (streaming) return
     const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'))
     if (imageFiles.length > 0 && runMode === 'research') {
       event.preventDefault()
@@ -359,6 +590,8 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
     }
   }
 
+  const hasQueueableDraft = Boolean(text.trim()) || images.length > 0 || links.length > 0
+
   return (
     <div className="border-t border-[var(--color-border)] bg-[var(--color-surface)] px-[35px] py-3 shrink-0">
       <div className="relative w-full">
@@ -397,9 +630,37 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
             )}
           </div>
         </div>
+        {pendingUserMessages.length > 0 && (
+          <div data-pending-message-list className="mb-2 space-y-1.5 px-1">
+            {pendingUserMessages.map((pending, index) => (
+              <div key={pending.message.id} data-pending-message={pending.message.id} className="flex min-h-8 items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-active)] px-2 py-1.5 text-[10px] text-[var(--color-text-secondary)]">
+                <span className="shrink-0 font-medium text-[var(--color-accent)]">{pending.mode === 'steer' ? t(language, 'input.steerQueued') : t(language, 'input.queuePosition', { count: index + 1 })}</span>
+                <span className="min-w-0 flex-1 truncate" title={pending.message.content}>{pending.message.content || t(language, 'input.attachmentMessage')}</span>
+                {streaming && !goalActive && pending.mode === 'queue' && onSteerPending && (
+                  <button
+                    type="button"
+                    data-steer-pending={pending.message.id}
+                    onClick={() => void onSteerPending(pending.message.id)}
+                    title={t(language, 'input.steerPendingHint')}
+                    className="shrink-0 rounded px-1.5 py-0.5 font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent)]/15"
+                  >
+                    {t(language, 'input.steer')}
+                  </button>
+                )}
+                {onCancelPending && <button type="button" onClick={() => void onCancelPending(pending.message.id)} aria-label={t(language, 'input.cancelQueued')} title={t(language, 'input.cancelQueued')} className="shrink-0 rounded p-0.5 text-[var(--color-text-muted)] hover:bg-[var(--color-bg)] hover:text-red-400"><X size={12} /></button>}
+              </div>
+            ))}
+          </div>
+        )}
         <div data-input-composer className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2">
-          {(images.length > 0 || selectedSkills.length > 0 || links.length > 0) && (
+          {(images.length > 0 || selectedSkills.length > 0 || selectedCommand || links.length > 0) && (
             <div data-input-attachments className="mb-2 flex min-h-6 flex-wrap gap-2">
+              {selectedCommand && (
+                <span data-command-chip={selectedCommand} className="inline-flex items-center gap-1 rounded-md border border-[var(--color-accent)]/50 bg-[var(--color-accent)]/10 px-2 py-1 text-xs text-[var(--color-accent)]">
+                  /{selectedCommand}
+                  <button type="button" aria-label={t(language, 'input.removeCommand', { command: `/${selectedCommand}` })} title={t(language, 'input.removeCommand', { command: `/${selectedCommand}` })} onClick={() => setSelectedCommand(null)} className="ml-1 rounded px-1 hover:bg-[var(--color-accent)]/20">×</button>
+                </span>
+              )}
               {images.map((image, index) => (
                 <ImagePreview
                   key={`${image.filename}-${index}`}
@@ -412,7 +673,7 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
               {selectedSkills.map((skill) => (
                 <span key={skill.id} className="inline-flex items-center gap-1 rounded-md border border-[var(--color-accent)]/50 bg-[var(--color-accent)]/10 px-2 py-1 text-xs text-[var(--color-accent)]">
                   ✦ /{skill.id}
-                  <button type="button" aria-label={`移除 /${skill.id}`} onClick={() => setSelectedSkills((current) => current.filter((item) => item.id !== skill.id))} className="ml-1 rounded px-1 hover:bg-[var(--color-accent)]/20">×</button>
+                  <button type="button" aria-label={t(language, 'input.removeSkill', { skill: `/${skill.id}` })} title={t(language, 'input.removeSkill', { skill: `/${skill.id}` })} onClick={() => setSelectedSkills((current) => current.filter((item) => item.id !== skill.id))} className="ml-1 rounded px-1 hover:bg-[var(--color-accent)]/20">×</button>
                 </span>
               ))}
               {links.map((link) => (
@@ -425,52 +686,106 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
             </div>
           )}
           {imageError && <p className="mb-2 text-[10px] text-red-400">{imageError}</p>}
+          {!slashToken && slashStatus && <p className="mb-2 text-[10px] text-amber-400">{slashStatus}</p>}
           <div className="flex items-end gap-2">
-            <div className="relative min-w-0 flex-1">
+            <div className="relative flex min-w-0 flex-1 items-end gap-2">
+              {runMode === 'chat' && (
+                <button
+                  type="button"
+                  data-slash-trigger
+                  aria-label={t(language, 'input.openCommands')}
+                  title={t(language, 'input.openCommands')}
+                  aria-expanded={Boolean(slashToken)}
+                  aria-controls={slashToken ? slashMenuId : undefined}
+                  disabled={streaming || submitting || slashExecuting}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={openSlashMenu}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-light)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] disabled:opacity-40"
+                >
+                  <Plus size={15} />
+                </button>
+              )}
               <textarea
                 ref={textareaRef}
+                role={slashToken ? 'combobox' : undefined}
+                aria-autocomplete={slashToken ? 'list' : undefined}
+                aria-expanded={slashToken ? true : undefined}
+                aria-controls={slashToken ? slashMenuId : undefined}
+                aria-activedescendant={slashToken && activeSlashCommand ? `slash-command-option-${slashIndex}` : undefined}
                 value={text}
                 onChange={(event) => {
                   setText(event.target.value)
                   updateSlashToken(event.target.value, event.target.selectionStart)
+                }}
+                onClick={(event) => updateSlashToken(event.currentTarget.value, event.currentTarget.selectionStart)}
+                onKeyUp={(event) => {
+                  if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) updateSlashToken(event.currentTarget.value, event.currentTarget.selectionStart)
                 }}
                 onInput={handleInput}
                 onKeyDown={handleKeyDown}
                 onPaste={(event) => void handlePaste(event)}
                 rows={1}
                 placeholder={t(language, runMode === 'research' ? 'research.mode.placeholder' : 'input.placeholder')}
-                className="w-full resize-none bg-transparent text-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
-                disabled={streaming || submitting}
+                className="min-h-8 min-w-0 flex-1 resize-none bg-transparent py-1.5 text-sm leading-5 text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
+                disabled={submitting || slashExecuting}
               />
-              {slashToken && filteredSkills.length > 0 && (
-                <div ref={slashMenuRef} className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-72 overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1 shadow-2xl">
-                  <div className="border-b border-[var(--color-border)] px-2 py-1 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'input.skillCommands')}</div>
-                  {filteredSkills.map((skill, index) => (
-                    <button key={skill.id} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => selectSkill(skill)} className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left ${index === slashIndex ? 'bg-[var(--color-surface-active)]' : 'hover:bg-[var(--color-surface-hover)]'}`}>
-                      <span className="min-w-0 shrink-0 truncate text-sm font-medium text-[var(--color-accent)]">/{skill.id}</span>
-                      <span className="min-w-0 flex-1 truncate text-xs text-[var(--color-text-secondary)]">{skill.description}</span>
-                      <span className="shrink-0 text-[9px] text-[var(--color-text-muted)]/60">{skill.source === 'external' ? t(language, 'input.skillSourceExternal') : skill.source === 'builtin' ? t(language, 'input.skillSourceBuiltin') : t(language, 'input.skillSourceUser')}</span>
-                    </button>
-                  ))}
-                  <div className="border-t border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text-muted)]">{t(language, 'input.skillCommandHints')}</div>
+              {slashToken && (
+                <div id={slashMenuId} data-slash-menu ref={slashMenuRef} role="listbox" aria-label={t(language, 'input.commandsAndSkills')} className="absolute bottom-full left-0 right-0 z-50 mb-2 max-h-[min(24rem,52vh)] overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 shadow-2xl">
+                  {slashLoading && filteredSlashCommands.length === 0 ? (
+                    <p className="px-3 py-5 text-center text-xs text-[var(--color-text-muted)]">{t(language, 'input.commandsLoading')}</p>
+                  ) : filteredSlashCommands.length > 0 ? (
+                    <>
+                      {nativeSlashCommands.length > 0 && <SlashCommandSection label={t(language, 'input.commandGroup.commands')} commands={nativeSlashCommands} allCommands={filteredSlashCommands} activeIndex={slashIndex} optionRefs={slashOptionRefs} onHover={setSlashIndex} onSelect={executeSlashCommand} />}
+                      {skillSlashCommands.length > 0 && <SlashCommandSection label={t(language, 'input.commandGroup.skills')} commands={skillSlashCommands} allCommands={filteredSlashCommands} activeIndex={slashIndex} optionRefs={slashOptionRefs} onHover={setSlashIndex} onSelect={executeSlashCommand} />}
+                    </>
+                  ) : (
+                    <div className="px-3 py-6 text-center">
+                      <p className="text-xs text-[var(--color-text-secondary)]">{t(language, 'input.commandsNoResults')}</p>
+                      <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">{t(language, 'input.commandsNoResultsHint')}</p>
+                    </div>
+                  )}
+                  {skillsEmpty && (
+                    <div className="border-t border-[var(--color-border)] px-3 py-2">
+                      <p className="text-[10px] font-medium uppercase tracking-wide text-[var(--color-text-muted)]/70">{t(language, 'input.commandGroup.skills')}</p>
+                      <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{t(language, 'input.commandsNoSkills')}</p>
+                      <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">{t(language, 'input.commandsNoSkillsHint')}</p>
+                    </div>
+                  )}
+                  {slashStatus && <p className="border-t border-[var(--color-border)] px-2 py-1.5 text-[10px] text-[var(--color-accent)]">{slashStatus}</p>}
+                  <div className="border-t border-[var(--color-border)] px-2 py-1.5 text-[10px] text-[var(--color-text-muted)]">{t(language, 'input.skillCommandHints')}</div>
                 </div>
               )}
             </div>
             {streaming ? (
-              <button
-                type="button"
-                onClick={onAbort}
-                className="flex shrink-0 items-center gap-1 rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-red-500"
-              >
-                <Square size={12} className="fill-current" />
-                {t(language, 'input.stop')}
-              </button>
+              hasQueueableDraft ? (
+                <button
+                  type="button"
+                  data-run-action="queue"
+                  onClick={() => void handleSend('queue')}
+                  disabled={submitting}
+                  title={t(language, 'input.queueHint')}
+                  className="flex h-8 shrink-0 items-center gap-1 rounded-md bg-[var(--color-accent)] px-3 text-xs font-medium text-[var(--color-bg)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
+                >
+                  <Send size={12} />
+                  {t(language, 'input.queue')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  data-run-action="stop"
+                  onClick={onAbort}
+                  className="flex h-8 shrink-0 items-center gap-1 rounded-md bg-red-600 px-3 text-xs font-medium text-white transition hover:bg-red-500"
+                >
+                  <Square size={12} className="fill-current" />
+                  {t(language, goalActive ? 'input.pauseGoal' : 'input.stop')}
+                </button>
+              )
             ) : (
               <button
                 type="button"
-                onClick={handleSend}
-                disabled={submitting || (!text.trim() && images.length === 0 && links.length === 0)}
-                className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-bg)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
+                onClick={() => void handleSend('send')}
+                disabled={submitting || (!text.trim() && images.length === 0 && links.length === 0 && selectedCommand !== 'goal' && selectedCommand !== 'plan')}
+                className="flex h-8 shrink-0 items-center gap-1 rounded-md bg-[var(--color-accent)] px-3 text-xs font-medium text-[var(--color-bg)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
               >
                 <Send size={12} />
                 {t(language, 'input.send')}
@@ -578,6 +893,92 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
 })
 
 export default InputBox
+
+function SlashCommandSection({ label, commands, allCommands, activeIndex, optionRefs, onHover, onSelect }: {
+  label: string
+  commands: SlashCommandItem[]
+  allCommands: SlashCommandItem[]
+  activeIndex: number
+  optionRefs: React.RefObject<Map<string, HTMLButtonElement>>
+  onHover: (index: number) => void
+  onSelect: (command: SlashCommandItem) => void
+}): React.JSX.Element {
+  return (
+    <div className="py-1">
+      <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-[var(--color-text-muted)]/70">{label}</div>
+      {commands.map((command) => {
+        const index = allCommands.findIndex((candidate) => candidate.id === command.id)
+        const Icon = commandIcon(command)
+        return (
+          <button
+            key={command.id}
+            id={`slash-command-option-${index}`}
+            ref={(element) => { if (element) optionRefs.current.set(command.id, element); else optionRefs.current.delete(command.id) }}
+            type="button"
+            role="option"
+            aria-selected={index === activeIndex}
+            aria-disabled={command.disabled}
+            data-slash-option={command.id}
+            onMouseEnter={() => onHover(index)}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => { if (!command.disabled) onSelect(command) }}
+            title={command.disabledReason}
+            className={`flex min-h-10 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors ${index === activeIndex ? 'bg-[var(--color-surface-active)]' : 'hover:bg-[var(--color-surface-hover)]'} ${command.disabled ? 'cursor-not-allowed opacity-50' : ''}`}
+          >
+            <Icon size={14} className="shrink-0 text-[var(--color-text-muted)]" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-xs font-medium text-[var(--color-text-primary)]">{command.label}</span>
+              {(command.disabledReason || command.description) && <span className={`block truncate text-[10px] ${command.disabledReason ? 'text-amber-400/80' : 'text-[var(--color-text-muted)]'}`}>{command.disabledReason ?? command.description}</span>}
+            </span>
+            {command.meta && <span className="max-w-40 shrink-0 truncate text-[10px] text-[var(--color-text-muted)]">{command.meta}</span>}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function commandIcon(command: SlashCommandItem): typeof Sparkles {
+  if (command.action === 'select-skill') return Sparkles
+  if (command.nativeCommand === 'goal') return Target
+  if (command.nativeCommand === 'plan') return ListChecks
+  return Zap
+}
+
+function buildSlashCommands(options: {
+  language: import('../i18n').Language
+  skills: SkillDescriptor[]
+  selectedSkillIds: string[]
+  goalAvailable: boolean
+  planAvailable: boolean
+  compactAvailable: boolean
+  busy: boolean
+}): SlashCommandItem[] {
+  const { language, skills, selectedSkillIds, goalAvailable, planAvailable, compactAvailable, busy } = options
+  return [
+    ...nativeCommandItems({
+      labels: {
+        goal: { description: t(language, 'input.commandGoalDescription') },
+        plan: { description: t(language, 'input.commandPlanDescription') },
+        compact: { description: t(language, 'input.commandCompactDescription') }
+      },
+      unavailableReason: t(language, 'input.commandUnavailableNotWired'),
+      busyReason: t(language, 'input.commandUnavailableBusy'),
+      goalAvailable,
+      planAvailable,
+      compactAvailable,
+      busy
+    }),
+    ...skillCommandItems(skills, selectedSkillIds, {
+      limitReached: t(language, 'input.commandSkillLimit'),
+      disabled: t(language, 'input.commandSkillDisabled'),
+      changed: t(language, 'input.commandSkillChanged')
+    }).map((command) => ({
+      ...command,
+      meta: command.meta === 'external' ? t(language, 'input.skillSourceExternal') : command.meta === 'builtin' ? t(language, 'input.skillSourceBuiltin') : t(language, 'input.skillSourceUser')
+    }))
+  ]
+}
 
 function GitStatusBadge({ status, loading, language }: { status: GitStatus | null; loading: boolean; language: import('../i18n').Language }): React.JSX.Element | null {
   if (loading || !status || !status.available || !status.isRepository) return null

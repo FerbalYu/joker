@@ -71,6 +71,56 @@ void test('normalizeImageConfig preserves providers and repairs duplicate IDs', 
   assert.equal(config.providers[1].protocol, 'grok-images')
 })
 
+void test('normalizeImageProvider preserves Agnes and applies its defaults', () => {
+  const config = normalizeImageConfig({
+    providers: [{
+      id: 'agnes',
+      enabled: true,
+      name: 'Agnes',
+      protocol: 'agnes-images',
+      baseUrl: 'https://apihub.agnes-ai.com/v1',
+      defaultAspectRatio: '21:9',
+      defaultResolution: '3K'
+    }],
+    activeProviderId: 'agnes'
+  })
+
+  const provider = config.providers[0]
+  assert.equal(provider.protocol, 'agnes-images')
+  assert.equal(provider.model, 'agnes-image-2.1-flash')
+  assert.equal(provider.defaultAspectRatio, '21:9')
+  assert.equal(provider.defaultResolution, '3k')
+})
+
+void test('normalizeImageProvider rejects invalid Agnes ratio and resolution', () => {
+  const config = normalizeImageConfig({
+    providers: [{
+      id: 'agnes-bad',
+      protocol: 'agnes-images',
+      defaultAspectRatio: '7:5',
+      defaultResolution: '9k'
+    }],
+    activeProviderId: 'agnes-bad'
+  })
+
+  assert.equal(config.providers[0].defaultAspectRatio, '1:1')
+  assert.equal(config.providers[0].defaultResolution, '1k')
+})
+
+void test('normalizeImageProvider keeps Grok resolution limited to 1k 2k 4k', () => {
+  const config = normalizeImageConfig({
+    providers: [{
+      id: 'grok-3k',
+      protocol: 'grok-images',
+      defaultResolution: '3k'
+    }],
+    activeProviderId: 'grok-3k'
+  })
+
+  assert.equal(config.providers[0].protocol, 'grok-images')
+  assert.equal(config.providers[0].defaultResolution, '1k')
+})
+
 void test('resolveActiveImageProvider prefers active then enabled fallback', () => {
   const config = normalizeImageConfig({
     providers: [

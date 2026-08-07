@@ -19,18 +19,21 @@ export function streamUsageFromModelUsage(
 }
 
 export function addStreamUsage(...usages: Array<StreamUsage | undefined>): StreamUsage {
-  return usages.reduce<StreamUsage>((total, usage) => {
+  const combined = usages.reduce<StreamUsage>((total, usage) => {
     if (!usage) return total
+    const totalTokens = Math.max(total.totalTokens ?? 0, (total.inputTokens ?? 0) + (total.outputTokens ?? 0)) +
+      Math.max(usage.totalTokens ?? 0, (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0))
     return {
       inputTokens: addOptional(total.inputTokens, usage.inputTokens),
       outputTokens: addOptional(total.outputTokens, usage.outputTokens),
-      totalTokens: addOptional(total.totalTokens, usage.totalTokens),
+      totalTokens: totalTokens > 0 ? totalTokens : undefined,
       noCacheTokens: addOptional(total.noCacheTokens, usage.noCacheTokens),
       cacheReadTokens: addOptional(total.cacheReadTokens, usage.cacheReadTokens),
       cacheWriteTokens: addOptional(total.cacheWriteTokens, usage.cacheWriteTokens),
       stepCount: addOptional(total.stepCount, usage.stepCount)
     }
   }, {})
+  return combined
 }
 
 export function buildContextUsage(
@@ -46,6 +49,7 @@ export function buildContextUsage(
     compressionBeforeTokens?: number
     compressionAfterTokens?: number
     compressionError?: string
+    checkpointUsed?: boolean
   }
 ): ContextUsage {
   const capabilities = options.capabilities
@@ -91,7 +95,8 @@ export function buildContextUsage(
     compressionCount: options.compressionCount,
     compressionBeforeTokens: options.compressionBeforeTokens,
     compressionAfterTokens: options.compressionAfterTokens,
-    compressionError: options.compressionError
+    compressionError: options.compressionError,
+    optimization: options.checkpointUsed ? { mode: 'legacy', checkpointReused: true } : undefined
   }
 }
 

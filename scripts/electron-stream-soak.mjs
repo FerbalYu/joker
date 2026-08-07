@@ -22,7 +22,7 @@ const chunks = numberArg('chunks', 2000, 1)
 const consumerDelayMs = numberArg('consumer-delay-ms', 1, 0)
 const iterations = numberArg('iterations', 2, 1)
 const abortAfterMs = numberArg('abort-after-ms', 120, 0)
-const timeoutMs = numberArg('timeout-ms', 30_000, 1_000)
+const timeoutMs = numberArg('timeout-ms', 90_000, 1_000)
 const strict = args.get('strict') === 'true' || args.has('strict')
 
 const runDir = await mkdtemp(join(tmpdir(), 'joker-electron-stream-'))

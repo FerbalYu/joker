@@ -1,4 +1,4 @@
-import { appendMessage, getSession, setSessionsDataDirForTests } from '../src/main/store/sessions.ts'
+import { appendMessage, getSession, setSessionsDataDirForTests } from '../../src/main/store/sessions.ts'
 
 const [, , dataDir, sessionId, workerId, roundsText] = process.argv
 if (!dataDir || !sessionId || !workerId || !roundsText) throw new Error('worker arguments are required')

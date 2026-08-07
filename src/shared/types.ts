@@ -5,12 +5,205 @@ export type {
   ContextOptimizationMode,
   ContextReference,
   ContextTransformMetric as ContextOptimizationTransform,
-  SessionContextCheckpoint
+  SessionContextCheckpoint,
+  SessionContextSummary
 } from './context'
 import type { ContextOptimizationMetrics, ContextOptimizationMode } from './context'
 
+export type {
+  CapabilityRevisionReason,
+  CapabilityRevisionState,
+  ForgeJob,
+  ForgeJobMode,
+  ForgeJobStatus,
+  GeneratedToolActivePointer,
+  GeneratedToolAvailability,
+  GeneratedToolDescriptor,
+  GeneratedToolCandidate,
+  GeneratedToolForgeAttempt,
+  GeneratedToolInvocation,
+  GeneratedToolInvocationOutcome,
+  GeneratedToolInvocationState,
+  GeneratedToolInvocationStatus,
+  GeneratedToolManifest,
+  GeneratedToolNetworkMethod,
+  GeneratedToolPermissionManifest,
+  GeneratedToolRegistryEntry,
+  GeneratedToolRegistryState,
+  GeneratedToolRuntimeId,
+  GeneratedToolScope,
+  GeneratedToolSpec,
+  GeneratedToolValidationCheck,
+  GeneratedToolValidationCheckCategory,
+  GeneratedToolValidationCheckStatus,
+  GeneratedToolValidationReport,
+  GeneratedToolValidationReportStatus,
+  GeneratedToolVersion,
+  GeneratedToolVersionTrustState,
+  GeneratedToolValidationProfileId,
+  GeneratedToolPolicyInput,
+  GeneratedToolPolicyDecision,
+  GeneratedToolPolicyOperation,
+  GeneratedToolPolicyAction,
+  GeneratedToolPolicyReasonCode,
+  GeneratedToolPromotionApprovalReceipt,
+  GeneratedToolPromotionJournal,
+  GeneratedToolPromotionJournalPhase,
+  ToolForgeContinuationV2,
+  ToolForgeContinuationV2Status,
+  ToolForgeContinuationClaim,
+  ToolForgeContinuationState,
+  ToolForgeContinuationStatus,
+  ToolForgeOperationRecord,
+  RuntimeQualificationCandidateId,
+  RuntimeQualificationCandidateResult,
+  RuntimeQualificationCaseId,
+  RuntimeQualificationCaseResult,
+  RuntimeQualificationCaseStatus,
+  RuntimeQualificationEnvironment,
+  RuntimeQualificationEnvironmentResult,
+  RuntimeQualificationLevel,
+  RuntimeQualificationReport
+} from './generated-tools'
+export type {
+  GeneratedToolCandidateSummary,
+  GeneratedToolDetail,
+  GeneratedToolDetailResult,
+  GeneratedToolEffectiveAvailability,
+  GeneratedToolGetInput,
+  GeneratedToolIntegrityState,
+  GeneratedToolInventoryItem,
+  GeneratedToolInvocationView,
+  GeneratedToolJobView,
+  GeneratedToolReadIssue,
+  GeneratedToolsInventorySnapshot,
+  GeneratedToolsListResult,
+  GeneratedToolsQualificationCaseSummary,
+  GeneratedToolsQualificationOperationView,
+  GeneratedToolsQualificationOperationResult,
+  GeneratedToolsReadError,
+  GeneratedToolsReadErrorCode,
+  GeneratedToolsReadResult,
+  GeneratedToolValidationCheckView,
+  GeneratedToolValidationReportView,
+  GeneratedToolPromoteInput,
+  GeneratedToolPromoteResult,
+  GeneratedToolEditRequest,
+  GeneratedToolEditResult,
+  GeneratedToolContinuationView,
+  GeneratedToolContinuationListResult,
+  GeneratedToolLifecycleMutationResult,
+  GeneratedToolRevalidateInput,
+  GeneratedToolRevalidateResult,
+  GeneratedToolRemoveResult,
+  GeneratedToolExportResult
+} from './generated-tools-management'
+export {
+  GeneratedToolEditRequestSchema,
+  GeneratedToolPromoteInputSchema,
+  GeneratedToolLifecycleMutationRequestSchema,
+  GeneratedToolRemoveInputSchema,
+  GeneratedToolExportInputSchema,
+  GeneratedToolRevalidateInputSchema,
+  parseGeneratedToolEditRequest,
+  parseGeneratedToolPromoteInput,
+  parseGeneratedToolRemoveInput,
+  parseGeneratedToolExportInput,
+  parseGeneratedToolRevalidateInput
+} from './generated-tools-management'
+export {
+  CapabilityRevisionReasonSchema,
+  CapabilityRevisionStateSchema,
+  ForgeJobModeSchema,
+  ForgeJobSchema,
+  ForgeJobStatusSchema,
+  GeneratedToolActivePointerSchema,
+  GeneratedToolAvailabilitySchema,
+  GeneratedToolDescriptorSchema,
+  GeneratedToolCandidateSchema,
+  GeneratedToolForgeAttemptSchema,
+  GeneratedToolInvocationOutcomeSchema,
+  GeneratedToolInvocationSchema,
+  GeneratedToolInvocationStateSchema,
+  GeneratedToolInvocationStatusSchema,
+  GeneratedToolManifestSchema,
+  GeneratedToolNetworkMethodSchema,
+  GeneratedToolPermissionManifestSchema,
+  GeneratedToolRegistryEntrySchema,
+  GeneratedToolRegistryStateSchema,
+  GeneratedToolRuntimeIdSchema,
+  GeneratedToolScopeSchema,
+  GeneratedToolSpecSchema,
+  GeneratedToolValidationCheckCategorySchema,
+  GeneratedToolValidationCheckSchema,
+  GeneratedToolValidationCheckStatusSchema,
+  GeneratedToolValidationReportSchema,
+  GeneratedToolValidationReportStatusSchema,
+  GeneratedToolVersionSchema,
+  GeneratedToolVersionTrustStateSchema,
+  GeneratedToolValidationProfileIdSchema,
+  GeneratedToolPolicyInputSchema,
+  GeneratedToolPolicyDecisionSchema,
+  GeneratedToolPolicyOperationSchema,
+  GeneratedToolPolicyActionSchema,
+  GeneratedToolPolicyReasonCodeSchema,
+  GeneratedToolPromotionApprovalReceiptSchema,
+  GeneratedToolPromotionJournalSchema,
+  GeneratedToolPromotionJournalPhaseSchema,
+  ToolForgeContinuationV2Schema,
+  ToolForgeContinuationV2StatusSchema,
+  ToolForgeContinuationClaimSchema,
+  ToolForgeContinuationStateSchema,
+  ToolForgeContinuationStatusSchema,
+  ToolForgeOperationRecordSchema,
+  RuntimeQualificationCandidateIdSchema,
+  RuntimeQualificationCandidateResultSchema,
+  RuntimeQualificationCaseIdSchema,
+  RuntimeQualificationCaseResultSchema,
+  RuntimeQualificationCaseStatusSchema,
+  RuntimeQualificationEnvironmentResultSchema,
+  RuntimeQualificationEnvironmentSchema,
+  RuntimeQualificationLevelSchema,
+  RuntimeQualificationReportSchema,
+  canonicalGeneratedToolJson,
+  parseCapabilityRevisionState,
+  parseForgeJob,
+  parseGeneratedToolActivePointer,
+  parseGeneratedToolDescriptor,
+  parseGeneratedToolCandidate,
+  parseGeneratedToolForgeAttempt,
+  parseGeneratedToolInvocationState,
+  parseGeneratedToolManifest,
+  parseGeneratedToolRegistryState,
+  parseGeneratedToolSpec,
+  parseGeneratedToolValidationReport,
+  parseGeneratedToolVersion,
+  parseRuntimeQualificationReport,
+  parseToolForgeContinuationState
+} from './generated-tools-schema'
+
+export type {
+  GeneratedToolCompatibilityContract,
+  GeneratedToolCompatibilityReason,
+  GeneratedToolCompatibilityReasonCode,
+  GeneratedToolCompatibilityResult,
+  SupportedGeneratedToolRuntimeId,
+  SupportedGeneratedToolRuntimeVersion,
+  SupportedGeneratedToolSchemaVersion,
+  SupportedGeneratedToolSdkVersion
+} from './generated-tools-compatibility'
+export {
+  GENERATED_TOOL_COMPATIBILITY_CONTRACT,
+  SUPPORTED_GENERATED_TOOL_RUNTIME_IDS,
+  SUPPORTED_GENERATED_TOOL_RUNTIME_VERSIONS,
+  SUPPORTED_GENERATED_TOOL_SCHEMA_VERSIONS,
+  SUPPORTED_GENERATED_TOOL_SDK_VERSIONS,
+  checkGeneratedToolCompatibility
+} from './generated-tools-compatibility'
+
 export type MessageRole = 'user' | 'assistant' | 'system'
 export type RunMode = 'chat' | 'research'
+export type ChatIntent = 'plan'
 
 export interface ChatTextPart {
   type: 'text'
@@ -42,6 +235,47 @@ export interface ChatMessage {
   createdAt: number
 }
 
+export type PendingUserMessageMode = 'queue' | 'steer'
+export type PendingUserMessageStatus = 'queued' | 'claimed'
+
+export interface PendingUserMessage {
+  mode: PendingUserMessageMode
+  status: PendingUserMessageStatus
+  message: ChatMessage
+  sequence: number
+  targetRunId?: string
+  createdAt: number
+  claimedByRunId?: string
+  claimedAt?: number
+}
+
+export interface PendingUserMessageEnqueueInput {
+  mode: PendingUserMessageMode
+  message: ChatMessage
+  targetRunId?: string
+}
+
+export interface PendingUserMessageResult {
+  success: boolean
+  changed?: boolean
+  pendingMessage?: PendingUserMessage
+  messageQueueRevision?: number
+  error?:
+    | 'invalid-session'
+    | 'invalid-input'
+    | 'not-found'
+    | 'not-queued'
+    | 'conflict'
+    | 'invalid-order'
+}
+
+export interface PendingUserMessageListResult {
+  success: boolean
+  pending: PendingUserMessage[]
+  messageQueueRevision: number
+  error?: 'invalid-session'
+}
+
 export interface ToolCallInfo {
   toolCallId?: string
   toolName: string
@@ -49,6 +283,39 @@ export interface ToolCallInfo {
   output?: string
   metadata?: Record<string, unknown>
   status: 'running' | 'done' | 'error'
+}
+
+export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type SubagentPhase = 'queued' | 'starting' | 'working' | 'using-tool' | 'finalizing' | 'completed' | 'failed' | 'cancelled'
+
+export interface SubagentToolActivity {
+  id: string
+  toolName: string
+  summary?: string
+  status: 'running' | 'done' | 'error' | 'denied'
+  startedAt: number
+  completedAt?: number
+  durationMs?: number
+  error?: string
+}
+
+/** Observable execution facts only. Hidden model reasoning is intentionally excluded. */
+export interface SubagentActivity {
+  id: string
+  parentToolCallId?: string
+  task: string
+  status: SubagentStatus
+  phase: SubagentPhase
+  createdAt: number
+  startedAt?: number
+  updatedAt: number
+  completedAt?: number
+  currentStep: number
+  maxSteps: number
+  tools: SubagentToolActivity[]
+  outputPreview?: string
+  usage?: StreamUsage
+  error?: string
 }
 
 export type AssistantSegment =
@@ -109,10 +376,17 @@ export type StreamEvent =
   | { type: 'token'; sessionId: string; runId?: string; text: string }
   | { type: 'message-start'; sessionId: string; runId?: string; messageId: string; runMode?: RunMode; providerName?: string; modelName?: string }
   | { type: 'message-end'; sessionId: string; runId?: string; messageId: string; usage?: StreamUsage }
+  | { type: 'step-start'; sessionId: string; runId?: string; stepNumber: number }
+  | { type: 'queue-updated'; sessionId: string; runId?: string; pending: PendingUserMessage[] }
+  | { type: 'message-queued'; sessionId: string; runId?: string; pending: PendingUserMessage }
+  | { type: 'message-applied'; sessionId: string; runId: string; pendingMessageId: string; disposition: PendingUserMessageMode; stepNumber?: number }
+  | { type: 'message-deferred'; sessionId: string; runId?: string; pendingMessageId: string; reason: string }
+  | { type: 'goal-update'; sessionId: string; runId?: string; goal?: GoalState }
   | { type: 'context-usage'; sessionId: string; runId?: string; usage: ContextUsage }
   | { type: 'tool-call'; sessionId: string; runId?: string; toolCallId: string; toolName: string; input: Record<string, unknown> }
   | { type: 'tool-result'; sessionId: string; runId?: string; toolCallId: string; toolName: string; output: string; metadata?: Record<string, unknown> }
   | { type: 'tool-error'; sessionId: string; runId?: string; toolCallId: string; toolName: string; error: string }
+  | { type: 'subagent-update'; sessionId: string; runId?: string; activity: SubagentActivity }
   | { type: 'error'; sessionId: string; runId?: string; error: string }
   | { type: 'abort'; sessionId: string; runId?: string }
   | { type: 'done'; sessionId: string; runId?: string }
@@ -282,6 +556,13 @@ export interface McpServerRuntime {
   pid?: number
 }
 
+export type SkillTrustState = 'trusted' | 'untrusted' | 'changed'
+
+export interface TrustedSkillRecord {
+  id: string
+  fingerprint: string
+}
+
 export interface SkillDescriptor {
   id: string
   name: string
@@ -292,7 +573,15 @@ export interface SkillDescriptor {
   allowedMcpTools: string[]
   enabled: boolean
   trusted: boolean
+  fingerprint?: string
+  trustState?: SkillTrustState
   error?: string
+}
+
+export interface SkillActionResult {
+  success: boolean
+  error?: string
+  skill?: SkillDescriptor
 }
 
 export interface AppConfig {
@@ -300,7 +589,11 @@ export interface AppConfig {
   activeProviderId: string
   contextOptimizationMode?: ContextOptimizationMode
   mcpServers?: McpServerConfig[]
+  /** Legacy migration input. Current Skill availability is fingerprint-record based. */
   disabledSkills?: string[]
+  /** Current content fingerprints that the user enabled. */
+  trustedSkills?: TrustedSkillRecord[]
+  skillStateVersion?: 1
 }
 
 
@@ -319,7 +612,7 @@ export interface ProviderTestResult {
   message: string
 }
 
-export type ImageProviderProtocol = 'openai-images' | 'grok-images'
+export type ImageProviderProtocol = 'openai-images' | 'grok-images' | 'agnes-images'
 
 export interface ImageProviderEntry {
   id: string
@@ -372,13 +665,227 @@ export interface GeneratedImageReadResult {
   error?: string
 }
 
+export type GoalStatus =
+  | 'queued'
+  | 'executing'
+  | 'validating'
+  | 'paused'
+  | 'blocked'
+  | 'completed'
+  | 'interrupted'
+
+export type GoalPhase = 'execution' | 'validation'
+
+export type GoalStopReason =
+  | 'user-paused'
+  | 'legacy-migration'
+  | 'recovered-after-restart'
+  | 'max-rounds'
+  | 'token-limit'
+  | 'evaluator-blocked'
+  | 'completed'
+  | 'execution-error'
+  | 'evaluation-error'
+
+export interface GoalExecutionContext {
+  projectId?: string
+  skillIds: string[]
+  reasoningLevel: ReasoningLevel
+}
+
+export interface GoalInvocationIds {
+  execution?: string
+  validation?: string
+}
+
+export interface GoalHistoryEntry {
+  phase: GoalPhase | 'system'
+  status: GoalStatus
+  round: number
+  revision: number
+  createdAt: number
+  invocationId?: string
+  messageId?: string
+  usageOperationId?: string
+  usage?: StreamUsage
+  feedback?: string
+  evaluation?: string
+  stopReason?: GoalStopReason
+}
+
+export interface GoalUsageOperation {
+  id: string
+  invocationId: string
+  /** Omitted by schema-v4 execution operations written before evaluator accounting. */
+  phase?: GoalPhase
+  messageId?: string
+  usage: StreamUsage
+  appliedAt: number
+}
+
+export interface GoalState {
+  id: string
+  /** User-visible objective. */
+  objective: string
+  status: GoalStatus
+  generation: number
+  revision: number
+  currentRound: number
+  history: GoalHistoryEntry[]
+  currentInvocationIds: GoalInvocationIds
+  executionContext: GoalExecutionContext
+  cumulativeUsage: StreamUsage
+  appliedUsageOperations: GoalUsageOperation[]
+  maxRounds: number
+  tokenLimit?: number
+  createdAt: number
+  updatedAt: number
+  startedAt?: number
+  completedAt?: number
+  pausedAt?: number
+  /** Phase to continue after a pause or restart interruption. */
+  resumePhase?: GoalPhase
+  feedback?: string
+  evaluation?: string
+  stopReason?: GoalStopReason
+}
+
+export interface GoalCas {
+  goalId: string
+  generation: number
+  revision: number
+}
+
+export interface GoalCreateInput {
+  objective: string
+  executionContext?: Partial<GoalExecutionContext>
+  maxRounds?: number
+  tokenLimit?: number
+}
+
+export interface GoalClaimInput extends GoalCas {
+  phase: GoalPhase
+  invocationId: string
+}
+
+export interface GoalExecutionCommitInput extends GoalCas {
+  invocationId: string
+  usageOperationId: string
+  message: ChatMessage
+  usage?: StreamUsage
+}
+
+export interface GoalEvaluationCommitInput extends GoalCas {
+  invocationId: string
+  usageOperationId?: string
+  usage?: StreamUsage
+  outcome: 'complete' | 'continue' | 'blocked'
+  evaluation: string
+  feedback?: string
+  stopReason?: Extract<GoalStopReason, 'completed' | 'evaluator-blocked' | 'max-rounds' | 'token-limit'>
+}
+
+export interface GoalPauseInput extends GoalCas {
+  stopReason?: 'user-paused' | 'execution-error' | 'evaluation-error'
+  feedback?: string
+}
+
+export interface GoalTransitionResult {
+  success: boolean
+  changed?: boolean
+  goal?: GoalState
+  invocationId?: string
+  error?:
+    | 'invalid-session'
+    | 'invalid-goal'
+    | 'no-goal'
+    | 'stale-goal'
+    | 'invalid-transition'
+    | 'invalid-message'
+    | 'invalid-usage'
+    | 'conflict'
+}
+
+export interface SessionRunActivityRecord {
+  state: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  terminalRevision: number
+  seenTerminalRevision: number
+  runId?: string
+  kind?: 'chat' | 'goal'
+  startedAt?: number
+  finishedAt?: number
+  error?: string
+}
+
+export type SessionLivePhase =
+  | 'starting'
+  | 'waiting-model'
+  | 'streaming-text'
+  | 'running-tools'
+  | 'awaiting-approval'
+  | 'finalizing'
+
+export type SessionDisplayStatus =
+  | 'idle'
+  | 'running'
+  | 'awaiting-user'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+
+export interface SessionActivitySummary {
+  status: SessionDisplayStatus
+  unread: boolean
+  terminalRevision: number
+  seenTerminalRevision: number
+  pendingApprovalCount: number
+  livePhase?: SessionLivePhase
+  runId?: string
+  kind?: 'chat' | 'goal'
+  startedAt?: number
+  finishedAt?: number
+  error?: string
+}
+
+export interface SessionSummary extends SessionMeta {
+  activity: SessionActivitySummary
+}
+
+export interface SessionSummaryChangedEvent {
+  type: 'upsert' | 'delete'
+  sessionId: string
+  summary?: SessionSummary
+}
+
 export interface SessionMeta {
   id: string
   title: string
   createdAt: number
   updatedAt: number
+  /** Persistent Goal state; objective remains the user-visible text. */
+  goal?: GoalState
   /** Project bound to this conversation; absent means no working folder. */
   projectId?: string
+}
+
+export interface SessionGoalResult {
+  success: boolean
+  /** User-visible objective retained for existing command/UI callers. */
+  goal?: string
+  state?: GoalState
+  error?: 'invalid-session' | 'invalid-goal'
+}
+
+export interface SessionCompactResult {
+  success: boolean
+  changed: boolean
+  beforeTokens: number
+  afterTokens: number
+  retainedMessageCount: number
+  sourceMessageCount: number
+  error?: 'invalid-session' | 'not-enough-history' | 'stale-session' | 'model-error' | 'invalid-summary' | 'save-failed'
+  message?: string
 }
 
 export interface ProjectEntry {

@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { streamText } from 'ai'
+import { streamText, tool } from 'ai'
+import { z } from 'zod'
 import { createLanguageModel, fetchProviderModels, mergeFetchedModels, testProviderModel } from './index'
 
 async function withServer(
@@ -121,6 +122,39 @@ void test('Anthropic provider test uses x-api-key and version headers', async ()
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+void test('compatible streaming normalizes sparse tool-call indexes and preserves arguments', async () => {
+  await withServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' })
+    const chunks = [
+      { index: 1, id: 'call-read', type: 'function', function: { name: 'Read', arguments: '{"path":"' } },
+      { index: 1, function: { arguments: 'package.json"}' } },
+      { index: 3, id: 'call-write', type: 'function', function: { name: 'Write', arguments: '{"path":"out.txt"}' } }
+    ]
+    for (const toolCall of chunks) {
+      response.write(`data: ${JSON.stringify({ id: 'chatcmpl-tools', object: 'chat.completion.chunk', created: 1, model: 'fake-model', choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }] })}\n\n`)
+    }
+    response.write(`data: ${JSON.stringify({ id: 'chatcmpl-tools', object: 'chat.completion.chunk', created: 1, model: 'fake-model', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`)
+    response.end('data: [DONE]\n\n')
+  }, async (baseUrl) => {
+    const result = streamText({
+      model: createLanguageModel({ provider: 'openai-compatible', apiFormat: 'chat-completions', model: 'fake-model', apiKey: 'secret', baseUrl }),
+      prompt: 'perform tools',
+      tools: {
+        Read: tool({ description: 'Read', inputSchema: z.object({ path: z.string() }), execute: async () => 'read' }),
+        Write: tool({ description: 'Write', inputSchema: z.object({ path: z.string() }), execute: async () => 'write' })
+      }
+    })
+    const parts: Array<{ toolCallId: string; toolName: string; input: unknown }> = []
+    for await (const part of result.fullStream) {
+      if (part.type === 'tool-call') parts.push(part)
+    }
+    assert.deepEqual(parts.map((part) => ({ id: part.toolCallId, name: part.toolName, input: part.input })), [
+      { id: 'call-read', name: 'Read', input: { path: 'package.json' } },
+      { id: 'call-write', name: 'Write', input: { path: 'out.txt' } }
+    ])
+  })
 })
 
 void test('compatible streaming requests usage and maps cache details', async () => {

@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import { loadConfig, normalizeConfig, saveConfig, type AppConfig } from '../store/config'
+import { loadConfig, normalizeConfig, preserveSkillConfigState, saveConfig, type AppConfig } from '../store/config'
 import { fetchProviderModels, mergeFetchedModels, testProviderModel } from '../providers'
 import { maskHeaders, restoreHeaders } from './mcp-config'
 import type { FetchModelsResult, ProviderEntry, ProviderTestResult } from '@shared/types'
@@ -20,7 +20,7 @@ export function registerConfigIpc(): void {
       const previous = existing.mcpServers?.find((candidate) => candidate.id === server.id)
       return { ...server, headers: restoreHeaders(server.headers, previous?.headers) }
     })
-    saveConfig({ ...incoming, providers, mcpServers, disabledSkills: existing.disabledSkills })
+    saveConfig(preserveSkillConfigState({ ...incoming, providers, mcpServers }, existing))
     return true
   })
 

@@ -11,6 +11,11 @@ const BUILTIN_RISKS: Record<string, ToolRisk> = {
   GitLog: 'read',
   GitBranch: 'read',
   PresentResearchReport: 'read',
+  ToolSearch: 'read',
+  ToolForgeStatus: 'read',
+  ToolForgeStart: 'write_local',
+  ToolForgeCancel: 'write_local',
+  ToolPromote: 'write_local',
   Write: 'write_local',
   Edit: 'write_local',
   Bash: 'exec',
@@ -23,9 +28,10 @@ const BUILTIN_RISKS: Record<string, ToolRisk> = {
 export function classifyToolRisk(
   toolName: string,
   declaredRisk?: ToolRisk,
-  source?: { type: 'builtin' | 'mcp' }
+  source?: { type: 'builtin' | 'mcp' | 'generated' }
 ): ToolRisk {
   if (declaredRisk) return declaredRisk
   if (source?.type === 'mcp') return 'external'
+  if (source?.type === 'generated') return 'external'
   return BUILTIN_RISKS[toolName] ?? 'external'
 }

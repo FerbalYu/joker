@@ -3,7 +3,7 @@ import { ChevronDown, ChevronRight, Loader2, Wrench } from 'lucide-react'
 import type { ToolCallInfo } from '@shared/types'
 import { useStore } from '../store'
 import { t, toolLabel } from '../i18n'
-import ToolCard from './ToolCard'
+import ToolCard, { getToolForgeSummary, ToolForgeSummary } from './ToolCard'
 
 interface Props {
   toolCalls: ToolCallInfo[]
@@ -15,6 +15,16 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
   const [expanded, setExpanded] = useState(false)
 
   const summary = useMemo(() => buildSummary(toolCalls, language), [language, toolCalls])
+  const forgeSummaries = useMemo(() => {
+    const byTool = new Map<string, { key: string; summary: NonNullable<ReturnType<typeof getToolForgeSummary>> }>()
+    toolCalls.forEach((toolCall, index) => {
+      const forgeSummary = getToolForgeSummary(toolCall, language)
+      if (!forgeSummary) return
+      const key = forgeSummary.toolId ?? toolCall.toolCallId ?? `${toolCall.toolName}-${index}`
+      byTool.set(key, { key, summary: forgeSummary })
+    })
+    return [...byTool.values()]
+  }, [language, toolCalls])
 
   if (toolCalls.length === 0) return null
 
@@ -70,10 +80,22 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
         </span>
       </button>
 
+      {forgeSummaries.length > 0 && (
+        <div data-toolforge-group-evidence className="space-y-1.5 border-t border-[var(--color-border)]/70 p-1.5">
+          {forgeSummaries.map((item) => (
+            <ToolForgeSummary key={item.key} summary={item.summary} language={language} />
+          ))}
+        </div>
+      )}
+
       {expanded && (
         <div className="space-y-1.5 border-t border-[var(--color-border)]/70 p-1.5">
           {toolCalls.map((toolCall, index) => (
-            <ToolCard key={toolCall.toolCallId ?? `${toolCall.toolName}-${index}`} toolCall={toolCall} />
+            <ToolCard
+              key={toolCall.toolCallId ?? `${toolCall.toolName}-${index}`}
+              toolCall={toolCall}
+              showForgeSummary={false}
+            />
           ))}
         </div>
       )}
