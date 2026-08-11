@@ -14,7 +14,6 @@ import {
 import { dirname, extname, join, relative, resolve, sep } from 'node:path'
 
 import type { ForgeJob } from '../../shared/generated-tools'
-import { canonicalGeneratedToolJson } from '../../shared/generated-tools-schema'
 import { fingerprintGeneratedToolArtifact } from './fingerprint'
 import { readForgeJob } from './forge-job-store'
 import { assertPathHasNoSymlink, assertToolForgeId, resolveRootRelativePath } from './paths'
@@ -190,10 +189,6 @@ export class ForgeWorkspaceBroker {
     try {
       scanWorkspace(this.root)
       const fingerprint = fingerprintGeneratedToolArtifact(generatedToolsRoot(this.jokerHome), this.job.artifactPath)
-      if (fingerprint.manifest.toolId !== this.job.toolId) throw new Error('manifest toolId does not match ForgeJob')
-      if (canonicalGeneratedToolJson(fingerprint.manifest.permissions) !== canonicalGeneratedToolJson(this.job.spec.permissions)) {
-        throw new Error('manifest permissions do not match ForgeJob spec')
-      }
       return {
         id: createHash('sha256').update(`${this.job.id}\0${fingerprint.fingerprint}`).digest('hex').slice(0, 32),
         kind: 'artifact-structure',

@@ -2,8 +2,9 @@ import { ipcMain, BrowserWindow } from 'electron'
 
 import {
   GeneratedToolDetailResult,
+  GeneratedToolJobStatusResult,
   GeneratedToolEditResult,
-  GeneratedToolPromoteResult,
+  GeneratedToolEnableResult,
   GeneratedToolRevalidateResult,
   GeneratedToolContinuationListResult,
   GeneratedToolsListResult,
@@ -17,13 +18,15 @@ import {
 } from '../../shared/generated-tools-management'
 import {
   handleGeneratedToolGet,
+  handleGeneratedToolJobStatus,
   handleGeneratedToolEdit,
-  handleGeneratedToolPromote,
+  handleGeneratedToolEnable,
   handleGeneratedToolRevalidate,
   type GeneratedToolsMutationHandlers,
   type GeneratedToolsReadModel
 } from './generated-tools-handler'
 import {
+  getForgeJobStatusForManagement,
   getGeneratedToolForManagement,
   listGeneratedToolsForManagement
 } from '../generated-tools/management-read-model'
@@ -68,7 +71,8 @@ export function createGeneratedToolsReadModel(
 ): GeneratedToolsReadModel {
   return {
     list: () => listGeneratedToolsForManagement(jokerHome),
-    get: (toolId) => getGeneratedToolForManagement(toolId, jokerHome)
+    get: (toolId) => getGeneratedToolForManagement(toolId, jokerHome),
+    jobStatus: (jobId) => getForgeJobStatusForManagement(jobId, jokerHome)
   }
 }
 
@@ -107,31 +111,27 @@ export function createGeneratedToolsMutationHandlers(): GeneratedToolsMutationHa
   return {
     edit: (input, sessionId, runId) => editService.start(input, sessionId, runId),
     revalidate: (input) => revalidateService.revalidate(input),
-    promote: async (input, requestApproval) => {
+    enable: async (input, requestApproval) => {
       const service = getDefaultPromotionService()
       if (!service) {
         return {
           success: false,
           error: {
             code: 'read-failed',
-            message: 'Generated Tool promotion service is unavailable'
+            message: 'Generated Tool enable service is unavailable'
           }
         }
       }
       try {
-        const result = await service.promote({ ...input, ...(requestApproval ? { requestApproval } : {}) })
+        const result = await service.advance(input.jobId, requestApproval ? { requestApproval } : undefined)
         return {
           success: true,
           data: {
             jobId: result.job.id,
+            toolId: result.job.toolId,
             status: result.job.status,
-            jobRevision: result.job.revision,
-            action: result.action,
+            action: result.action === 'promoted' ? 'enabled' : result.action === 'approval-required' ? 'permission-required' : 'denied',
             reason: result.reason,
-            promotionId: result.journal.id,
-            phase: result.journal.phase,
-            ...(result.versionId ? { versionId: result.versionId } : {}),
-            ...(result.capabilityRevision !== undefined ? { capabilityRevision: result.capabilityRevision } : {}),
             originalTaskComplete: false
           }
         }
@@ -140,7 +140,7 @@ export function createGeneratedToolsMutationHandlers(): GeneratedToolsMutationHa
           success: false,
           error: {
             code: 'read-failed',
-            message: error instanceof Error ? error.message : 'Generated Tool promotion failed'
+            message: error instanceof Error ? error.message : 'Generated Tool enable failed'
           }
         }
       }
@@ -158,8 +158,12 @@ export function registerGeneratedToolsIpc(
     (_event, input: unknown): GeneratedToolDetailResult => handleGeneratedToolGet(readModel, input)
   )
   ipcMain.handle(
-    'generated-tools:promote',
-    async (event, input: unknown): Promise<GeneratedToolPromoteResult> => {
+    'generated-tools:job-status',
+    (_event, input: unknown): GeneratedToolJobStatusResult => handleGeneratedToolJobStatus(readModel, input)
+  )
+  ipcMain.handle(
+    'generated-tools:enable',
+    async (event, input: unknown): Promise<GeneratedToolEnableResult> => {
       const win = BrowserWindow.fromWebContents(event.sender)
       const requestApproval = win
         ? (request: import('../tools/registry').HostApprovalRequest) => requestExplicitApproval({
@@ -175,7 +179,7 @@ export function registerGeneratedToolsIpc(
             }
           }).then((grant) => grant ? { ...grant, webContentsId: grant.windowId } : null)
         : undefined
-      return handleGeneratedToolPromote(mutationHandlers, input, requestApproval)
+      return handleGeneratedToolEnable(mutationHandlers, input, requestApproval)
     }
   )
   ipcMain.handle(

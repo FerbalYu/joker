@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { parseGeneratedToolExportInput, parseGeneratedToolGetInput, parseGeneratedToolPromoteInput, parseGeneratedToolRemoveInput } from './generated-tools-management'
+import { parseGeneratedToolEnableInput, parseGeneratedToolExportInput, parseGeneratedToolGetInput, parseGeneratedToolRemoveInput } from './generated-tools-management'
 
 void test('Generated Tool management input is strict and path-free', () => {
   assert.deepEqual(parseGeneratedToolGetInput({ toolId: 'tool-1' }), { toolId: 'tool-1' })
@@ -18,16 +18,10 @@ void test('Generated Tool management input is strict and path-free', () => {
   }
 })
 
-void test('promotion input separates job and registry revisions and rejects caller approval', () => {
-  const input = {
-    jobId: 'job-1',
-    expectedJobRevision: 4,
-    registryRevision: 9,
-    expectedCandidateFingerprint: 'a'.repeat(64)
-  }
-  assert.deepEqual(parseGeneratedToolPromoteInput(input), input)
-  assert.throws(() => parseGeneratedToolPromoteInput({ ...input, expectedRevision: 4 }))
-  assert.throws(() => parseGeneratedToolPromoteInput({ ...input, approval: { approved: true } }))
+void test('enable input accepts only a durable job identity', () => {
+  assert.deepEqual(parseGeneratedToolEnableInput({ jobId: 'job-1' }), { jobId: 'job-1' })
+  assert.throws(() => parseGeneratedToolEnableInput({ jobId: 'job-1', expectedJobRevision: 4 }))
+  assert.throws(() => parseGeneratedToolEnableInput({ jobId: 'job-1', approval: { approved: true } }))
 })
 
 void test('Gate 4 remove and export inputs are strict and path-safe', () => {

@@ -14,6 +14,7 @@ import type {
   ForgeJob,
   GeneratedToolCandidate,
   GeneratedToolForgeAttempt,
+  GeneratedToolValidationPlan,
   GeneratedToolValidationProfileId
 } from '../../shared/generated-tools'
 import {
@@ -26,16 +27,28 @@ import { fingerprintGeneratedToolArtifact } from './fingerprint'
 import { readForgeJob, updateForgeJob } from './forge-job-store'
 import { assertPathHasNoSymlink, assertToolForgeId, resolveRootRelativePath, toRootRelativePath } from './paths'
 import { ToolForgeCasError } from './registry'
+import {
+  compileGeneratedToolValidationPlan,
+  fingerprintGeneratedToolValidationPlan
+} from './validation-suite'
+import { generatedToolValidationProfile } from './forge-preflight'
 import { generatedToolsRoot } from './store'
 
 export const GATE2_PROJECT_READ_PROFILE: GeneratedToolValidationProfileId = 'gate2-project-read-v1'
+
+function validationProfileFor(job: ForgeJob): GeneratedToolValidationProfileId {
+  return generatedToolValidationProfile(job.spec)
+}
 
 export interface SealGeneratedToolCandidateInput {
   jokerHome: string
   jobId: string
   expectedRevision: number
-  validationSuiteId: string
-  validationSuiteHash: string
+  /** @deprecated legacy suite identity; compiled to a generic plan when provided. */
+  validationSuiteId?: string
+  validationSuiteHash?: string
+  validationPlan?: GeneratedToolValidationPlan
+  validationPlanHash?: string
   createdAt: number
   validationRunId: string
 }
@@ -73,15 +86,15 @@ export function computeForgeJobSpecHash(job: Pick<ForgeJob, 'spec'>): string {
   return sha256(job.spec)
 }
 
-function candidateIdFor(job: ForgeJob, artifactFingerprint: string, suiteId: string, suiteHash: string): string {
+function candidateIdFor(job: ForgeJob, artifactFingerprint: string, validationPlanHash: string): string {
+  const validationProfile = validationProfileFor(job)
   return `candidate-${sha256({
     jobId: job.id,
     attempt: job.attempt,
     artifactFingerprint,
     specHash: job.specHash,
-    validationProfile: GATE2_PROJECT_READ_PROFILE,
-    validationSuiteId: suiteId,
-    validationSuiteHash: suiteHash
+    validationProfile,
+    validationPlanHash
   }).slice(0, 48)}`
 }
 
@@ -161,9 +174,15 @@ export function sealGeneratedToolCandidate(input: SealGeneratedToolCandidateInpu
   job: ForgeJob
   idempotent: boolean
 } {
-  assertToolForgeId(input.validationSuiteId, 'validation suite id')
   assertToolForgeId(input.validationRunId, 'validation run id')
-  if (!/^[a-f0-9]{64}$/.test(input.validationSuiteHash)) throw new Error('Invalid validation suite hash')
+  const validationPlan = input.validationPlan ?? compileGeneratedToolValidationPlan(readForgeJob(input.jokerHome, input.jobId)?.spec ?? (() => { throw new Error(`ForgeJob not found: ${input.jobId}`) })())
+  const validationPlanHash = input.validationPlanHash ?? fingerprintGeneratedToolValidationPlan(validationPlan)
+  if (!/^[a-f0-9]{64}$/.test(validationPlanHash)) throw new Error('Invalid validation plan hash')
+  if (fingerprintGeneratedToolValidationPlan(validationPlan) !== validationPlanHash) throw new Error('Validation plan hash does not match plan')
+  if (input.validationSuiteId !== undefined) {
+    assertToolForgeId(input.validationSuiteId, 'validation suite id')
+    if (input.validationSuiteHash === undefined || !/^[a-f0-9]{64}$/.test(input.validationSuiteHash)) throw new Error('Invalid validation suite hash')
+  }
 
   const lockPath = join(
     generatedToolsRoot(input.jokerHome),
@@ -197,7 +216,7 @@ export function sealGeneratedToolCandidate(input: SealGeneratedToolCandidateInpu
       throw new Error('Forge repair candidate has no artifact or spec changes')
     }
 
-    const candidateId = candidateIdFor(job, before.fingerprint, input.validationSuiteId, input.validationSuiteHash)
+    const candidateId = candidateIdFor(job, before.fingerprint, validationPlanHash)
     const attemptRecordId = attemptRecordIdFor(job.id, job.attempt, candidateId)
     const artifactPath = candidateArtifactRelativePath(job.id, candidateId)
     const candidatePath = getGeneratedToolCandidatePath(input.jokerHome, job.id, candidateId)
@@ -237,9 +256,9 @@ export function sealGeneratedToolCandidate(input: SealGeneratedToolCandidateInpu
         distHash: copied.distHash,
         manifest: copied.manifest,
         specHash: job.specHash,
-        validationProfile: GATE2_PROJECT_READ_PROFILE,
-        validationSuiteId: input.validationSuiteId,
-        validationSuiteHash: input.validationSuiteHash,
+        validationProfile: validationProfileFor(job),
+        validationPlan,
+        validationPlanHash,
         createdAt: input.createdAt
       })
       const attempt = parseGeneratedToolForgeAttempt({
@@ -252,8 +271,8 @@ export function sealGeneratedToolCandidate(input: SealGeneratedToolCandidateInpu
         candidateFingerprint: candidate.artifactFingerprint,
         specHash: job.specHash,
         validationProfile: candidate.validationProfile,
-        validationSuiteId: candidate.validationSuiteId,
-        validationSuiteHash: candidate.validationSuiteHash,
+        validationPlan: candidate.validationPlan,
+        validationPlanHash: candidate.validationPlanHash,
         createdAt: input.createdAt
       })
       writeJsonOnce(join(staging, 'candidate.json'), candidate)

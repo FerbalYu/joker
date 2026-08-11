@@ -30,6 +30,7 @@ export default function DetailPanel({ onGoalAction }: Props): React.JSX.Element 
   const streamModelName = useStore((s) => s.streamModelName)
   const streamRunMode = useStore((s) => s.streamRunMode)
   const runActivity = useStore((s) => s.runActivity)
+  const streamFlow = useStore((s) => s.streamFlow)
   const language = useStore((s) => s.language)
   const [collapsed, setCollapsed] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1180)
   const [compactHidden, setCompactHidden] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1180)
@@ -101,6 +102,18 @@ export default function DetailPanel({ onGoalAction }: Props): React.JSX.Element 
             </div>
             {(streamProviderName || streamModelName) && <p className="text-xs text-[var(--color-text-secondary)]">{streamProviderName ?? '—'} / {streamModelName ?? '—'}</p>}
           </section>
+
+          {(streaming || streamFlow) && <section className="rounded-lg bg-[var(--color-bg)] p-3 shadow-[inset_0_0_0_1px_var(--color-border)]">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs uppercase tracking-widest text-[var(--color-text-muted)]">{t(language, 'detail.transport')}</p>
+              <span className={`text-[10px] font-medium ${streamFlow?.blockedSince ? 'text-amber-400' : 'text-emerald-400'}`}>{t(language, streamFlow?.blockedSince ? 'detail.transportBlocked' : 'detail.transportHealthy')}</span>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] text-[var(--color-text-secondary)]">
+              <span>{t(language, 'detail.transportQueue')}</span><span className="text-right font-mono tabular-nums">{streamFlow ? `${streamFlow.queueDepth} / ${streamFlow.inFlight}` : '—'}</span>
+              <span>{t(language, 'detail.transportAckAge')}</span><span className="text-right font-mono tabular-nums">{streamFlow?.lastAckAt ? formatStatusAge(elapsedNow - streamFlow.lastAckAt) : '—'}</span>
+              <span>{t(language, 'detail.transportBlockedFor')}</span><span className="text-right font-mono tabular-nums">{streamFlow?.blockedSince ? formatStatusAge(elapsedNow - streamFlow.blockedSince) : '—'}</span>
+            </div>
+          </section>}
 
           {activeSession.goal && <GoalCard goal={activeSession.goal} language={language} streaming={streaming} onAction={onGoalAction} />}
 
@@ -232,6 +245,14 @@ function goalStopReasonLabel(language: 'zh' | 'en', reason: NonNullable<GoalStat
 
 function DetailMetric({ label, value, mono = false }: { label: string; value: string; mono?: boolean }): React.JSX.Element {
   return <div className="flex items-start justify-between gap-3"><span className="text-[var(--color-text-muted)]">{label}</span><span className={`max-w-[58%] break-words text-right text-[var(--color-text-primary)] ${mono ? 'font-mono tabular-nums' : ''}`}>{value}</span></div>
+}
+
+function formatStatusAge(durationMs: number): string {
+  const seconds = Math.max(0, Math.floor(durationMs / 1_000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`
 }
 
 function UsageRow({ label, value }: { label: string; value: number | undefined }): React.JSX.Element {

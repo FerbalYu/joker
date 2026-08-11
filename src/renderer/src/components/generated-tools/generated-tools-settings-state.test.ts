@@ -5,7 +5,7 @@ import type {
   GeneratedToolContinuationView,
   GeneratedToolsInventorySnapshot
 } from '@shared/types'
-import { isStaleGeneratedToolsCasError, shouldPollGeneratedTools } from './generated-tools-settings-state'
+import { generatedToolJobProductState, generatedToolProductState, hasFailedGeneratedToolUpdate, isStaleGeneratedToolsCasError, shouldPollGeneratedTools } from './generated-tools-settings-state'
 
 function snapshot(overrides: Partial<GeneratedToolsInventorySnapshot> = {}): GeneratedToolsInventorySnapshot {
   return {
@@ -35,6 +35,54 @@ function continuation(status: GeneratedToolContinuationView['status']): Generate
     updatedAt: 1
   }
 }
+
+function inventoryItem(overrides: Partial<GeneratedToolsInventorySnapshot['tools'][number]> = {}): GeneratedToolsInventorySnapshot['tools'][number] {
+  return {
+    toolId: 'tool-1',
+    displayName: 'Tool',
+    description: 'Tool',
+    scope: 'user',
+    availability: 'available',
+    executable: true,
+    executionPolicy: 'auto-eligible',
+    integrity: 'verified',
+    issues: [],
+    activeVersionId: 'version-1',
+    lastStableVersionId: 'version-1',
+    permissionSummary: [],
+    invocationCount: 0,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides
+  }
+}
+
+void test('product states simplify forge and inventory internals', () => {
+  assert.equal(generatedToolJobProductState('planning'), 'manufacturing')
+  assert.equal(generatedToolJobProductState('awaiting-policy'), 'waiting-permission')
+  assert.equal(generatedToolJobProductState('failed'), 'validation-failed')
+  assert.equal(generatedToolProductState(inventoryItem()), 'enabled')
+  assert.equal(generatedToolProductState(inventoryItem({ availability: 'disabled', executable: false })), 'disabled')
+  assert.equal(generatedToolProductState(inventoryItem({ availability: 'failed', executable: false })), 'validation-failed')
+  assert.equal(generatedToolProductState(inventoryItem({ availability: 'permission-required', executable: false })), 'waiting-permission')
+})
+
+void test('stable enabled asset remains enabled while a failed update is reported separately', () => {
+  const item = inventoryItem({
+    candidate: {
+      jobId: 'job-2',
+      jobRevision: 2,
+      mode: 'edit',
+      status: 'failed',
+      attempt: 2,
+      maxAttempts: 2,
+      error: 'validation failed',
+      updatedAt: 2
+    }
+  })
+  assert.equal(generatedToolProductState(item), 'enabled')
+  assert.equal(hasFailedGeneratedToolUpdate(item), true)
+})
 
 void test('polling continues for transient qualification, job, and continuation states', () => {
   assert.equal(shouldPollGeneratedTools(snapshot({

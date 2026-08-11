@@ -58,6 +58,7 @@ import {
 } from './run-registry'
 
 const REASONING_LEVELS = ['auto', 'none', 'low', 'medium', 'high'] as const
+const TERMINAL_SEND_BUDGET_MS = 2_250
 const SKILL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/
 const MAX_REQUEST_SKILLS = 16
 
@@ -193,6 +194,16 @@ function releaseRun(run: ActiveRun, reason: RunTerminalReason = run.terminalReas
   return Boolean(released)
 }
 
+function sendTerminalBestEffort(transport: StreamTransport, event: StreamEvent): void {
+  void Promise.race([
+    transport.send(event),
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, TERMINAL_SEND_BUDGET_MS)
+      timer.unref?.()
+    })
+  ]).catch(() => undefined)
+}
+
 function phaseForEvent(run: ActiveRun, event: StreamEvent): RunPhase | undefined {
   switch (event.type) {
     case 'message-start':
@@ -203,6 +214,7 @@ function phaseForEvent(run: ActiveRun, event: StreamEvent): RunPhase | undefined
     case 'step-start':
       return run.kind === 'goal' ? 'goal-execution' : 'running'
     case 'tool-call':
+    case 'tool-status':
     case 'tool-result':
     case 'tool-error':
       return 'tool'
@@ -261,7 +273,21 @@ function createWindowGoalCoordinator(win: BrowserWindow): GoalCoordinator {
         runId: invocationId,
         approvalGate: createApprovalGate(win, sessionId, invocationId, 'chat'),
         abortSignal: signal,
-        onToolCall: (info) => { void info },
+        onToolCall: (info) => onEvent({
+          type: 'tool-status',
+          sessionId,
+          runId: invocationId,
+          toolCallId: info.toolCallId ?? `${info.toolName}-${info.startedAt ?? info.updatedAt ?? Date.now()}`,
+          toolName: info.toolName,
+          status: info.status,
+          startedAt: info.startedAt,
+          updatedAt: info.updatedAt ?? Date.now(),
+          lastProgressAt: info.lastProgressAt,
+          deadlineAt: info.deadlineAt,
+          durationMs: info.durationMs,
+          error: info.error,
+          heartbeat: info.heartbeat
+        }),
         onSubagentActivity: (activity) => onEvent({ type: 'subagent-update', sessionId, runId: invocationId, activity })
       }
       const projection = projectSessionModelMessages(session.messages, session.contextCheckpoint)
@@ -323,8 +349,8 @@ function failRegisteredRunStartup(run: ActiveRun, error: unknown): void {
   if (run.claimedPendingMessageId) restorePendingUserMessageClaim(run.sessionId, run.claimedPendingMessageId, run.runId)
   finishRunActivity(run, 'failed', message)
   cancelApprovalsForRun({ windowId: runRegistry.get(run.runId)?.windowId ?? -1, sessionId: run.sessionId, runId: run.runId })
-  void run.transport.send({ type: 'error', sessionId: run.sessionId, runId: run.runId, error: message }).catch(() => undefined)
-  void run.transport.send({ type: 'done', sessionId: run.sessionId, runId: run.runId }).catch(() => undefined)
+  sendTerminalBestEffort(run.transport, { type: 'error', sessionId: run.sessionId, runId: run.runId, error: message })
+  sendTerminalBestEffort(run.transport, { type: 'done', sessionId: run.sessionId, runId: run.runId })
   releaseRun(run, 'error')
 }
 
@@ -358,12 +384,6 @@ export function setupStreaming(win: BrowserWindow): void {
       handleSend(win, port2, transport, continuation.continuationRunId, continuation.sessionId, normalizeReasoningLevel(continuation.request.reasoningLevel), continuation.request.runMode, undefined, continuation.request.skillIds, continuation.request.projectId, undefined, { ...continuation, ...running })
     }
   })
-
-  const onClosed = (): void => {
-    retireStreaming(win.id, 'BrowserWindow closed')
-    win.removeListener('closed', onClosed)
-  }
-  win.on('closed', onClosed)
 
   port2.on('message', (event: Electron.MessageEvent) => {
     if (!isCurrentEndpoint(win.id, endpoint.generation)) return
@@ -494,7 +514,7 @@ export function setupStreaming(win: BrowserWindow): void {
         .finally(async () => {
           if (!ownsRun(active)) return
           if (!active.activityFinished) finishRunActivity(active, controller.signal.aborted ? 'cancelled' : 'failed', controller.signal.aborted ? undefined : 'Goal run ended without a terminal result')
-          await onEvent({ type: 'done', sessionId, runId }).catch(() => undefined)
+          sendTerminalBestEffort(transport, { type: 'done', sessionId, runId })
           releaseRun(active)
           if (active.allowQueueDrain !== false && isCurrentEndpoint(win.id, endpoint.generation)) {
             await drainNextPending(win, endpoint, sessionId)
@@ -611,7 +631,21 @@ function handleSend(
     approvalGate: createApprovalGate(win, sessionId, runId, runMode),
     researchContext,
     abortSignal: controller.signal,
-    onToolCall: (info) => { void info },
+    onToolCall: (info) => onEvent({
+      type: 'tool-status',
+      sessionId,
+      runId,
+      toolCallId: info.toolCallId ?? `${info.toolName}-${info.startedAt ?? info.updatedAt ?? Date.now()}`,
+      toolName: info.toolName,
+      status: info.status,
+      startedAt: info.startedAt,
+      updatedAt: info.updatedAt ?? Date.now(),
+      lastProgressAt: info.lastProgressAt,
+      deadlineAt: info.deadlineAt,
+      durationMs: info.durationMs,
+      error: info.error,
+      heartbeat: info.heartbeat
+    }),
     onSubagentActivity: (activity) => onEvent({ type: 'subagent-update', sessionId, runId, activity })
   }
   const latestUser = [...session.messages].reverse().find((message) => message.role === 'user')
@@ -663,7 +697,7 @@ function handleSend(
         if (!ownsRun(activeRun)) return
         if (!activeRun.activityFinished) finishRunActivity(activeRun, controller.signal.aborted ? 'cancelled' : 'failed', controller.signal.aborted ? undefined : 'Image generation ended without a terminal result')
         cancelApprovalsForRun({ windowId: win.id, sessionId, runId })
-        await transport.send({ type: 'done', sessionId, runId }).catch(() => undefined)
+        sendTerminalBestEffort(transport, { type: 'done', sessionId, runId })
         releaseRun(activeRun)
         const endpoint = endpointRegistry.current(win.id)?.value
         if (activeRun.allowQueueDrain !== false && endpoint && endpoint.port === port && endpoint.transport === transport) {
@@ -821,7 +855,7 @@ function handleSend(
       if (!ownsRun(activeRun)) return
       if (!activeRun.activityFinished) finishRunActivity(activeRun, controller.signal.aborted ? 'cancelled' : 'failed', controller.signal.aborted ? undefined : 'Agent run ended without a terminal result')
       cancelApprovalsForRun({ windowId: win.id, sessionId, runId })
-      await transport.send({ type: 'done', sessionId, runId }).catch(() => undefined)
+      sendTerminalBestEffort(transport, { type: 'done', sessionId, runId })
       releaseRun(activeRun)
       const endpoint = endpointRegistry.current(win.id)?.value
       if (activeRun.allowQueueDrain !== false && endpoint && endpoint.port === port && endpoint.transport === transport) {

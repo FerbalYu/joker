@@ -108,7 +108,8 @@ async function runScenario(
   rmSync(jokerHome, { recursive: true, force: true })
   cpSync(join(qualificationSourceHome, '.joker', 'qualification'), join(jokerHome, '.joker', 'qualification'), { recursive: true })
   const base = installSummarizeTaskJsonFixture(jokerHome, Date.now(), { fixtureRoot })
-  const edit = new GeneratedToolEditService({ jokerHome, createId: () => `packaged-gate4-${scenario}`, now: Date.now })
+  const deferredController = { enqueue: () => true, cancel: async () => { throw new Error('not used') } }
+  const edit = new GeneratedToolEditService({ jokerHome, createId: () => `packaged-gate4-${scenario}`, now: Date.now, controller: deferredController })
   const started = edit.start({
     toolId: TOOL_ID,
     baseVersionId: base.id,

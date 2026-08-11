@@ -36,6 +36,7 @@ void test('plan capabilities enforce inspection-only TodoWrite workflow and disa
 void test('chat capabilities require ToolSearch before manufacturing and reject false Forge completion', () => {
   const snapshot = buildCapabilitySnapshot([], 'C:/workspace', 'chat')
   assert.match(snapshot.systemPrompt ?? '', /call ToolSearch before ToolForgeStart/)
+  assert.match(snapshot.systemPrompt ?? '', /host owns validation, policy, activation, restart reconciliation, and continuation/)
   assert.match(snapshot.systemPrompt ?? '', /does not complete the original task/)
   assert.match(snapshot.systemPrompt ?? '', /trusted, active, or usable/)
 })

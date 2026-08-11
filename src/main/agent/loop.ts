@@ -248,11 +248,15 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
         } else if (part.type === 'tool-call') {
           await flushStepBuffer(stepBuffer)
           responseContentSeen = true
+          const now = Date.now()
           const toolCall: ToolCallInfo = {
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             input: part.input as Record<string, unknown>,
-            status: 'running'
+            status: 'running',
+            startedAt: now,
+            updatedAt: now,
+            lastProgressAt: now
           }
           toolCalls.push(toolCall)
           segments = appendToolSegment(segments, toolCall)
@@ -262,7 +266,10 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
             runId,
             toolCallId: part.toolCallId,
             toolName: part.toolName,
-            input: part.input as Record<string, unknown>
+            input: part.input as Record<string, unknown>,
+            startedAt: now,
+            updatedAt: now,
+            lastProgressAt: now
           })
         } else if (part.type === 'tool-result') {
           await flushStepBuffer(stepBuffer)
@@ -272,7 +279,8 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
               ? (part.output as { metadata?: Record<string, unknown> }).metadata
               : undefined
           auxiliaryUsage = addStreamUsage(auxiliaryUsage, usageFromMetadata(metadata))
-          updateTool(part.toolCallId, { output, metadata, status: 'done' })
+          const completedAt = Date.now()
+          updateTool(part.toolCallId, { output, metadata, status: 'done', updatedAt: completedAt, lastProgressAt: completedAt })
           await onEvent({
             type: 'tool-result',
             sessionId,
@@ -280,19 +288,25 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             output,
-            metadata
+            metadata,
+            updatedAt: completedAt,
+            lastProgressAt: completedAt
           })
         } else if (part.type === 'tool-error') {
           await flushStepBuffer(stepBuffer)
           const error = formatSafeError(part.error)
-          updateTool(part.toolCallId, { output: error, status: 'error' })
+          const completedAt = Date.now()
+          updateTool(part.toolCallId, { output: error, status: 'error', updatedAt: completedAt, lastProgressAt: completedAt, error })
           await onEvent({
             type: 'tool-error',
             sessionId,
             runId,
             toolCallId: part.toolCallId,
             toolName: part.toolName,
-            error
+            error,
+            status: 'error',
+            updatedAt: completedAt,
+            lastProgressAt: completedAt
           })
         } else if (part.type === 'error') {
           if (requiredToolChoice && stepCount === 0 && !responseContentSeen && isToolChoiceRejection(part.error)) {
@@ -402,7 +416,7 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
     }
   }
 
-  function updateTool(toolCallId: string, update: Pick<ToolCallInfo, 'output' | 'status'> & { metadata?: Record<string, unknown> }): void {
+  function updateTool(toolCallId: string, update: Partial<Pick<ToolCallInfo, 'output' | 'status' | 'metadata' | 'startedAt' | 'updatedAt' | 'lastProgressAt' | 'deadlineAt' | 'durationMs' | 'error'>>): void {
     const tool = toolCalls.find((candidate) => candidate.toolCallId === toolCallId)
     if (!tool) return
     Object.assign(tool, update)

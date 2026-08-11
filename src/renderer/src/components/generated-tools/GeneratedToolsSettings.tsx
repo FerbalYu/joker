@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Boxes, RefreshCw, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, Boxes, PowerOff, RefreshCw } from 'lucide-react'
 
 import type {
   GeneratedToolContinuationView,
@@ -9,7 +9,13 @@ import type {
 } from '@shared/types'
 import { localizeError, t, type Language } from '../../i18n'
 import ToolWorkbench from './ToolWorkbench'
-import { isStaleGeneratedToolsCasError, shouldPollGeneratedTools } from './generated-tools-settings-state'
+import {
+  generatedToolProductState,
+  hasFailedGeneratedToolUpdate,
+  isStaleGeneratedToolsCasError,
+  shouldPollGeneratedTools,
+  type GeneratedToolProductState
+} from './generated-tools-settings-state'
 
 interface Props {
   language: Language
@@ -19,19 +25,16 @@ interface Props {
   onCreateInConversation?: () => void
 }
 
-function statusClass(item: GeneratedToolInventoryItem): string {
-  if (item.availability === 'available' && item.executable) return 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300'
-  if (item.availability === 'building' || item.availability === 'validating') return 'border-sky-400/25 bg-sky-400/10 text-sky-300'
-  if (item.availability === 'changed' || item.availability === 'quarantined') return 'border-amber-400/25 bg-amber-400/10 text-amber-300'
-  if (item.availability === 'failed' || item.availability === 'missing') return 'border-red-400/25 bg-red-400/10 text-red-300'
+function statusClass(state: GeneratedToolProductState): string {
+  if (state === 'enabled') return 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300'
+  if (state === 'manufacturing') return 'border-sky-400/25 bg-sky-400/10 text-sky-300'
+  if (state === 'waiting-permission') return 'border-amber-400/25 bg-amber-400/10 text-amber-300'
+  if (state === 'validation-failed') return 'border-red-400/25 bg-red-400/10 text-red-300'
   return 'border-[var(--color-border-light)] bg-[var(--color-surface-active)] text-[var(--color-text-secondary)]'
 }
 
-function formatTime(value: number | undefined, language: Language): string {
-  return value === undefined ? '—' : new Intl.DateTimeFormat(language === 'zh' ? 'zh-CN' : 'en-US', {
-    dateStyle: 'medium',
-    timeStyle: 'short'
-  }).format(value)
+function stableVersionId(item: GeneratedToolInventoryItem): string | undefined {
+  return item.lastStableVersionId ?? item.activeVersionId
 }
 
 export default function GeneratedToolsSettings({
@@ -49,8 +52,9 @@ export default function GeneratedToolsSettings({
   const [detail, setDetail] = useState<GeneratedToolDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState('')
-  const [promoting, setPromoting] = useState(false)
-  const [promoteError, setPromoteError] = useState('')
+  const [enablingJobId, setEnablingJobId] = useState<string | null>(null)
+  const [cardLifecycleToolId, setCardLifecycleToolId] = useState<string | null>(null)
+  const [actionError, setActionError] = useState('')
   const [continuations, setContinuations] = useState<GeneratedToolContinuationView[]>([])
   const detailRequestRef = useRef(0)
   const mountedRef = useRef(true)
@@ -120,8 +124,6 @@ export default function GeneratedToolsSettings({
     return request
   }, [applyContinuations, applySnapshot, language])
 
-  const [qualificationBusy, setQualificationBusy] = useState(false)
-  const qualificationOperation = snapshot?.qualificationOperation ?? null
   const polling = shouldPollGeneratedTools(snapshot, continuations)
 
   useEffect(() => {
@@ -129,37 +131,6 @@ export default function GeneratedToolsSettings({
     const timer = window.setTimeout(() => { void load() }, 1_000)
     return () => window.clearTimeout(timer)
   }, [load, polling, snapshot, continuations])
-
-  const startQualification = async (): Promise<void> => {
-    if (qualificationBusy) return
-    setQualificationBusy(true)
-    setInventoryError('')
-    try {
-      const result = await window.joker.generatedTools.startQualification()
-      if (!mountedRef.current) return
-      if (!result.success) setInventoryError(localizeError(language, result.error.message))
-      await load()
-    } catch (startError) {
-      if (mountedRef.current) setInventoryError(localizeError(language, startError instanceof Error ? startError.message : String(startError)))
-    } finally {
-      if (mountedRef.current) setQualificationBusy(false)
-    }
-  }
-
-  const cancelQualification = async (): Promise<void> => {
-    if (qualificationBusy) return
-    setQualificationBusy(true)
-    try {
-      const result = await window.joker.generatedTools.cancelQualification()
-      if (!mountedRef.current) return
-      if (!result.success) setInventoryError(localizeError(language, result.error.message))
-      await load()
-    } catch (cancelError) {
-      if (mountedRef.current) setInventoryError(localizeError(language, cancelError instanceof Error ? cancelError.message : String(cancelError)))
-    } finally {
-      if (mountedRef.current) setQualificationBusy(false)
-    }
-  }
 
   useEffect(() => {
     mountedRef.current = true
@@ -198,55 +169,51 @@ export default function GeneratedToolsSettings({
     if (initialToolId) void openWorkbench(initialToolId)
   }, [initialToolId, openWorkbench])
 
-  const promoteCandidate = async (candidateToolId?: string): Promise<void> => {
-    if (promoting) return
-    const targetToolId = candidateToolId ?? selectedToolId
-    let candidate = candidateToolId
-      ? snapshotRef.current?.tools.find((tool) => tool.toolId === candidateToolId)?.candidate
-      : detail?.summary.candidate
-    if (!candidate && targetToolId) {
-      const result = await window.joker.generatedTools.get(targetToolId)
-      if (!mountedRef.current) return
-      if (!result.success) {
-        setPromoteError(localizeError(language, result.error.message))
-        return
-      }
-      candidate = result.data.summary.candidate
-    }
-    if (!candidate?.candidateFingerprint || candidate.status !== 'awaiting-policy') return
-    setPromoting(true)
-    setPromoteError('')
+  const enableCandidate = async (toolId: string, jobId: string): Promise<void> => {
+    if (enablingJobId) return
+    setEnablingJobId(jobId)
+    setActionError('')
     try {
-      const result = await window.joker.generatedTools.promote({
-        jobId: candidate.jobId,
-        expectedJobRevision: candidate.jobRevision,
-        registryRevision: snapshotRef.current?.registryRevision ?? detail?.registryRevision ?? 0,
-        expectedCandidateFingerprint: candidate.candidateFingerprint
-      })
+      const result = await window.joker.generatedTools.enable({ jobId })
       if (!mountedRef.current) return
       if (!result.success) {
-        if (isStaleGeneratedToolsCasError(result.error)) {
-          await load()
-          if (targetToolId) await openWorkbench(targetToolId)
-          return
-        }
-        setPromoteError(localizeError(language, result.error.message))
+        setActionError(localizeError(language, result.error.message))
         return
       }
       const nextSnapshot = await load()
-      if (targetToolId && nextSnapshot?.tools.find((tool) => tool.toolId === targetToolId)?.activeVersionId) {
-        await openWorkbench(targetToolId)
+      if (nextSnapshot?.tools.find((tool) => tool.toolId === toolId)?.activeVersionId && selectedToolId === toolId) {
+        await openWorkbench(toolId)
       }
-    } catch (promoteFailure) {
-      if (!mountedRef.current) return
-      if (isStaleGeneratedToolsCasError(promoteFailure)) {
-        await load()
-        if (targetToolId) await openWorkbench(targetToolId)
-        return
-      }
-      setPromoteError(localizeError(language, promoteFailure instanceof Error ? promoteFailure.message : String(promoteFailure)))
+    } catch (enableFailure) {
+      if (mountedRef.current) setActionError(localizeError(language, enableFailure instanceof Error ? enableFailure.message : String(enableFailure)))
     } finally {
-      if (mountedRef.current) setPromoting(false)
+      if (mountedRef.current) setEnablingJobId(null)
+    }
+  }
+
+  const mutateInventoryCard = async (tool: GeneratedToolInventoryItem, action: 'disable' | 'reenable'): Promise<void> => {
+    if (cardLifecycleToolId) return
+    setCardLifecycleToolId(tool.toolId)
+    setActionError('')
+    const input = {
+      toolId: tool.toolId,
+      expectedRevision: snapshotRef.current?.registryRevision ?? 0,
+      operationId: crypto.randomUUID()
+    }
+    try {
+      const result = action === 'disable'
+        ? await window.joker.generatedTools.disable(input)
+        : await window.joker.generatedTools.reenable({ ...input, versionId: stableVersionId(tool) ?? '' })
+      if (!result.success) throw new Error(localizeError(language, result.error ?? t(language, 'toolforge.lifecycleFailed')))
+      await load()
+    } catch (mutationError) {
+      if (isStaleGeneratedToolsCasError(mutationError)) {
+        await load()
+      } else if (mountedRef.current) {
+        setActionError(localizeError(language, mutationError instanceof Error ? mutationError.message : String(mutationError)))
+      }
+    } finally {
+      if (mountedRef.current) setCardLifecycleToolId(null)
     }
   }
 
@@ -309,52 +276,14 @@ export default function GeneratedToolsSettings({
           </div>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--color-text-muted)]">{t(language, 'settings.generatedToolsDescription')}</p>
         </div>
-        <button type="button" onClick={() => void load()} disabled={loading} className="flex min-h-10 items-center gap-2 rounded-md border border-[var(--color-border)] px-3 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] disabled:opacity-40">
+        <button type="button" onClick={() => { void load() }} disabled={loading} className="flex min-h-10 items-center gap-2 rounded-md border border-[var(--color-border)] px-3 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] disabled:opacity-40">
           <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> {t(language, 'settings.generatedToolsRefresh')}
         </button>
       </div>
 
-      {qualificationOperation && ['queued', 'running'].includes(qualificationOperation.status) && (
-        <div role="status" aria-live="polite" data-testid="generated-tools-qualification-running" className="mb-4 rounded-lg border border-sky-400/20 bg-sky-400/10 px-4 py-3 text-sm text-sky-200">
-          <div className="flex items-center justify-between gap-3">
-            <span>{qualificationOperation.phase ?? t(language, 'toolforge.qualificationVerifying')} · {qualificationOperation.completedChecks}/{qualificationOperation.totalChecks}</span>
-            <button type="button" onClick={() => void cancelQualification()} disabled={qualificationBusy} className="rounded border border-sky-300/30 px-2 py-1 text-xs hover:bg-sky-300/10 disabled:opacity-50">{t(language, 'toolforge.qualificationCancel')}</button>
-          </div>
-        </div>
-      )}
-      {!snapshot?.qualification && qualificationOperation && ['failed', 'interrupted'].includes(qualificationOperation.status) && !loading && !inventoryError && (
-        <div data-testid="generated-tools-qualification-failed" className="mb-4 rounded-lg border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-200">
-          <div>{qualificationOperation.error ?? t(language, 'toolforge.qualificationFailed')}</div>
-          <button type="button" onClick={() => void startQualification()} disabled={qualificationBusy} className="mt-3 rounded-md bg-red-300/15 px-3 py-1.5 text-xs font-semibold hover:bg-red-300/25 disabled:opacity-50">{t(language, 'toolforge.qualificationRetry')}</button>
-        </div>
-      )}
-      {!snapshot?.qualification && (!qualificationOperation || ['completed', 'cancelled'].includes(qualificationOperation.status)) && !loading && !inventoryError && (
-        <div data-testid="generated-tools-qualification-missing" className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">
-          <AlertTriangle size={16} /> <span>{snapshot?.tools.length ? t(language, 'toolforge.qualificationMissing') : t(language, 'toolforge.qualificationNotVerified')}</span>
-          <button type="button" onClick={() => void startQualification()} disabled={qualificationBusy} className="rounded-md bg-amber-300/15 px-3 py-1.5 text-xs font-semibold hover:bg-amber-300/25 disabled:opacity-50">{qualificationBusy ? t(language, 'toolforge.qualificationVerifying') : t(language, 'toolforge.qualificationVerify')}</button>
-        </div>
-      )}
-
-      {snapshot?.qualification ? (
-        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-4 py-3 text-sm">
-          <ShieldCheck size={16} className="text-[var(--color-accent)]" />
-          <span className="font-medium text-[var(--color-text-primary)]">{t(language, 'toolforge.runtimeQualification')}</span>
-          <span data-testid="generated-tools-qualification" className="rounded-full bg-[var(--color-accent)]/15 px-2.5 py-1 text-xs font-semibold text-[var(--color-accent)]">{snapshot.qualification.level}</span>
-          <span className="text-xs text-[var(--color-text-muted)]">{t(language, 'toolforge.qualificationEnvironments', { dev: snapshot.qualification.devStatus, packaged: snapshot.qualification.packagedStatus })}</span>
-          {snapshot.qualification.level === 'L1' && <span className="w-full text-xs text-amber-300">{t(language, 'toolforge.qualificationApprovalRequired')}</span>}
-        </div>
-      ) : !loading && !inventoryError ? (
-        <div className="hidden" />
-      ) : null}
-
-      {promoteError && <div className="mb-4 rounded-lg border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-300">{promoteError}</div>}
+      {actionError && <div className="mb-4 rounded-lg border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-300">{actionError}</div>}
 
       {continuationError && <div data-testid="generated-tools-continuation-error" className="mb-4 rounded-lg border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">{continuationError}</div>}
-
-      {continuations.length > 0 && <div className="mb-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-4" data-testid="generated-tools-continuations">
-        <p className="text-sm font-semibold text-[var(--color-text-primary)]">{t(language, 'toolforge.continuations')}</p>
-        <div className="mt-2 space-y-2">{continuations.slice(0, 5).map((continuation) => <div key={continuation.id} className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-mono text-[var(--color-text-muted)]">{continuation.toolId} · {continuation.versionId}</span><span className="rounded bg-[var(--color-surface-active)] px-2 py-1 text-[var(--color-text-secondary)]">{t(language, `toolforge.continuation.${continuation.status}`)}</span></div>)}</div>
-      </div>}
 
       {loading && !snapshot ? (
         <div data-testid="generated-tools-loading" className="grid gap-3 sm:grid-cols-2">
@@ -384,7 +313,12 @@ export default function GeneratedToolsSettings({
         </div>
       ) : (
         <div data-testid="generated-tools-inventory" className="grid gap-3 sm:grid-cols-2">
-          {snapshot.tools.map((tool) => (
+          {snapshot.tools.map((tool) => {
+            const productState = generatedToolProductState(tool)
+            const failedUpdate = hasFailedGeneratedToolUpdate(tool)
+            const cardBusy = cardLifecycleToolId === tool.toolId
+            const waitingPermission = productState === 'waiting-permission' && tool.candidate
+            return (
             <article
               key={tool.toolId}
               data-testid={`generated-tool-card-${tool.toolId}`}
@@ -404,34 +338,34 @@ export default function GeneratedToolsSettings({
                   <p className="truncate font-semibold text-[var(--color-text-primary)]">{tool.displayName}</p>
                   <p className="mt-1 line-clamp-2 text-sm leading-5 text-[var(--color-text-muted)]">{tool.description}</p>
                 </div>
-                <span data-testid={`generated-tool-status-${tool.toolId}`} className={`shrink-0 rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${statusClass(tool)}`}>{t(language, `toolforge.status.${tool.availability}`)}</span>
+                <span data-testid={`generated-tool-status-${tool.toolId}`} className={`shrink-0 rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${statusClass(productState)}`}>{t(language, `toolforge.productState.${productState}`)}</span>
               </div>
-              {tool.executionPolicy === 'approval-required' && <p className="mt-3 text-xs text-amber-300">{t(language, 'toolforge.executionApprovalRequired')}</p>}
-              {tool.executionPolicy === 'unavailable' && tool.availability === 'available' && <p className="mt-3 text-xs text-amber-300">{t(language, 'toolforge.executionUnavailable')}</p>}
-              {tool.candidate && ['awaiting-policy', 'promoting'].includes(tool.candidate.status) && (
-                <div className="mt-3 flex items-center justify-between gap-3 rounded-md border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
-                  <span>{t(language, `toolforge.job.${tool.candidate.status}`)}</span>
-                  <span className="font-mono">{tool.candidate.jobId}</span>
+              {failedUpdate && (
+                <div className="mt-3 rounded-md border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-200">
+                  <p className="font-semibold">{t(language, 'toolforge.failedUpdate')}</p>
+                  <p className="mt-1 text-red-200/80">{t(language, 'toolforge.failedUpdateHint')}</p>
                 </div>
               )}
-              {tool.candidate && tool.candidate.status === 'awaiting-policy' && <p className="mt-2 text-xs text-amber-300">{t(language, 'toolforge.promotionFromWorkbench')}</p>}
-              {tool.candidate && tool.candidate.status === 'awaiting-policy' && <button type="button" disabled={promoting} onClick={(event) => { event.stopPropagation(); void promoteCandidate(tool.toolId) }} className="mt-3 inline-flex min-h-8 items-center rounded-md bg-[var(--color-accent)]/15 px-3 text-xs font-semibold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 disabled:opacity-50">{promoting ? t(language, 'toolforge.promoting') : t(language, 'toolforge.promote')}</button>}              {tool.candidate && (
-                <div className="mt-3 flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
-                  <span>{t(language, 'toolforge.candidate')}</span>
-                  <span className="rounded bg-[var(--color-surface-active)] px-2 py-0.5 text-[var(--color-text-secondary)]">{t(language, `toolforge.job.${tool.candidate.status}`)}</span>
+              {waitingPermission && (
+                <div className="mt-3 rounded-md border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+                  <p>{t(language, waitingPermission.requiresApproval ? 'toolforge.waitingPermissionHint' : 'toolforge.readyToEnableHint')}</p>
+                  <button type="button" disabled={Boolean(enablingJobId)} onClick={(event) => { event.stopPropagation(); void enableCandidate(tool.toolId, waitingPermission.jobId) }} className="mt-2 inline-flex min-h-8 items-center rounded-md bg-amber-300/15 px-3 font-semibold hover:bg-amber-300/25 disabled:opacity-50">{enablingJobId === waitingPermission.jobId ? t(language, 'toolforge.enabling') : t(language, 'toolforge.enable')}</button>
                 </div>
               )}
-              <div className="mt-4 grid grid-cols-2 gap-3 border-t border-[var(--color-border)] pt-3 text-xs">
-                <div><p className="text-[var(--color-text-muted)]">{t(language, 'toolforge.activeVersion')}</p><p className="mt-1 font-mono text-[var(--color-text-secondary)]">{tool.activeVersionId ?? '—'}</p></div>
-                <div><p className="text-[var(--color-text-muted)]">{t(language, 'toolforge.invocations')}</p><p className="mt-1 tabular-nums text-[var(--color-text-secondary)]">{tool.invocationCount}</p></div>
+              {tool.executionPolicy === 'approval-required' && productState === 'enabled' && <p className="mt-3 text-xs text-amber-300">{t(language, 'toolforge.executionApprovalRequired')}</p>}
+              {tool.issues.length > 0 && !failedUpdate && <p className="mt-3 text-xs text-red-300">{t(language, 'toolforge.problemsFound', { count: tool.issues.length })}</p>}
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--color-border)] pt-3">
+                <div className="text-xs text-[var(--color-text-muted)]">
+                  {tool.permissionSummary.length > 0 ? t(language, 'toolforge.permissionCount', { count: tool.permissionSummary.length }) : t(language, 'toolforge.noExtraPermissions')}
+                </div>
+                <div className="flex gap-2">
+                  {productState === 'enabled' && <button data-testid={`generated-tool-disable-${tool.toolId}`} type="button" onClick={(event) => { event.stopPropagation(); void mutateInventoryCard(tool, 'disable') }} disabled={cardBusy} className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-red-400/30 px-3 text-xs font-semibold text-red-300 hover:bg-red-400/10 disabled:opacity-50"><PowerOff size={13} /> {t(language, 'toolforge.disable')}</button>}
+                  {productState === 'disabled' && stableVersionId(tool) && <button data-testid={`generated-tool-reenable-${tool.toolId}`} type="button" onClick={(event) => { event.stopPropagation(); void mutateInventoryCard(tool, 'reenable') }} disabled={cardBusy} className="inline-flex min-h-8 items-center gap-1.5 rounded-md bg-[var(--color-accent)]/15 px-3 text-xs font-semibold text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 disabled:opacity-50"><RefreshCw size={13} /> {t(language, 'toolforge.reenable')}</button>}
+                </div>
               </div>
-              <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-[var(--color-text-muted)]">
-                <span>{t(language, 'toolforge.capabilityRevision')}: {tool.capabilityRevision ?? snapshot.capabilityRevision}</span>
-                <span>{t(language, 'toolforge.pointerRevision')}: {tool.pointerRevision ?? '—'}</span>
-              </div>
-              <p className="mt-3 text-[11px] text-[var(--color-text-muted)]">{t(language, 'toolforge.lastActivity')}: {formatTime(tool.lastInvokedAt ?? tool.updatedAt, language)}</p>
             </article>
-          ))}
+            )
+          })}
         </div>
       )}
 

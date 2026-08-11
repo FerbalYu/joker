@@ -156,9 +156,27 @@ void test('Generated Tools inventory and Workbench translations exist in both la
       'settings.generatedTools',
       'settings.generatedToolsDescription',
       'settings.generatedToolsEmpty',
+      'toolforge.fullTrust',
+      'toolforge.fullTrustNotGrantedHint',
+      'toolforge.fullTrustGrantedHint',
+      'toolforge.fullTrustGrant',
+      'toolforge.fullTrustRevoke',
+      'toolforge.fullTrustNoWorkspace',
       'toolforge.runtimeQualification',
-      'toolforge.qualificationMissing',
-      'toolforge.qualificationApprovalRequired',
+      'toolforge.qualificationNotVerified',
+      'toolforge.qualificationVerified',
+      'toolforge.productState.manufacturing',
+      'toolforge.productState.enabled',
+      'toolforge.productState.disabled',
+      'toolforge.productState.validation-failed',
+      'toolforge.productState.waiting-permission',
+      'toolforge.failedUpdateHint',
+      'toolforge.waitingPermissionHint',
+      'toolforge.enable',
+      'toolforge.statusAndControls',
+      'toolforge.modify',
+      'toolforge.problems',
+      'toolforge.advancedDiagnostics',
       'toolforge.executionApprovalRequired',
       'toolforge.executionUnavailable',
       'toolforge.workbench',
@@ -176,6 +194,24 @@ void test('Generated Tools inventory and Workbench translations exist in both la
       'toolforge.job.validating',
       'toolforge.outcome.succeeded'
     ]) assert.notEqual(t(language, key), key)
+  }
+  assert.doesNotMatch(t('zh', 'toolforge.qualificationVerified'), /L\d/)
+  assert.doesNotMatch(t('en', 'toolforge.qualificationVerified'), /L\d/)
+  assert.doesNotMatch(t('zh', 'settings.generatedToolsDescription'), /指纹|修订|报告|候选/)
+  assert.doesNotMatch(t('en', 'settings.generatedToolsDescription'), /fingerprint|revision|report|candidate/i)
+  assert.match(t('en', 'toolforge.fullTrustGrantedHint'), /canonical working folder/i)
+  assert.match(t('zh', 'toolforge.fullTrustGrantedHint'), /规范化的工作文件夹/)
+})
+
+void test('generated tool enable approval copy is human-readable', () => {
+  for (const language of ['zh', 'en'] as const) {
+    for (const key of [
+      'approval.description.generatedToolEnable',
+      'approval.generatedTool',
+      'approval.allowEnable',
+      'approval.keepDisabled'
+    ]) assert.notEqual(t(language, key), key)
+    assert.notEqual(toolLabel(language, 'GeneratedToolEnable'), 'GeneratedToolEnable')
   }
 })
 

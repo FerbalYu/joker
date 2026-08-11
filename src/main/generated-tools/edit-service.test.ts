@@ -12,6 +12,7 @@ import { fingerprintGeneratedToolArtifact } from './fingerprint'
 import { readForgeJob, updateForgeJob } from './forge-job-store'
 import { ForgeWorkspaceBroker } from './forge-workspace'
 import { GeneratedToolEditService } from './edit-service'
+import { registerGeneratedToolValidationSuite } from './validation-suite'
 
 const manifest = {
   schemaVersion: 1 as const,
@@ -63,7 +64,15 @@ void test('edit service creates mode edit job and rejects stale version or finge
   const home = mkdtempSync(join(tmpdir(), 'joker-edit-service-'))
   try {
     const version = installVersion(home)
-    const service = new GeneratedToolEditService({ jokerHome: home, createId: () => 'edit-job', now: () => 10 })
+    registerGeneratedToolValidationSuite({
+      id: 'edit-test-tool-v1',
+      toolId: manifest.toolId,
+      cases: [
+        { id: 'success', input: {}, workspaceFiles: {}, expected: { outcome: 'succeeded', output: 'v1' } },
+        { id: 'failure', input: { fail: true }, workspaceFiles: {}, expected: { outcome: 'tool-failed', error: { message: 'expected-failure' } } }
+      ]
+    })
+    const service = new GeneratedToolEditService({ jokerHome: home, createId: () => 'edit-job', now: () => 10, controller: { enqueue: () => true, cancel: async () => { throw new Error('not used') } } })
     const valid = service.start({ toolId: manifest.toolId, baseVersionId: version.id, baseFingerprint: version.fingerprint, instruction: 'Change output wording', requestedFrom: 'settings' }, 'session-1', 'run-1')
     assert.equal(valid.success, true)
     if (!valid.success) return

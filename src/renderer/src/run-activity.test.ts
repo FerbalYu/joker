@@ -165,6 +165,54 @@ void test('abort request and terminal events clean up after authoritative done',
   assert.deepEqual(completed, initialRunActivityState)
 })
 
+void test('tool status telemetry retains timing and timeout outcome', () => {
+  const running = runActivityReducer(started(), streamEvent({
+    type: 'tool-call',
+    sessionId: 'session-a',
+    runId: 'run-a',
+    toolCallId: 'tool-timed',
+    toolName: 'Bash',
+    input: { command: 'npm test' },
+    startedAt: 100,
+    updatedAt: 100,
+    lastProgressAt: 100,
+    deadlineAt: 1_100
+  }))
+  const heartbeat = runActivityReducer(running, streamEvent({
+    type: 'tool-status',
+    sessionId: 'session-a',
+    runId: 'run-a',
+    toolCallId: 'tool-timed',
+    toolName: 'Bash',
+    status: 'running',
+    startedAt: 100,
+    updatedAt: 500,
+    lastProgressAt: 100,
+    deadlineAt: 1_100,
+    heartbeat: true
+  }))
+  assert.equal(heartbeat.toolCalls[0]?.updatedAt, 500)
+  assert.equal(heartbeat.toolCalls[0]?.lastProgressAt, 100)
+
+  const timedOut = runActivityReducer(heartbeat, streamEvent({
+    type: 'tool-error',
+    sessionId: 'session-a',
+    runId: 'run-a',
+    toolCallId: 'tool-timed',
+    toolName: 'Bash',
+    error: 'Tool execution timed out',
+    status: 'timed-out',
+    startedAt: 100,
+    updatedAt: 1_100,
+    lastProgressAt: 100,
+    deadlineAt: 1_100,
+    durationMs: 1_000
+  }))
+  assert.equal(timedOut.phase, 'waiting-model')
+  assert.equal(timedOut.toolCalls[0]?.status, 'timed-out')
+  assert.equal(timedOut.toolCalls[0]?.durationMs, 1_000)
+})
+
 void test('labels, data status and view model expose localized activity details', () => {
   assert.equal(runActivityLabel('running-tools', 'zh'), '正在运行工具')
   assert.equal(runActivityLabel('running-tools', 'en'), 'Running tools')

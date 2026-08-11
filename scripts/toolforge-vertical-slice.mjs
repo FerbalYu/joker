@@ -1,11 +1,10 @@
-import { createHash } from 'node:crypto'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { buildToolForgeMetaTools } from '../src/main/tools/tool-forge.ts'
-import { createForgeJob, readForgeJob } from '../src/main/generated-tools/forge-job-store.ts'
+import { readForgeJob } from '../src/main/generated-tools/forge-job-store.ts'
 import { ForgeService } from '../src/main/generated-tools/forge-service.ts'
 import { PromotionService } from '../src/main/generated-tools/promotion-service.ts'
 import { ContinuationScheduler } from '../src/main/generated-tools/continuation-scheduler.ts'
@@ -130,7 +129,7 @@ writeFileSync(join(workspace, 'fixtures', 'tasks.json'), JSON.stringify([{ statu
 let forgeService
 let scheduler
 let failure
-let promotionOutput
+let activationOutput
 let invocationOutput
 
 try {
@@ -183,9 +182,18 @@ try {
     return { output: 'candidate submitted', usage: undefined, steps: 4 }
   }
 
-  forgeService = new ForgeService({ jokerHome: home, maker, now: () => FIXED_TIME + 2 })
+  const promotionService = new PromotionService({ jokerHome: home, now: () => FIXED_TIME + 4 })
   scheduler = new ContinuationScheduler({ jokerHome: home, now: () => FIXED_TIME + 3, createId: () => 'vertical-dispatch' })
   setDefaultContinuationScheduler(scheduler)
+  forgeService = new ForgeService({
+    jokerHome: home,
+    maker,
+    now: () => FIXED_TIME + 2,
+    activationDriver: async (jobId) => {
+      activationOutput = await promotionService.advance(jobId)
+      return activationOutput
+    }
+  })
   forgeService.start()
 
   const metaTools = buildToolForgeMetaTools({
@@ -193,8 +201,7 @@ try {
     builtinTools: [],
     now: () => FIXED_TIME,
     createId: () => 'vertical-job',
-    controller: forgeService,
-    promotionService: new PromotionService({ jokerHome: home, now: () => FIXED_TIME + 4 })
+    controller: forgeService
   })
   const context = {
     workspacePath: workspace,
@@ -204,12 +211,9 @@ try {
   }
   const toolSearch = metaTools.find((tool) => tool.name === 'ToolSearch')
   const toolForgeStart = metaTools.find((tool) => tool.name === 'ToolForgeStart')
-  const toolForgeStatus = metaTools.find((tool) => tool.name === 'ToolForgeStatus')
-  const toolPromote = metaTools.find((tool) => tool.name === 'ToolPromote')
   check('ToolSearch is available', Boolean(toolSearch))
   check('ToolForgeStart is available', Boolean(toolForgeStart))
-  check('ToolForgeStatus is available', Boolean(toolForgeStatus))
-  check('ToolPromote is available', Boolean(toolPromote))
+  check('Model-facing ToolForge surface is ToolSearch → ToolForgeStart only', metaTools.map((tool) => tool.name).join(',') === 'ToolSearch,ToolForgeStart', metaTools.map((tool) => tool.name))
 
   const searchResult = json(await toolSearch.execute({ query: TOOL_ID }, context))
   check('ToolSearch reports the missing capability before manufacturing', searchResult.match === 'missing' && searchResult.results.length === 0, searchResult)
@@ -218,20 +222,8 @@ try {
   check('ToolForge invocation executes ToolForgeStart and returns the durable ForgeJob identity', started.status === 'queued' && typeof started.jobId === 'string' && started.jobId.length > 0, started)
   check('ToolForgeStart creates a durable incomplete ForgeJob', started.status === 'queued' && started.originalTaskComplete === false)
   const jobId = started.jobId
-  await forgeService.waitForIdle()
-  const awaiting = readForgeJob(home, jobId)
-  const validationReport = awaiting?.validationReportId ? verifyValidationReportBundle(home, awaiting.validationReportId) : undefined
-  check('ForgeService reaches awaiting-policy after independent validation', awaiting?.status === 'awaiting-policy' && Boolean(awaiting.candidateId) && Boolean(awaiting.validationReportId), { job: awaiting, report: validationReport })
-
-  const status = json(await toolForgeStatus.execute({ jobId }, context))
-  check('ToolForgeStatus exposes the validated candidate without claiming completion', status.status === 'awaiting-policy' && status.originalTaskComplete === false, status)
-  const candidate = readGeneratedToolCandidate(home, jobId, awaiting.candidateId)
-  check('Candidate is immutable and fingerprint-bound', Boolean(candidate?.artifactFingerprint) && candidate?.trusted !== true, candidate)
-  const report = verifyValidationReportBundle(home, awaiting.validationReportId)
-  check('independent-validator binds the host validation report to the sealed candidate fingerprint', report.status === 'passed' && report.artifactFingerprint === candidate?.artifactFingerprint, report)
-
-  const registryBeforePromotion = readGeneratedToolRegistry(home)
-  check('Old stable pointer was absent before first promotion', registryBeforePromotion.activePointers.every((pointer) => pointer.toolId !== TOOL_ID), registryBeforePromotion)
+  const registryBeforeActivation = readGeneratedToolRegistry(home)
+  check('Old stable pointer was absent before host activation', registryBeforeActivation.activePointers.every((pointer) => pointer.toolId !== TOOL_ID), registryBeforeActivation)
 
   const callOrder = []
   scheduler.attach(1, {
@@ -241,9 +233,9 @@ try {
       if (!current || current.status !== 'dispatched' || current.continuationRunId !== continuation.continuationRunId) throw new Error('Continuation claim lost')
       const running = scheduler.markRunning(current.id, current.revision)
       const binding = listGeneratedToolSnapshotBindings({ jokerHome: home, projectId: PROJECT_ID }).find((item) => item.toolId === continuation.toolId && item.versionId === continuation.versionId && item.fingerprint === continuation.fingerprint && item.validationReportId === continuation.validationReportId && item.capabilityRevision === continuation.toCapabilityRevision)
-      check('Continuation rebuilds ToolSet from the exact promoted snapshot', Boolean(binding), { continuation, binding })
+      check('Continuation rebuilds ToolSet from the exact enabled snapshot', Boolean(binding), { continuation, binding })
       const definition = buildGeneratedToolDefinitions(workspace, home, [binding], new Set(), PROJECT_ID)[0]
-      check('Continuation first tool is the exact promoted Generated Tool', definition?.source?.type === 'generated' && definition.source.toolId === continuation.toolId && definition.source.versionId === continuation.versionId && definition.source.fingerprint === continuation.fingerprint && definition.source.validationReportId === continuation.validationReportId && definition.source.capabilityRevision === continuation.toCapabilityRevision, definition?.source)
+      check('Continuation first tool is the exact enabled Generated Tool', definition?.source?.type === 'generated' && definition.source.toolId === continuation.toolId && definition.source.versionId === continuation.versionId && definition.source.fingerprint === continuation.fingerprint && definition.source.validationReportId === continuation.validationReportId && definition.source.capabilityRevision === continuation.toCapabilityRevision, definition?.source)
       callOrder.push(definition.name)
       invocationOutput = await executeToolDefinition(definition, {}, {
         workspacePath: workspace,
@@ -255,12 +247,19 @@ try {
     }
   })
 
-  promotionOutput = json(await toolPromote.execute({ jobId, expectedRevision: awaiting.revision, expectedCandidateFingerprint: awaiting.candidateFingerprint }, context))
-  check('Policy → Promote completes with a trusted immutable version', promotionOutput.action === 'promoted' && promotionOutput.status === 'completed' && promotionOutput.originalTaskComplete === false, promotionOutput)
-  const registryAfterPromotion = readGeneratedToolRegistry(home)
-  check('Capability revision increments exactly once', promotionOutput.capabilityRevision === 1 && registryAfterPromotion.capabilityRevision.revision === 1)
-  check('Promoted pointer targets the trusted version', registryAfterPromotion.activePointers.some((pointer) => pointer.toolId === TOOL_ID && pointer.activeVersionId === promotionOutput.versionId && pointer.lastStableVersionId === promotionOutput.versionId), registryAfterPromotion)
-  check('Promotion journal is durably completed', readPromotionJournals(home).journals.some((journal) => journal.id === promotionOutput.promotionId && journal.phase === 'completed'))
+  await forgeService.waitForIdle()
+  const completed = readForgeJob(home, jobId)
+  const candidate = completed?.candidateId ? readGeneratedToolCandidate(home, jobId, completed.candidateId) : undefined
+  const report = completed?.validationReportId ? verifyValidationReportBundle(home, completed.validationReportId) : undefined
+  check('ForgeService independently validates and host-enables the Generated Tool', completed?.status === 'completed' && activationOutput?.action === 'promoted' && Boolean(candidate) && Boolean(report), { job: completed, activation: activationOutput })
+  check('Candidate is immutable and fingerprint-bound', Boolean(candidate?.artifactFingerprint) && candidate?.trusted !== true, candidate)
+  check('independent-validator binds the host validation report to the sealed candidate fingerprint', report?.status === 'passed' && report.artifactFingerprint === candidate?.artifactFingerprint, report)
+
+  const registryAfterActivation = readGeneratedToolRegistry(home)
+  check('Policy → host enable completes with a trusted immutable version', activationOutput?.action === 'promoted' && activationOutput.job.status === 'completed' && activationOutput.versionId !== undefined, activationOutput)
+  check('Capability revision increments exactly once', activationOutput?.capabilityRevision === 1 && registryAfterActivation.capabilityRevision.revision === 1)
+  check('Enabled pointer targets the trusted version', registryAfterActivation.activePointers.some((pointer) => pointer.toolId === TOOL_ID && pointer.activeVersionId === activationOutput?.versionId && pointer.lastStableVersionId === activationOutput?.versionId), registryAfterActivation)
+  check('Promotion journal is durably completed', readPromotionJournals(home).journals.some((journal) => journal.jobId === jobId && journal.versionId === activationOutput?.versionId && journal.phase === 'completed'))
   check('Continuation is durably completed', readContinuationV2State(home).continuations.some((item) => item.jobId === jobId && item.status === 'completed'))
   check('Exactly one exact Generated Tool first call occurred', callOrder.length === 1 && callOrder[0] === TOOL_ID, callOrder)
   check('Generated Tool returned the task summary', invocationOutput?.output === 'open: 2\ndone: 1', invocationOutput)
@@ -282,7 +281,7 @@ try {
     toolId: TOOL_ID,
     checks,
     evidence: {
-      forgeJob: readForgeJob(home, jobId),
+      forgeJob: completed,
       candidate,
       validationReport: report,
       promotionJournals: readPromotionJournals(home).journals,

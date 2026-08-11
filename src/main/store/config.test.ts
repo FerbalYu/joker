@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeConfig, preserveSkillConfigState } from './config'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { normalizeConfig, preserveSkillConfigState, hasToolForgeFullTrust, setToolForgeFullTrust } from './config'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../../shared/types'
 
 void test('normalizeConfig adds and validates model context limits', () => {
@@ -117,4 +120,38 @@ void test('normalizeConfig preserves disabled usage reporting and prompt cache',
 void test('legacy config receives default model context limit', () => {
   const config = normalizeConfig({ provider: { provider: 'openai', model: 'legacy-model' } })
   assert.equal(config.providers[0].models[0].maxContextTokens, DEFAULT_MAX_CONTEXT_TOKENS)
+})
+
+void test('ToolForge full-trust config keeps only canonical, unique workspace grants', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'joker-toolforge-full-trust-'))
+  try {
+    const config = normalizeConfig({
+      providers: [{ id: 'p', name: 'P', type: 'openai', models: [{ id: 'm', name: 'm', enabled: true }], currentModelId: 'm' }],
+      activeProviderId: 'p',
+      toolForgeFullTrust: { workspacePaths: [workspace, join(workspace, '.'), join(workspace, 'missing')] }
+    })
+    assert.deepEqual(config.toolForgeFullTrust, { workspacePaths: [workspace] })
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+  }
+})
+
+void test('ToolForge full-trust mutations are workspace-bound and preserve unrelated grants', () => {
+  const first = mkdtempSync(join(tmpdir(), 'joker-toolforge-full-trust-first-'))
+  const second = mkdtempSync(join(tmpdir(), 'joker-toolforge-full-trust-second-'))
+  try {
+    const base = normalizeConfig({
+      providers: [{ id: 'p', name: 'P', type: 'openai', models: [{ id: 'm', name: 'm', enabled: true }], currentModelId: 'm' }],
+      activeProviderId: 'p'
+    })
+    const granted = setToolForgeFullTrust(setToolForgeFullTrust(base, first, true), second, true)
+    assert.equal(hasToolForgeFullTrust(granted, first), true)
+    assert.equal(hasToolForgeFullTrust(granted, second), true)
+    const revoked = setToolForgeFullTrust(granted, first, false)
+    assert.equal(hasToolForgeFullTrust(revoked, first), false)
+    assert.equal(hasToolForgeFullTrust(revoked, second), true)
+  } finally {
+    rmSync(first, { recursive: true, force: true })
+    rmSync(second, { recursive: true, force: true })
+  }
 })

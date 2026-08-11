@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { extractResearchReports, visibleChatTools } from './tool-visibility'
+import { extractResearchReports, visibleChatTools, visibleToolCards } from './tool-visibility'
 
 const validReport = {
   title: 'Report',
@@ -17,6 +17,15 @@ void test('visibleChatTools removes detail-only and report-artifact tools', () =
     { toolName: 'Bash', input: {}, status: 'running' }
   ])
   assert.deepEqual(tools.map((tool) => tool.toolName), ['Read', 'Bash'])
+})
+
+void test('visibleToolCards hides internal ToolForge raw cards while preserving other calls', () => {
+  const tools = visibleToolCards([
+    { toolName: 'ToolForgeStart', input: {}, output: '{"status":"building"}', status: 'done' },
+    { toolName: 'ToolForgeStatus', input: {}, output: '{"status":"validating"}', status: 'done' },
+    { toolName: 'Read', input: {}, status: 'done' }
+  ])
+  assert.deepEqual(tools.map((tool) => tool.toolName), ['Read'])
 })
 
 void test('extractResearchReports returns valid and invalid artifacts without throwing', () => {

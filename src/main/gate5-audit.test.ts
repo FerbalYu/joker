@@ -173,7 +173,7 @@ void test('Gate 5 audit ignores unrelated keywords nested in check details and s
       checks: [{
         name: 'Provider first selects ToolSearch for the real user task',
         pass: true,
-        details: ['ToolSearch', 'ToolForgeStart', 'ToolPromote', 'generated-tool-call']
+        details: ['ToolSearch', 'ToolForgeStart', 'host-owned activation', 'generated-tool-call']
       }, {
         name: 'Fixture v1 is available',
         pass: true,
@@ -185,7 +185,7 @@ void test('Gate 5 audit ignores unrelated keywords nested in check details and s
       scenarios: [{
         scenario: 'gate2-happy-path',
         status: 'pass',
-        toolOrder: ['ToolSearch', 'ToolForgeStart', 'ToolPromote'],
+        toolOrder: ['ToolSearch', 'ToolForgeStart', 'generated-tool-call'],
         policy: { decision: 'allow', reason: 'low risk policy' }
       }]
     })

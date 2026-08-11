@@ -102,6 +102,50 @@ void test('tool results and pending messages are scoped by session', () => {
   assert.deepEqual(useStore.getState().pendingUserMessages, [])
 })
 
+void test('tool result enriches an earlier terminal status without allowing stale heartbeats to revive it', () => {
+  resetStore()
+  useStore.getState().startStream(sessionA)
+  useStore.getState().addPendingToolCall(sessionA, {
+    toolCallId: 'forge-call',
+    toolName: 'ToolForgeStart',
+    input: { spec: { id: 'tool-1' } },
+    status: 'running'
+  })
+  useStore.getState().updateToolStatus(sessionA, {
+    toolCallId: 'forge-call',
+    toolName: 'ToolForgeStart',
+    input: {},
+    status: 'done',
+    startedAt: 10,
+    updatedAt: 20,
+    lastProgressAt: 20,
+    deadlineAt: 100,
+    durationMs: 10
+  })
+  useStore.getState().resolveToolCall(
+    sessionA,
+    'forge-call',
+    'ToolForgeStart',
+    '{"jobId":"job-1","status":"queued"}',
+    { forge: true },
+    { startedAt: 10, updatedAt: 21, durationMs: 11 }
+  )
+  useStore.getState().updateToolStatus(sessionA, {
+    toolCallId: 'forge-call',
+    toolName: 'ToolForgeStart',
+    input: {},
+    status: 'running',
+    updatedAt: 15
+  })
+
+  const tool = useStore.getState().sessionRuntimes[sessionA]?.pendingToolCalls[0]
+  assert.equal(tool?.status, 'done')
+  assert.equal(tool?.output, '{"jobId":"job-1","status":"queued"}')
+  assert.deepEqual(tool?.metadata, { forge: true })
+  assert.deepEqual(tool?.input, { spec: { id: 'tool-1' } })
+  assert.equal(tool?.updatedAt, 21)
+})
+
 void test('sub-agent activity updates remain isolated by session and replace the same run', () => {
   resetStore()
   const base = {

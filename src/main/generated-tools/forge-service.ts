@@ -4,6 +4,7 @@ import type { LanguageModel } from 'ai'
 
 import type { ForgeJob } from '../../shared/generated-tools'
 import type { ToolContext } from '../tools/registry'
+import type { PromotionService } from './promotion-service'
 import { runForgeAgent, type ForgeAgentRunResult } from './forge-agent'
 import {
   listForgeJobs,
@@ -16,7 +17,6 @@ import {
   resumeInterruptedForgeJob
 } from './validator-recovery'
 import { validateGeneratedToolCandidate } from './validator'
-import { resolveGeneratedToolValidationSuite } from './validation-suite'
 
 const DEFAULT_MAX_CONCURRENCY = 1
 
@@ -24,8 +24,11 @@ export interface ForgeServiceMakerInput {
   jokerHome: string
   jobId: string
   job: ForgeJob
-  validationSuiteId: string
-  validationSuiteHash: string
+  validationPlan?: import('../../shared/generated-tools').GeneratedToolValidationPlan
+  validationPlanHash?: string
+  /** @deprecated legacy suite identity accepted for existing callers. */
+  validationSuiteId?: string
+  validationSuiteHash?: string
   prompt: string
   toolContext: ToolContext
   model?: LanguageModel
@@ -35,6 +38,8 @@ export interface ForgeServiceMakerInput {
 
 export type ForgeServiceMaker = (input: ForgeServiceMakerInput) => Promise<ForgeAgentRunResult>
 
+export type ForgeActivationDriver = PromotionService['advance']
+
 export interface ForgeServiceOptions {
   jokerHome: string
   model?: LanguageModel
@@ -43,11 +48,12 @@ export interface ForgeServiceOptions {
   resumeValidation?: typeof resumeAndValidateGeneratedToolCandidate
   now?: () => number
   createValidationRunId?: () => string
+  activationDriver?: ForgeActivationDriver
   maxConcurrency?: number
 }
 
 export interface ForgeController {
-  enqueue(jobId: string): void
+  enqueue(jobId: string): boolean
   cancel(jobId: string, expectedRevision: number): Promise<ForgeJob>
 }
 
@@ -120,17 +126,33 @@ export class ForgeService implements ForgeController {
     this.stopping = false
     recoverInterruptedForgeJobs(this.options.jokerHome, this.now())
     for (const job of listForgeJobs(this.options.jokerHome).jobs) {
+      // Upgrade jobs that were stopped only by the removed ToolForge gates.
+      if (job.status === 'failed' && /validation suite|validation plan|workspace full trust|runtime qualification|unsupported runtime profile/i.test(job.error ?? '')) {
+        const reopened = updateForgeJob(this.options.jokerHome, job.id, job.revision, (current) => ({
+          ...current,
+          revision: current.revision + 1,
+          status: 'queued',
+          updatedAt: this.now(),
+          finishedAt: undefined,
+          error: undefined,
+          currentPhase: 'queued'
+        }))
+        this.enqueue(reopened.id)
+        continue
+      }
       if (job.status === 'promoting') continue
-      if (job.status === 'queued' || job.status === 'interrupted') this.enqueue(job.id)
+      if (job.status === 'queued' || job.status === 'interrupted' || job.status === 'awaiting-policy') this.enqueue(job.id)
     }
   }
 
-  enqueue(jobId: string): void {
-    if (this.stopping || this.active.has(jobId) || this.pending.has(jobId)) return
+  enqueue(jobId: string): boolean {
+    if (this.stopping) return false
+    if (this.active.has(jobId) || this.pending.has(jobId)) return true
     const job = readForgeJob(this.options.jokerHome, jobId)
-    if (!job || (!['queued', 'interrupted'].includes(job.status))) return
+    if (!job || (!['queued', 'interrupted', 'awaiting-policy'].includes(job.status))) return false
     this.pending.add(jobId)
     queueMicrotask(() => this.drain())
+    return true
   }
 
   async cancel(jobId: string, expectedRevision: number): Promise<ForgeJob> {
@@ -180,19 +202,20 @@ export class ForgeService implements ForgeController {
 
   private async runJob(jobId: string, signal: AbortSignal): Promise<void> {
     let job = readForgeJob(this.options.jokerHome, jobId)
-    if (!job || terminal(job.status) || job.status === 'failed' || job.status === 'cancelled') return
+    if (!job || job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') return
 
     if (job.status === 'interrupted') {
       if (job.resumeHint?.includes('validating')) {
-        await (this.options.resumeValidation ?? resumeAndValidateGeneratedToolCandidate)(
+        const result = await (this.options.resumeValidation ?? resumeAndValidateGeneratedToolCandidate)(
           this.options.jokerHome,
           job.id,
           job.revision,
           signal
         )
-        return
+        job = result.job
+      } else {
+        job = resumeInterruptedForgeJob(this.options.jokerHome, job.id, job.revision, this.now())
       }
-      job = resumeInterruptedForgeJob(this.options.jokerHome, job.id, job.revision, this.now())
     }
 
     if (job.status === 'queued') {
@@ -207,7 +230,6 @@ export class ForgeService implements ForgeController {
     }
 
     if (job.status === 'planning') {
-      resolveGeneratedToolValidationSuite(job.toolId)
       job = updateForgeJob(this.options.jokerHome, job.id, job.revision, (current) => ({
         ...current,
         revision: current.revision + 1,
@@ -218,13 +240,10 @@ export class ForgeService implements ForgeController {
     }
 
     if (job.status === 'building') {
-      const validation = resolveGeneratedToolValidationSuite(job.toolId)
       await this.maker({
         jokerHome: this.options.jokerHome,
         jobId: job.id,
         job,
-        validationSuiteId: validation.suite.id,
-        validationSuiteHash: validation.hash,
         prompt: this.promptFor(job),
         toolContext: {
           workspacePath: null,
@@ -267,7 +286,14 @@ export class ForgeService implements ForgeController {
           currentPhase: 'repairing-validation-failure'
         }))
         this.pending.add(repair.id)
+      } else if (result.job.status === 'awaiting-policy') {
+        job = result.job
       }
+    }
+
+    if (job.status === 'awaiting-policy') {
+      if (!this.options.activationDriver) return
+      await this.options.activationDriver(job.id)
     }
   }
 

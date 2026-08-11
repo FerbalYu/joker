@@ -29,7 +29,7 @@ const UniqueStringsSchema = z.array(z.string().trim().min(1).max(512)).max(128)
 
 export const GeneratedToolNetworkMethodSchema = z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 export const GeneratedToolScopeSchema = z.enum(['project', 'user'])
-export const GeneratedToolRuntimeIdSchema = z.literal('quickjs-wasm')
+export const GeneratedToolRuntimeIdSchema = z.enum(['quickjs-wasm', 'node-child-process'])
 
 export const GeneratedToolPermissionManifestSchema = z.object({
   filesystem: z.object({
@@ -45,6 +45,23 @@ export const GeneratedToolPermissionManifestSchema = z.object({
   process: z.object({ commands: UniqueStringsSchema }).strict(),
   environment: z.object({ keys: UniqueStringsSchema }).strict(),
   secrets: z.object({ handles: UniqueStringsSchema }).strict()
+}).strict()
+
+export const GeneratedToolValidationExpectationSchema = z.union([
+  z.object({ outcome: z.literal('succeeded'), output: z.unknown() }).strict(),
+  z.object({ outcome: z.literal('tool-failed'), error: z.unknown() }).strict()
+])
+export const GeneratedToolValidationCaseSchema = z.object({
+  id: IdSchema,
+  input: jsonObjectSchema(),
+  workspaceFiles: z.record(RelativePathSchema, z.string().max(1_000_000)),
+  expected: GeneratedToolValidationExpectationSchema
+}).strict()
+export const GeneratedToolValidationPlanSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: z.literal('host-compiled-validation-plan-v1'),
+  cases: z.array(GeneratedToolValidationCaseSchema).min(1).max(64)
+    .refine((items) => new Set(items.map((item) => item.id)).size === items.length, 'validation case ids must be unique')
 }).strict()
 
 export const GeneratedToolManifestSchema = z.object({
@@ -87,6 +104,8 @@ export const GeneratedToolSpecSchema = z.object({
   inputContract: jsonObjectSchema(),
   outputContract: jsonObjectSchema(),
   permissions: GeneratedToolPermissionManifestSchema,
+  validationProfile: z.enum(['gate2-project-read-v1', 'user-owned-full-trust-v1']).optional(),
+  validationCases: z.array(GeneratedToolValidationCaseSchema).min(1).max(64).optional(),
   acceptance: z.array(NonEmptyStringSchema).min(1).max(64),
   examples: z.array(z.object({
     input: jsonObjectSchema(),
@@ -106,7 +125,7 @@ export const ForgeJobStatusSchema = z.enum([
   'promoting', 'completed', 'failed', 'cancelled', 'interrupted'
 ])
 export const ForgeJobModeSchema = z.enum(['create', 'edit', 'repair'])
-export const GeneratedToolValidationProfileIdSchema = z.literal('gate2-project-read-v1')
+export const GeneratedToolValidationProfileIdSchema = z.enum(['gate2-project-read-v1', 'user-owned-full-trust-v1'])
 
 export const ForgeJobSchema = z.object({
   id: IdSchema,
@@ -192,8 +211,8 @@ export const GeneratedToolCandidateSchema = z.object({
   manifest: GeneratedToolManifestSchema,
   specHash: z.string().regex(SHA256_PATTERN),
   validationProfile: GeneratedToolValidationProfileIdSchema,
-  validationSuiteId: IdSchema,
-  validationSuiteHash: z.string().regex(SHA256_PATTERN),
+  validationPlan: GeneratedToolValidationPlanSchema,
+  validationPlanHash: z.string().regex(SHA256_PATTERN),
   createdAt: z.number().int().nonnegative()
 }).strict().superRefine((value, context) => {
   if (value.manifest.toolId !== value.toolId) {
@@ -211,8 +230,8 @@ export const GeneratedToolForgeAttemptSchema = z.object({
   candidateFingerprint: z.string().regex(SHA256_PATTERN),
   specHash: z.string().regex(SHA256_PATTERN),
   validationProfile: GeneratedToolValidationProfileIdSchema,
-  validationSuiteId: IdSchema,
-  validationSuiteHash: z.string().regex(SHA256_PATTERN),
+  validationPlan: GeneratedToolValidationPlanSchema,
+  validationPlanHash: z.string().regex(SHA256_PATTERN),
   createdAt: z.number().int().nonnegative()
 }).strict()
 
@@ -465,6 +484,8 @@ export const GeneratedToolPolicyReasonCodeSchema = z.enum([
   'runtime-l0',
   'runtime-l1-approval-required',
   'runtime-l2-project-read',
+  'workspace-full-trust-authorized',
+  'workspace-full-trust-required',
   'permission-profile-unsupported',
   'permission-profile-hard-deny',
   'validation-not-passed',
@@ -485,6 +506,8 @@ export const GeneratedToolPolicyInputSchema = z.object({
   runtimeQualificationLevel: z.enum(['L2', 'L1', 'L0']),
   scope: GeneratedToolScopeSchema,
   projectId: IdSchema.optional(),
+  validationProfile: GeneratedToolValidationProfileIdSchema,
+  workspaceFullTrustGranted: z.boolean(),
   permissions: GeneratedToolPermissionManifestSchema,
   baseVersionId: IdSchema.optional(),
   registryRevision: z.number().int().nonnegative(),
@@ -647,6 +670,8 @@ export const GeneratedToolValidationReportSchema = z.object({
   jobId: IdSchema.optional(),
   attempt: z.number().int().positive().max(3).optional(),
   validationRunId: IdSchema.optional(),
+  validationPlanId: z.literal('host-compiled-validation-plan-v1').optional(),
+  validationPlanHash: z.string().regex(SHA256_PATTERN).optional(),
   validationSuiteId: IdSchema.optional(),
   validationSuiteHash: z.string().regex(SHA256_PATTERN).optional(),
   startedAt: z.number().int().nonnegative(),
@@ -658,7 +683,7 @@ export const GeneratedToolValidationReportSchema = z.object({
   logsPath: RelativePathSchema,
   logsHash: z.string().regex(SHA256_PATTERN).optional()
 }).strict().superRefine((value, context) => {
-  const gate2Fields = [value.validationProfile, value.jobId, value.attempt, value.validationRunId, value.validationSuiteId, value.validationSuiteHash]
+  const gate2Fields = [value.validationProfile, value.jobId, value.attempt, value.validationRunId, value.validationPlanId, value.validationPlanHash]
   if (gate2Fields.some((item) => item !== undefined) && gate2Fields.some((item) => item === undefined)) {
     context.addIssue({ code: 'custom', path: ['validationProfile'], message: 'Gate 2 validation identity fields must be attached together' })
   }

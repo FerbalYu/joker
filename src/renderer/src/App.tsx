@@ -58,6 +58,8 @@ export default function App(): React.JSX.Element {
   const addPendingToolCall = useStore((s) => s.addPendingToolCall)
   const resolveToolCall = useStore((s) => s.resolveToolCall)
   const failToolCall = useStore((s) => s.failToolCall)
+  const updateToolStatus = useStore((s) => s.updateToolStatus)
+  const setStreamFlow = useStore((s) => s.setStreamFlow)
   const failRunningToolCalls = useStore((s) => s.failRunningToolCalls)
   const updateSubagentActivity = useStore((s) => s.updateSubagentActivity)
   const setPendingUserMessages = useStore((s) => s.setPendingUserMessages)
@@ -353,10 +355,17 @@ export default function App(): React.JSX.Element {
     let removeApprovalResolvedListener: (() => void) | undefined
     let removePortListener: (() => void) | undefined
     let removeEventListener: (() => void) | undefined
+    let removeFlowListener: (() => void) | undefined
     removePortListener = window.joker.chat.onPort((port) => {
       portRef.current = port
       setStreamPortReady(true)
       removeEventListener?.()
+      removeFlowListener?.()
+      removeFlowListener = window.joker.chat.onFlow((flow) => {
+        if (!flow.runId) return
+        const active = Object.values(activeRunsRef.current).find((run) => run.runId === flow.runId)
+        if (active) setStreamFlow(active.sessionId, flow)
+      })
       removeEventListener = window.joker.chat.onEvent(port, (event: StreamEvent) => {
         const previousRuns = activeRunsRef.current
         const nextRuns = adoptQueuedRunOnEvent(previousRuns, event)
@@ -414,13 +423,36 @@ export default function App(): React.JSX.Element {
           case 'token':
             break
           case 'tool-call':
-            addPendingToolCall(event.sessionId, { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input, status: 'running' })
+            addPendingToolCall(event.sessionId, {
+              toolCallId: event.toolCallId,
+              toolName: event.toolName,
+              input: event.input,
+              status: 'running',
+              startedAt: event.startedAt,
+              updatedAt: event.updatedAt,
+              lastProgressAt: event.lastProgressAt,
+              deadlineAt: event.deadlineAt
+            })
+            break
+          case 'tool-status':
+            updateToolStatus(event.sessionId, {
+              toolCallId: event.toolCallId,
+              toolName: event.toolName,
+              input: {},
+              status: event.status,
+              startedAt: event.startedAt,
+              updatedAt: event.updatedAt,
+              lastProgressAt: event.lastProgressAt,
+              deadlineAt: event.deadlineAt,
+              durationMs: event.durationMs,
+              error: event.error
+            })
             break
           case 'tool-result':
-            resolveToolCall(event.sessionId, event.toolCallId, event.toolName, event.output, event.metadata)
+            resolveToolCall(event.sessionId, event.toolCallId, event.toolName, event.output, event.metadata, event)
             break
           case 'tool-error':
-            failToolCall(event.sessionId, event.toolCallId, event.toolName, localizeError(language, event.error))
+            failToolCall(event.sessionId, event.toolCallId, event.toolName, localizeError(language, event.error), event.status, event)
             break
           case 'subagent-update':
             updateSubagentActivity(event.sessionId, event.activity)
@@ -473,9 +505,10 @@ export default function App(): React.JSX.Element {
       removeApprovalListener?.()
       removeApprovalResolvedListener?.()
       removeEventListener?.()
+      removeFlowListener?.()
       removePortListener?.()
     }
-  }, [addApproval, dispatchRunActivity, failRunningToolCalls, failToolCall, flushTokenBuffer, language, queueToken, refreshSessions, removeApproval, resetTransientState, resolveToolCall, setApprovals, setContextUsage, setMessages, setPendingUserMessages, setSessionError, setSessionGoal, setStreamModel, setStreamRunMode, setStreaming, startStream, updateSubagentActivity])
+  }, [addApproval, dispatchRunActivity, failRunningToolCalls, failToolCall, flushTokenBuffer, language, queueToken, refreshSessions, removeApproval, resetTransientState, resolveToolCall, setApprovals, setContextUsage, setMessages, setPendingUserMessages, setSessionError, setSessionGoal, setStreamFlow, setStreamModel, setStreamRunMode, setStreaming, startStream, updateSubagentActivity, updateToolStatus])
 
   const handleGoal = useCallback(async (command: GoalCommandMatch, draft: { skillIds?: string[] }): Promise<boolean> => {
     const sessionId = sessionRef.current

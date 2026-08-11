@@ -33,10 +33,11 @@ import type {
   GoalTransitionResult,
   RunMode,
   GeneratedToolDetailResult,
+  GeneratedToolJobStatusResult,
   GeneratedToolEditRequest,
   GeneratedToolEditResult,
-  GeneratedToolPromoteInput,
-  GeneratedToolPromoteResult,
+  GeneratedToolEnableInput,
+  GeneratedToolEnableResult,
   GeneratedToolsListResult,
   GeneratedToolsQualificationOperationResult,
   GeneratedToolContinuationListResult,
@@ -44,7 +45,8 @@ import type {
   GeneratedToolRevalidateInput,
   GeneratedToolRevalidateResult,
   GeneratedToolRemoveResult,
-  GeneratedToolExportResult
+  GeneratedToolExportResult,
+  ToolForgeFullTrustResult
 } from '@shared/types'
 interface SessionRecord extends SessionMeta {
   messages: ChatMessage[]
@@ -117,7 +119,8 @@ const api = {
   generatedTools: {
     list: (): Promise<GeneratedToolsListResult> => ipcRenderer.invoke('generated-tools:list'),
     get: (toolId: string): Promise<GeneratedToolDetailResult> => ipcRenderer.invoke('generated-tools:get', { toolId }),
-    promote: (input: GeneratedToolPromoteInput): Promise<GeneratedToolPromoteResult> => ipcRenderer.invoke('generated-tools:promote', input),
+    jobStatus: (jobId: string): Promise<GeneratedToolJobStatusResult> => ipcRenderer.invoke('generated-tools:job-status', { jobId }),
+    enable: (input: GeneratedToolEnableInput): Promise<GeneratedToolEnableResult> => ipcRenderer.invoke('generated-tools:enable', input),
     edit: (input: GeneratedToolEditRequest): Promise<GeneratedToolEditResult> => ipcRenderer.invoke('generated-tools:edit', input),
     remove: (input: { toolId: string; expectedRevision: number; operationId: string }): Promise<GeneratedToolRemoveResult> => ipcRenderer.invoke('generated-tools:remove', input),
     export: (input: { toolId: string; versionId: string }): Promise<GeneratedToolExportResult> => ipcRenderer.invoke('generated-tools:export', input),
@@ -128,6 +131,11 @@ const api = {
     continuations: (): Promise<GeneratedToolContinuationListResult> => ipcRenderer.invoke('generated-tools:continuations'),
     startQualification: (): Promise<GeneratedToolsQualificationOperationResult> => ipcRenderer.invoke('generated-tools:qualification-start'),
     cancelQualification: (): Promise<GeneratedToolsQualificationOperationResult> => ipcRenderer.invoke('generated-tools:qualification-cancel')
+  },
+  toolForgeTrust: {
+    get: (): Promise<ToolForgeFullTrustResult> => ipcRenderer.invoke('toolforge-trust:get'),
+    grant: (): Promise<ToolForgeFullTrustResult> => ipcRenderer.invoke('toolforge-trust:grant'),
+    revoke: (): Promise<ToolForgeFullTrustResult> => ipcRenderer.invoke('toolforge-trust:revoke')
   },
   mcp: {
     list: (): Promise<McpServerRuntime[]> => ipcRenderer.invoke('mcp:list'),

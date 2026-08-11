@@ -6,6 +6,24 @@ import type { SubagentActivity } from '../../shared/types'
 import { writeToolAudit, type ToolAuditWriter } from './audit'
 import { classifyToolRisk, type ToolRisk } from './risk'
 
+const DEFAULT_TOOL_TIMEOUT_MS = 3 * 60_000
+const DEFAULT_TOOL_HEARTBEAT_MS = 2_000
+const LIFECYCLE_CALLBACK_TIMEOUT_MS = 5_000
+
+class ToolDeadlineError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Tool execution timed out after ${timeoutMs}ms`)
+    this.name = 'ToolDeadlineError'
+  }
+}
+
+class ToolCancelledError extends Error {
+  constructor(reason?: unknown) {
+    super(reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : 'Tool execution cancelled')
+    this.name = 'ToolCancelledError'
+  }
+}
+
 export type ToolSource =
   | { type: 'builtin'; id?: string; name?: string }
   | { type: 'mcp'; id?: string; name?: string }
@@ -19,6 +37,7 @@ export type ToolSource =
       pointerRevision: number
       capabilityRevision: number
       runtimeQualificationLevel: 'L2' | 'L1'
+      validationProfile: 'gate2-project-read-v1' | 'user-owned-full-trust-v1'
     }
 
 export interface ToolLifecycleEvent {
@@ -53,6 +72,10 @@ export interface ToolDefinition {
   source?: ToolSource
   risk?: ToolRisk
   lifecycle?: ToolExecutionLifecycle
+  /** Host-owned upper bound. Tool-specific internal deadlines may be shorter. */
+  timeoutMs?: number
+  /** Frequency for observable wrapper heartbeats while execute() is pending. */
+  heartbeatMs?: number
   execute: (input: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>
 }
 
@@ -109,9 +132,14 @@ export interface ToolCallInfo {
   toolCallId?: string
   toolName: string
   input: Record<string, unknown>
-  status: 'running' | 'done' | 'error' | 'denied'
+  status: 'running' | 'done' | 'error' | 'denied' | 'cancelled' | 'timed-out'
   result?: ToolResult
+  startedAt?: number
+  updatedAt?: number
+  lastProgressAt?: number
+  deadlineAt?: number
   durationMs?: number
+  heartbeat?: boolean
   error?: string
 }
 
@@ -134,7 +162,12 @@ export async function executeToolDefinition(
     .update(`${context.sessionId}\0${context.runId ?? ''}\0${definition.name}\0${JSON.stringify(input)}`)
     .digest('hex')
     .slice(0, 32)
-  const lifecycleContext = { ...context, abortSignal: abortSignal ?? context.abortSignal, toolCallId: resolvedToolCallId }
+  const parentSignal = abortSignal ?? context.abortSignal
+  const executionController = new AbortController()
+  const forwardAbort = (): void => executionController.abort(parentSignal?.reason)
+  if (parentSignal?.aborted) forwardAbort()
+  else parentSignal?.addEventListener('abort', forwardAbort, { once: true })
+  const lifecycleContext = { ...context, abortSignal: executionController.signal, toolCallId: resolvedToolCallId }
   if (!lifecycleContext.requestHostApproval && context.approvalGate.requestExplicitApproval) {
     lifecycleContext.requestHostApproval = context.approvalGate.requestExplicitApproval
   }
@@ -161,98 +194,196 @@ export async function executeToolDefinition(
     } : {}),
     risk
   }
-  let lifecycleState: unknown = definition.lifecycle
-    ? await definition.lifecycle.proposed(lifecycleEvent(Date.now()))
-    : undefined
-  safeAudit(audit, { ...auditBase, stage: 'proposed', status: 'pending', arguments: input })
-  let decision: ApprovalDecision
+  let lifecycleState: unknown
   try {
-    decision = await context.approvalGate(definition.name, input, definition)
-  } catch (error) {
-    if (definition.lifecycle && lifecycleState !== undefined) {
-      const deniedDecision: ApprovalDecision = {
-        outcome: 'deny',
-        risk,
-        reason: 'approval gate failed'
+    lifecycleState = definition.lifecycle
+      ? await boundedLifecycle('proposed', () => definition.lifecycle!.proposed(lifecycleEvent(Date.now())))
+      : undefined
+    safeAudit(audit, { ...auditBase, stage: 'proposed', status: 'pending', arguments: input })
+    let decision: ApprovalDecision
+    try {
+      decision = generatedSource?.validationProfile === 'user-owned-full-trust-v1'
+        ? { outcome: 'allow', risk, reason: 'Generated Tool automatic execution' }
+        : await context.approvalGate(definition.name, input, definition)
+    } catch (error) {
+      if (definition.lifecycle && lifecycleState !== undefined) {
+        const deniedDecision: ApprovalDecision = {
+          outcome: 'deny',
+          risk,
+          reason: 'approval gate failed'
+        }
+        lifecycleState = await boundedLifecycle('policyResolved', () => definition.lifecycle!.policyResolved(lifecycleState, {
+          ...lifecycleEvent(Date.now()),
+          decision: deniedDecision
+        }))
+        await finishLifecycleBounded(definition.lifecycle, lifecycleState, {
+          ...lifecycleEvent(Date.now()),
+          result: { output: 'Tool approval failed.' },
+          denied: true
+        })
       }
-      lifecycleState = await definition.lifecycle.policyResolved(lifecycleState, {
-        ...lifecycleEvent(Date.now()),
-        decision: deniedDecision
-      })
-      await finishLifecycle(definition.lifecycle, lifecycleState, {
-        ...lifecycleEvent(Date.now()),
-        result: { output: 'Tool approval failed.' },
-        denied: true
-      })
+      throw error
     }
-    throw error
-  }
-  lifecycleState = await definition.lifecycle?.policyResolved(lifecycleState, {
-    ...lifecycleEvent(Date.now()),
-    decision
-  })
-  if (decision.hostGrant) lifecycleContext.hostApprovalGrant = decision.hostGrant
-  safeAudit(audit, {
-    ...auditBase,
-    stage: 'approval_resolved',
-    status: decision.outcome === 'allow' ? 'allowed' : 'denied',
-    reason: decision.reason,
-    arguments: input
-  })
-  if (decision.outcome === 'deny') {
-    const result = { output: 'Tool call was denied.' }
-    if (definition.lifecycle) {
-      await finishLifecycle(definition.lifecycle, lifecycleState, {
-        ...lifecycleEvent(Date.now()),
+    lifecycleState = definition.lifecycle
+      ? await boundedLifecycle('policyResolved', () => definition.lifecycle!.policyResolved(lifecycleState, {
+          ...lifecycleEvent(Date.now()),
+          decision
+        }))
+      : lifecycleState
+    if (decision.hostGrant) lifecycleContext.hostApprovalGrant = decision.hostGrant
+    safeAudit(audit, {
+      ...auditBase,
+      stage: 'approval_resolved',
+      status: decision.outcome === 'allow' ? 'allowed' : 'denied',
+      reason: decision.reason,
+      arguments: input
+    })
+    if (decision.outcome === 'deny') {
+      const now = Date.now()
+      const result = { output: 'Tool call was denied.' }
+      if (definition.lifecycle) {
+        await finishLifecycleBounded(definition.lifecycle, lifecycleState, {
+          ...lifecycleEvent(now),
+          result,
+          denied: true
+        })
+      }
+      safeAudit(audit, { ...auditBase, stage: 'finished', status: 'denied', reason: decision.reason })
+      safeNotify(context.onToolCall, {
+        toolCallId: resolvedToolCallId,
+        toolName: definition.name,
+        input,
+        status: 'denied',
         result,
-        denied: true
+        updatedAt: now,
+        durationMs: 0
       })
+      return result
     }
-    safeAudit(audit, { ...auditBase, stage: 'finished', status: 'denied', reason: decision.reason })
-    await safeNotify(context.onToolCall, { toolCallId: resolvedToolCallId, toolName: definition.name, input, status: 'denied', result })
-    return result
-  }
 
-  const startedAt = Date.now()
-  lifecycleState = await definition.lifecycle?.started(lifecycleState, lifecycleEvent(startedAt))
-  safeAudit(audit, { ...auditBase, stage: 'started', status: 'allowed', reason: decision.reason })
-  await safeNotify(context.onToolCall, { toolCallId: resolvedToolCallId, toolName: definition.name, input, status: 'running' })
-  try {
-    const result = await definition.execute(input, lifecycleContext)
-    const durationMs = Date.now() - startedAt
-    if (definition.lifecycle) {
-      await finishLifecycle(definition.lifecycle, lifecycleState, {
-        ...lifecycleEvent(Date.now()),
-        result
-      })
-    }
-    safeAudit(audit, {
-      ...auditBase,
-      stage: 'finished',
-      status: 'success',
-      durationMs,
-      resultPreview: result.output
+    const startedAt = Date.now()
+    const timeoutMs = resolveToolTimeoutMs(definition, input)
+    const deadlineAt = startedAt + timeoutMs
+    const heartbeatMs = Math.max(250, definition.heartbeatMs ?? DEFAULT_TOOL_HEARTBEAT_MS)
+    lifecycleState = definition.lifecycle
+      ? await boundedLifecycle('started', () => definition.lifecycle!.started(lifecycleState, lifecycleEvent(startedAt)))
+      : lifecycleState
+    safeAudit(audit, { ...auditBase, stage: 'started', status: 'allowed', reason: decision.reason })
+    safeNotify(context.onToolCall, {
+      toolCallId: resolvedToolCallId,
+      toolName: definition.name,
+      input,
+      status: 'running',
+      startedAt,
+      updatedAt: startedAt,
+      lastProgressAt: startedAt,
+      deadlineAt
     })
-    await safeNotify(context.onToolCall, { toolCallId: resolvedToolCallId, toolName: definition.name, input, status: 'done', result, durationMs })
-    return result
-  } catch (error) {
-    const durationMs = Date.now() - startedAt
-    const message = error instanceof Error ? error.message : String(error)
-    if (definition.lifecycle) {
-      await finishLifecycle(definition.lifecycle, lifecycleState, {
-        ...lifecycleEvent(Date.now()),
-        error
+
+    let heartbeat: NodeJS.Timeout | undefined
+    let deadline: NodeJS.Timeout | undefined
+    let abortListener: (() => void) | undefined
+    try {
+      heartbeat = setInterval(() => {
+        safeNotify(context.onToolCall, {
+          toolCallId: resolvedToolCallId,
+          toolName: definition.name,
+          input,
+          status: 'running',
+          startedAt,
+          updatedAt: Date.now(),
+          lastProgressAt: startedAt,
+          deadlineAt,
+          heartbeat: true
+        })
+      }, heartbeatMs)
+      heartbeat.unref?.()
+
+      const executionPromise = Promise.resolve().then(() => definition.execute(input, lifecycleContext))
+      const timeoutPromise = new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => {
+          const error = new ToolDeadlineError(timeoutMs)
+          reject(error)
+          executionController.abort(error)
+        }, timeoutMs)
+        deadline.unref?.()
       })
+      const cancellationPromise = new Promise<never>((_resolve, reject) => {
+        abortListener = () => reject(new ToolCancelledError(executionController.signal.reason))
+        if (executionController.signal.aborted) abortListener()
+        else executionController.signal.addEventListener('abort', abortListener, { once: true })
+      })
+      const result = await Promise.race([executionPromise, timeoutPromise, cancellationPromise])
+      const completedAt = Date.now()
+      const durationMs = completedAt - startedAt
+      if (definition.lifecycle) {
+        await finishLifecycleBounded(definition.lifecycle, lifecycleState, {
+          ...lifecycleEvent(completedAt),
+          result
+        })
+      }
+      safeAudit(audit, {
+        ...auditBase,
+        stage: 'finished',
+        status: 'success',
+        durationMs,
+        resultPreview: result.output
+      })
+      safeNotify(context.onToolCall, {
+        toolCallId: resolvedToolCallId,
+        toolName: definition.name,
+        input,
+        status: 'done',
+        result,
+        startedAt,
+        updatedAt: completedAt,
+        lastProgressAt: completedAt,
+        deadlineAt,
+        durationMs
+      })
+      return result
+    } catch (error) {
+      const completedAt = Date.now()
+      const durationMs = completedAt - startedAt
+      const status = error instanceof ToolDeadlineError
+        ? 'timed-out'
+        : error instanceof ToolCancelledError || parentSignal?.aborted
+          ? 'cancelled'
+          : 'error'
+      const message = error instanceof Error ? error.message : String(error)
+      if (definition.lifecycle) {
+        await finishLifecycleBounded(definition.lifecycle, lifecycleState, {
+          ...lifecycleEvent(completedAt),
+          error
+        })
+      }
+      safeAudit(audit, {
+        ...auditBase,
+        stage: 'finished',
+        status,
+        durationMs,
+        error: message
+      })
+      safeNotify(context.onToolCall, {
+        toolCallId: resolvedToolCallId,
+        toolName: definition.name,
+        input,
+        status,
+        startedAt,
+        updatedAt: completedAt,
+        lastProgressAt: startedAt,
+        deadlineAt,
+        durationMs,
+        error: message
+      })
+      throw error
+    } finally {
+      if (heartbeat) clearInterval(heartbeat)
+      if (deadline) clearTimeout(deadline)
+      if (abortListener) executionController.signal.removeEventListener('abort', abortListener)
     }
-    safeAudit(audit, {
-      ...auditBase,
-      stage: 'finished',
-      status: 'error',
-      durationMs,
-      error: message
-    })
-    await safeNotify(context.onToolCall, { toolCallId: resolvedToolCallId, toolName: definition.name, input, status: 'error', durationMs, error: message })
-    throw error
+  } finally {
+    parentSignal?.removeEventListener('abort', forwardAbort)
   }
 }
 
@@ -273,17 +404,44 @@ export function buildToolSet(
   return tools as ToolSet
 }
 
-async function finishLifecycle(
+async function finishLifecycleBounded(
   lifecycle: ToolExecutionLifecycle | undefined,
   state: unknown,
   event: ToolLifecycleEvent & { result?: ToolResult; error?: unknown; denied?: boolean }
 ): Promise<void> {
-  await lifecycle?.finished(state, event)
+  if (!lifecycle) return
+  try {
+    await boundedLifecycle('finished', () => lifecycle.finished(state, event))
+  } catch (error) {
+    console.error('Tool lifecycle callback failed', error)
+  }
 }
 
-async function safeNotify(callback: ToolContext['onToolCall'], info: ToolCallInfo): Promise<void> {
+function resolveToolTimeoutMs(definition: ToolDefinition, input: Record<string, unknown>): number {
+  const requested = definition.name === 'Bash' && typeof input.timeout === 'number'
+    ? input.timeout + 2_000
+    : definition.timeoutMs
+  return Math.max(1, Math.floor(requested ?? DEFAULT_TOOL_TIMEOUT_MS))
+}
+
+async function boundedLifecycle<T>(stage: string, callback: () => Promise<T> | T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
   try {
-    await callback?.(info)
+    return await Promise.race([
+      Promise.resolve().then(callback),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Tool lifecycle ${stage} timed out after ${LIFECYCLE_CALLBACK_TIMEOUT_MS}ms`)), LIFECYCLE_CALLBACK_TIMEOUT_MS)
+        timer.unref?.()
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+function safeNotify(callback: ToolContext['onToolCall'], info: ToolCallInfo): void {
+  try {
+    void Promise.resolve(callback?.(info)).catch(() => undefined)
   } catch {
     // Observability must never change tool execution.
   }

@@ -307,7 +307,7 @@ void test('explicit approval is sender and run bound and cannot be auto-approved
   setApprovalMode('full-auto', 951)
   const gate = createApprovalGate(win as never, 'promotion-session', 'promotion-run')
   const pending = gate.requestExplicitApproval!({
-    toolName: 'ToolPromote',
+    toolName: 'GeneratedToolEnable',
     sessionId: 'promotion-session',
     runId: 'promotion-run',
     input: { promotionId: 'promotion-1' }
@@ -323,7 +323,7 @@ void test('explicit approval is sender and run bound and cannot be auto-approved
   assert.match(grant?.requestHash ?? '', /^[a-f0-9]{64}$/)
 
   assert.equal(await gate.requestExplicitApproval!({
-    toolName: 'ToolPromote',
+    toolName: 'GeneratedToolEnable',
     sessionId: 'spoofed-session',
     runId: 'promotion-run',
     input: {}
@@ -344,14 +344,14 @@ void test('permission decisions are risk-based and retain mode boundaries', () =
   assert.deepEqual(evaluateToolPermission('full-auto', 'chat', 'mcp_files_read', { source: { type: 'mcp' } }), {
     action: 'allow', risk: 'external', reason: 'full-auto mode'
   })
-  assert.deepEqual(evaluateToolPermission('full-auto', 'chat', 'ToolPromote'), {
-    action: 'allow', risk: 'write_local', reason: 'promotion service owns explicit approval'
+  assert.deepEqual(evaluateToolPermission('suggest', 'chat', 'ToolForgeStart'), {
+    action: 'allow', risk: 'write_local', reason: 'host owns ToolForge lifecycle'
   })
   assert.deepEqual(evaluateToolPermission('full-auto', 'chat', 'generated-l1', {
     risk: 'read',
     source: {
       type: 'generated', toolId: 'tool-1', name: 'Tool 1', versionId: 'v1', fingerprint: 'a'.repeat(64),
-      validationReportId: 'report-1', pointerRevision: 1, capabilityRevision: 1, runtimeQualificationLevel: 'L1'
+      validationReportId: 'report-1', pointerRevision: 1, capabilityRevision: 1, runtimeQualificationLevel: 'L1', validationProfile: 'gate2-project-read-v1'
     }
   }), {
     action: 'ask', risk: 'read', reason: 'L1 Generated Tool execution requires approval'
@@ -360,9 +360,19 @@ void test('permission decisions are risk-based and retain mode boundaries', () =
     risk: 'read',
     source: {
       type: 'generated', toolId: 'tool-1', name: 'Tool 1', versionId: 'v1', fingerprint: 'a'.repeat(64),
-      validationReportId: 'report-1', pointerRevision: 1, capabilityRevision: 1, runtimeQualificationLevel: 'L2'
+      validationReportId: 'report-1', pointerRevision: 1, capabilityRevision: 1, runtimeQualificationLevel: 'L2', validationProfile: 'gate2-project-read-v1'
     }
   }), {
     action: 'allow', risk: 'read', reason: 'read-only tool'
+  })
+  assert.deepEqual(evaluateToolPermission('full-auto', 'chat', 'generated-full-trust', {
+    risk: 'write_local',
+    source: {
+      type: 'generated', toolId: 'tool-1', name: 'Tool 1', versionId: 'v1', fingerprint: 'a'.repeat(64),
+      validationReportId: 'report-1', pointerRevision: 1, capabilityRevision: 1,
+      runtimeQualificationLevel: 'L1', validationProfile: 'user-owned-full-trust-v1'
+    }
+  }), {
+    action: 'allow', risk: 'write_local', reason: 'active workspace full trust authorizes this Generated Tool'
   })
 })

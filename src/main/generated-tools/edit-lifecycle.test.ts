@@ -137,10 +137,15 @@ function makerFor(source: string): ForgeServiceMaker {
   }
 }
 
+const deferredController = {
+  enqueue: () => true,
+  cancel: async () => { throw new Error('not used') }
+}
+
 async function startEdit(home: string, source: string): Promise<{ job: ForgeJob; service: ForgeService }> {
   installRuntimeQualificationFixture(home)
   const base = installBaseVersion(home)
-  const edit = new GeneratedToolEditService({ jokerHome: home, createId: () => 'edit-lifecycle-job', now: () => 10 })
+  const edit = new GeneratedToolEditService({ jokerHome: home, createId: () => 'edit-lifecycle-job', now: () => 10, controller: deferredController })
   const started = edit.start({ toolId, baseVersionId: base.id, baseFingerprint: base.fingerprint, instruction: 'Change the output', requestedFrom: 'settings' }, 'session-1', 'run-1')
   assert.equal(started.success, true)
   if (!started.success) throw new Error('edit job creation failed')
@@ -164,7 +169,7 @@ void test('successful edit validates and promotes v2 while preserving immutable 
       expectedJobRevision: job.revision,
       registryRevision: readGeneratedToolRegistry(home).revision,
       expectedCandidateFingerprint: job.candidateFingerprint!,
-      approvalGrant: { requestId: 'approval-request', webContentsId: 1, sessionId: 'session-1', runId: 'run-1', toolName: 'ToolPromote', requestHash: 'a'.repeat(64), approvedAt: 30 }
+      approvalGrant: { requestId: 'approval-request', webContentsId: 1, sessionId: 'session-1', runId: 'run-1', toolName: 'GeneratedToolEnable', requestHash: 'a'.repeat(64), approvedAt: 30 }
     })
     assert.equal(promoted.action, 'promoted')
     const after = readGeneratedToolRegistry(home)
@@ -184,7 +189,7 @@ void test('edit workspace rejects a base version whose fingerprint changes befor
   try {
     installRuntimeQualificationFixture(home)
     const base = installBaseVersion(home)
-    const edit = new GeneratedToolEditService({ jokerHome: home, createId: () => 'stale-base-job', now: () => 10 })
+    const edit = new GeneratedToolEditService({ jokerHome: home, createId: () => 'stale-base-job', now: () => 10, controller: deferredController })
     const started = edit.start({ toolId, baseVersionId: base.id, baseFingerprint: base.fingerprint, instruction: 'Change the output', requestedFrom: 'settings' }, 'session-1', 'run-1')
     assert.equal(started.success, true)
     if (!started.success) return
@@ -220,7 +225,7 @@ void test('concurrent edit jobs from one stable base fail closed when the stale 
   try {
     installRuntimeQualificationFixture(home)
     const base = installBaseVersion(home)
-    const edit = new GeneratedToolEditService({ jokerHome: home, createId: () => 'first-edit-job', now: () => 10 })
+    const edit = new GeneratedToolEditService({ jokerHome: home, createId: () => 'first-edit-job', now: () => 10, controller: deferredController })
     const firstStarted = edit.start({ toolId, baseVersionId: base.id, baseFingerprint: base.fingerprint, instruction: 'Change output for session one', requestedFrom: 'settings' }, 'session-1', 'run-1')
     assert.equal(firstStarted.success, true)
     if (!firstStarted.success) return
@@ -259,7 +264,7 @@ void test('concurrent edit jobs from one stable base fail closed when the stale 
       expectedJobRevision: firstAwaiting!.revision,
       registryRevision: readGeneratedToolRegistry(home).revision,
       expectedCandidateFingerprint: firstAwaiting!.candidateFingerprint!,
-      approvalGrant: { requestId: 'approval-request', webContentsId: 1, sessionId: 'session-1', runId: 'run-1', toolName: 'ToolPromote', requestHash: 'a'.repeat(64), approvedAt: 30 }
+      approvalGrant: { requestId: 'approval-request', webContentsId: 1, sessionId: 'session-1', runId: 'run-1', toolName: 'GeneratedToolEnable', requestHash: 'a'.repeat(64), approvedAt: 30 }
     })
     assert.equal(firstPromoted.action, 'promoted')
 

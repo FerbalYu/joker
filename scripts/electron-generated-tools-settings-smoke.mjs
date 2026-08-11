@@ -167,12 +167,27 @@ try {
 
   await openGeneratedTools(page)
   check('fixture inventory card renders', await page.getByTestId('generated-tool-card-summarize-task-json').count() === 1)
-  check('fixture is shown available', await page.getByTestId('generated-tool-status-summarize-task-json').textContent().then((value) => /可用|Available/.test(value ?? '')))
+  const enabledStatus = await page.getByTestId('generated-tool-status-summarize-task-json').textContent()
+  check('fixture is shown enabled', /已启用|Enabled|toolforge\.productState\.enabled/.test(enabledStatus ?? ''), enabledStatus)
+  const defaultInventoryText = await page.getByTestId('generated-tools-inventory').innerText()
+  check('default inventory uses simple product wording', /已启用|Enabled|toolforge\.productState\.enabled/.test(defaultInventoryText) && !/候选|Candidate|指纹|Fingerprint|修订|Revision|Promote|晋升|发布/.test(defaultInventoryText), defaultInventoryText)
   const saveButtonCount = await page.getByRole('button', { name: /^保存$|^Save$/ }).count()
   check('read-only Generated Tools tab has no Save action', saveButtonCount === 0)
   await screenshot(page, 'generated-tools-inventory')
 
   const card = page.getByTestId('generated-tool-card-summarize-task-json')
+  await page.getByTestId('generated-tool-disable-summarize-task-json').click()
+  await page.getByTestId('generated-tool-status-summarize-task-json').filter({ hasText: /已停用|Disabled|toolforge\.productState\.disabled/ }).waitFor()
+  check('settings card disables the enabled Generated Tool', await page.evaluate(async () => {
+    const result = await window.joker.generatedTools.list()
+    return result.success && result.data.tools.some((tool) => tool.toolId === 'summarize-task-json' && tool.availability === 'disabled')
+  }))
+  await page.getByTestId('generated-tool-reenable-summarize-task-json').click()
+  await page.getByTestId('generated-tool-status-summarize-task-json').filter({ hasText: /已启用|Enabled|toolforge\.productState\.enabled/ }).waitFor()
+  check('settings card re-enables the stable Generated Tool', await page.evaluate(async () => {
+    const result = await window.joker.generatedTools.list()
+    return result.success && result.data.tools.some((tool) => tool.toolId === 'summarize-task-json' && tool.availability === 'available' && tool.executable)
+  }))
   await page.evaluate(() => {
     window.dispatchEvent(new CustomEvent('joker:open-generated-tool', {
       detail: {
@@ -183,7 +198,7 @@ try {
     }))
   })
   await page.getByTestId('tool-workbench').waitFor()
-  check('conversation event opens the exact Generated Tool Workbench', await page.getByTestId('tool-workbench-status').textContent().then((value) => /可用|Available/.test(value ?? '')))
+  check('conversation event opens the exact Generated Tool Workbench', await page.getByTestId('tool-workbench-status').textContent().then((value) => /已启用|Enabled|toolforge\.productState\.enabled|可用|Available/.test(value ?? '')))
   check('conversation edit targets the selected specific tool', await page.getByRole('heading', { name: /SummarizeTaskJson|summarize-task-json/i }).count().then((count) => count > 0))
   check('conversation edit entry focuses the immutable-base instruction field', await page.evaluate(() => document.activeElement?.getAttribute('data-testid') === 'tool-workbench-edit-instruction'))
   await page.getByTestId('tool-workbench-edit-instruction').fill('Use natural language to preserve behavior and improve the implementation.')
@@ -192,7 +207,8 @@ try {
   await page.getByTestId('tool-workbench').waitFor({ state: 'detached' })
   await card.click()
   await page.getByTestId('tool-workbench').waitFor()
-  check('Workbench shows available status', await page.getByTestId('tool-workbench-status').textContent().then((value) => /可用|Available/.test(value ?? '')))
+  check('Workbench shows enabled status', await page.getByTestId('tool-workbench-status').textContent().then((value) => /已启用|Enabled|toolforge\.productState\.enabled|可用|Available/.test(value ?? '')))
+  check('Workbench exposes advanced diagnostics separately from the default inventory', await page.getByTestId('tool-workbench').innerText().then((value) => /高级诊断|Advanced diagnostics/.test(value)), await page.getByTestId('tool-workbench').innerText())
   check('Workbench shows all eight validation checks', await page.getByTestId('tool-workbench-validation-checks').locator(':scope > div').count() === 8)
   check('Permissions and retained evidence explanation is visible in the Workbench',
     await page.getByTestId('tool-workbench').getByText('fixtures/tasks.json', { exact: true }).count() === 1 &&
@@ -210,7 +226,7 @@ try {
   electron = undefined
   page = await launchElectron()
   const restarted = await page.evaluate(() => window.joker.generatedTools.list())
-  check('registry and active version survive restart', direct.success && restarted.success && restarted.data.registryRevision === direct.data.registryRevision && restarted.data.capabilityRevision === direct.data.capabilityRevision && restarted.data.tools[0]?.activeVersionId === direct.data.tools[0]?.activeVersionId)
+  check('registry and active version survive restart after card lifecycle changes', direct.success && restarted.success && restarted.data.registryRevision >= direct.data.registryRevision + 2 && restarted.data.capabilityRevision >= direct.data.capabilityRevision + 2 && restarted.data.tools[0]?.activeVersionId === direct.data.tools[0]?.activeVersionId && restarted.data.tools[0]?.availability === 'available')
   await openGeneratedTools(page)
   check('restart inventory still renders fixture', await page.getByTestId('generated-tool-card-summarize-task-json').count() === 1)
   await screenshot(page, 'generated-tools-restart')

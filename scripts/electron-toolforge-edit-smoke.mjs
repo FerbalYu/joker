@@ -236,12 +236,12 @@ try {
     if (next.success) {
       detail = next.data
       const job = detail.recentJobs.find((item) => item.id === edit.data.jobId)
-      if (job && ['awaiting-policy', 'failed'].includes(job.status)) break
+      if (job && ['completed', 'failed'].includes(job.status)) break
     }
   }
   const job = detail.recentJobs.find((item) => item.id === edit.data.jobId)
   check('edit job binds immutable base', job?.mode === 'edit' && job.baseVersionId === 'v1' && job.baseFingerprint === v1.fingerprint, job)
-  check('v1 remains active before promotion', detail.summary.activeVersionId === 'v1', detail.summary)
+  check('v1 remains active until a successful host-owned replacement completes', expectFailure ? detail.summary.activeVersionId === 'v1' : job?.status === 'completed', { job, summary: detail.summary })
   const providerLog = await readFile(logPath, 'utf8')
   check('ForgeAgent edit calls are present', /ForgeReadSpec/.test(providerLog) && /ForgeWriteFile/.test(providerLog) && /ForgeRunCheck/.test(providerLog) && /ForgeSubmitCandidate/.test(providerLog))
 
@@ -272,24 +272,11 @@ try {
     const afterExecution = await page.evaluate(() => window.joker.generatedTools.get('summarize-task-json'))
     check('v1 remains executable after failed edit', afterExecution.success && afterExecution.data.recentInvocations.some((invocation) => invocation.versionId === 'v1' && invocation.status === 'finished' && invocation.outcome === 'succeeded'), afterExecution)
   } else {
-    check('edit reaches awaiting policy', job?.status === 'awaiting-policy', job)
-    const promoted = await page.evaluate(
-      ({ jobId, jobRevision, registryRevision, fingerprint }) => window.joker.generatedTools.promote({
-        jobId,
-        expectedJobRevision: jobRevision,
-        registryRevision,
-        expectedCandidateFingerprint: fingerprint
-      }),
-      {
-        jobId: job.id,
-        jobRevision: job.jobRevision,
-        registryRevision: detail.registryRevision,
-        fingerprint: job.candidateFingerprint
-      }
-    )
-    check('real Electron promotion succeeds', promoted.success && promoted.data.action === 'promoted', promoted)
-    const after = await page.evaluate(() => window.joker.generatedTools.get('summarize-task-json'))
-    check('v2 is active and capability revision increments', after.success && after.data.summary.activeVersionId !== 'v1' && after.data.capabilityRevision === 2, after)
+    check('edit reaches completed host-owned activation', job?.status === 'completed', job)
+    const after = detail.summary.activeVersionId !== 'v1'
+      ? { success: true, data: detail }
+      : await page.evaluate(() => window.joker.generatedTools.get('summarize-task-json'))
+    check('active replacement completes and capability revision increments', after.success && after.data.summary.activeVersionId !== 'v1' && after.data.capabilityRevision === 2, after)
     const v2 = after.success ? after.data.versions.find((version) => version.id === after.data.summary.activeVersionId) : undefined
     check('v1 remains immutable and edit diff is recorded', after.success && after.data.versions.some((version) => version.id === 'v1' && version.fingerprint === v1.fingerprint) && v2?.editDiff?.baseVersionId === 'v1' && v2.editDiff.sourceChanged === true && v2.editDiff.permissions.expanded === false, after)
   }

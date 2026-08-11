@@ -15,6 +15,7 @@ interface PendingSend {
   resolve: () => void
   reject: (error: Error) => void
   abortListener?: () => void
+  deadlineTimer?: NodeJS.Timeout
 }
 
 interface RunCounters {
@@ -32,6 +33,7 @@ export interface StreamTransportOptions {
   terminalReserve?: number
   maxPending?: number
   maxCompletedRuns?: number
+  terminalSendTimeoutMs?: number
   postMessage: (message: StreamEventEnvelope | { type: 'stream:flow'; flow: StreamFlowState }) => void
   onFlow?: (flow: StreamFlowState) => void
 }
@@ -44,6 +46,9 @@ export interface StreamTransportSnapshot {
   blockedPending: number
   inFlight: number
   availableCredit: number
+  lastAckAt?: number
+  blockedSince?: number
+  maxBlockedDurationMs: number
   maxQueueDepth: number
   maxInFlight: number
   sentCount: number
@@ -74,6 +79,7 @@ export class StreamTransport {
   private readonly terminalReserve: number
   private readonly maxPending: number
   private readonly maxCompletedRuns: number
+  private readonly terminalSendTimeoutMs: number
   private readonly postMessage: StreamTransportOptions['postMessage']
   private readonly onFlow?: StreamTransportOptions['onFlow']
   private readonly pending: PendingSend[] = []
@@ -93,6 +99,9 @@ export class StreamTransport {
   private drainCountValue = 0
   private wasNonEmpty = false
   private lastRunId: string | undefined
+  private lastAckAtValue: number | undefined
+  private blockedSinceValue: number | undefined
+  private maxBlockedDurationMsValue = 0
 
   constructor(options: StreamTransportOptions) {
     const requestedHwm = Math.floor(options.highWaterMark ?? STREAM_HIGH_WATER_MARK)
@@ -101,6 +110,7 @@ export class StreamTransport {
     this.terminalReserve = Math.max(1, Math.min(this.highWaterMark - 1, requestedReserve))
     this.maxPending = Math.max(1, Math.floor(options.maxPending ?? this.highWaterMark))
     this.maxCompletedRuns = Math.max(0, Math.floor(options.maxCompletedRuns ?? 64))
+    this.terminalSendTimeoutMs = Math.max(1, Math.floor(options.terminalSendTimeoutMs ?? 2_000))
     this.postMessage = options.postMessage
     this.onFlow = options.onFlow
   }
@@ -121,6 +131,22 @@ export class StreamTransport {
 
     return new Promise<void>((resolve, reject) => {
       const item: PendingSend = { event, runId, terminal, signal, resolve, reject }
+      if (terminal) {
+        item.deadlineTimer = setTimeout(() => {
+          const pendingIndex = this.pending.indexOf(item)
+          const blockedIndex = this.blocked.indexOf(item)
+          if (pendingIndex >= 0) this.pending.splice(pendingIndex, 1)
+          if (blockedIndex >= 0) this.blocked.splice(blockedIndex, 1)
+          if (pendingIndex >= 0 || blockedIndex >= 0) {
+            this.removeAbortListener(item)
+            reject(new Error(`Terminal stream send timed out after ${this.terminalSendTimeoutMs}ms`))
+            this.updateBlockedDuration()
+            this.pump()
+            this.maybeDrain(runId)
+          }
+        }, this.terminalSendTimeoutMs)
+        item.deadlineTimer.unref?.()
+      }
       if (signal && !terminal) {
         const onAbort = (): void => {
           const pendingIndex = this.pending.indexOf(item)
@@ -146,6 +172,7 @@ export class StreamTransport {
           return
         }
         this.blocked.push(item)
+        this.blockedSinceValue ??= Date.now()
         this.blockedSendsValue += 1
         this.counter(runId).blockedSends += 1
         this.emitFlow('blocked', runId)
@@ -163,10 +190,12 @@ export class StreamTransport {
     const sent = this.inFlight.get(seq)
     if (!sent || sent.runId !== runId) return false
     this.inFlight.delete(seq)
+    this.lastAckAtValue = Date.now()
     this.ackCountValue += 1
     this.counter(runId).ackCount += 1
     this.emitFlow('ack', runId)
     this.promoteBlocked()
+    this.updateBlockedDuration()
     this.pump()
     this.maybeDrain(runId)
     this.pruneCompletedRuns()
@@ -176,6 +205,7 @@ export class StreamTransport {
   cancelRun(runId: string, options: { drain?: boolean } = {}): void {
     this.rejectMatching(this.pending, runId, 'Stream run cancelled')
     this.rejectMatching(this.blocked, runId, 'Stream run cancelled')
+    this.updateBlockedDuration()
     // Already-posted envelopes remain in-flight so their renderer ACKs are
     // still valid. Endpoint retirement passes drain:false because that
     // renderer document no longer owns the queue lifecycle.
@@ -197,6 +227,7 @@ export class StreamTransport {
       this.removeAbortListener(item)
       item.reject(error)
     }
+    this.updateBlockedDuration()
     this.inFlight.clear()
     this.emitFlow('closed')
   }
@@ -210,6 +241,12 @@ export class StreamTransport {
       blockedPending: this.blocked.length,
       inFlight: this.inFlight.size,
       availableCredit: Math.max(0, this.credit - this.inFlight.size),
+      lastAckAt: this.lastAckAtValue,
+      blockedSince: this.blockedSinceValue,
+      maxBlockedDurationMs: Math.max(
+        this.maxBlockedDurationMsValue,
+        this.blockedSinceValue === undefined ? 0 : Date.now() - this.blockedSinceValue
+      ),
       maxQueueDepth: this.maxQueueDepthValue,
       maxInFlight: this.maxInFlightValue,
       sentCount: this.sentCountValue,
@@ -250,9 +287,11 @@ export class StreamTransport {
       this.updateDepth(item.runId)
       try {
         this.postMessage({ type: 'stream:event', seq, runId: item.runId, event: item.event })
+        this.clearDeadline(item)
         item.resolve()
       } catch (error) {
         this.inFlight.delete(seq)
+        this.clearDeadline(item)
         item.reject(toError(error, 'Failed to post stream event'))
       }
     }
@@ -271,6 +310,7 @@ export class StreamTransport {
       this.counter(item.runId).resumedCount += 1
       this.emitFlow('resumed', item.runId)
     }
+    this.updateBlockedDuration()
   }
 
   private maybeDrain(runId?: string): void {
@@ -328,6 +368,23 @@ export class StreamTransport {
   private removeAbortListener(item: PendingSend): void {
     if (item.signal && item.abortListener) item.signal.removeEventListener('abort', item.abortListener)
     item.abortListener = undefined
+    this.clearDeadline(item)
+  }
+
+  private clearDeadline(item: PendingSend): void {
+    if (item.deadlineTimer) clearTimeout(item.deadlineTimer)
+    item.deadlineTimer = undefined
+  }
+
+  private updateBlockedDuration(): void {
+    if (this.blocked.length > 0) {
+      this.blockedSinceValue ??= Date.now()
+      return
+    }
+    if (this.blockedSinceValue !== undefined) {
+      this.maxBlockedDurationMsValue = Math.max(this.maxBlockedDurationMsValue, Date.now() - this.blockedSinceValue)
+      this.blockedSinceValue = undefined
+    }
   }
 
   private emitFlow(event: StreamFlowState['event'], runId?: string): void {

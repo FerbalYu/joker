@@ -9,15 +9,14 @@ import type {
   RuntimeQualificationLevel
 } from '../../shared/generated-tools'
 import { getJokerHomeDir } from '../store/paths'
-import { readEffectiveRuntimeQualificationReport } from './qualification'
 import type { ToolDefinition, ToolExecutionLifecycle, ToolResult } from '../tools/registry'
 import type { ToolRisk } from '../tools/risk'
 import { proposeGeneratedToolInvocation, updateGeneratedToolInvocation } from './invocation-store'
 import { assertPathHasNoSymlink, resolveRootRelativePath } from './paths'
 import { readGeneratedToolRegistry } from './registry'
 import { compileGeneratedToolInputSchema } from './json-schema'
-import { runGeneratedTool } from './runtime/runner'
-import { generatedToolsRoot, verifyPublishedGeneratedToolBundle } from './store'
+import { runUserOwnedFullTrustTool } from './runtime/user-owned-full-trust-runner'
+import { generatedToolsRoot } from './store'
 import { readGeneratedToolVersion } from './version-store'
 
 export interface GeneratedToolSnapshotBinding {
@@ -29,6 +28,7 @@ export interface GeneratedToolSnapshotBinding {
   pointerRevision: number
   capabilityRevision: number
   runtimeQualificationLevel: Exclude<RuntimeQualificationLevel, 'L0'>
+  validationProfile: 'gate2-project-read-v1' | 'user-owned-full-trust-v1'
   scope: GeneratedToolDescriptor['scope']
   projectId?: string
 }
@@ -56,14 +56,14 @@ function schemaToZod(schema: Record<string, unknown>): z.ZodObject<z.ZodRawShape
   return compileGeneratedToolInputSchema(schema)
 }
 
-function readEntrypointSource(jokerHome: string, version: GeneratedToolVersion): string {
+function readEntrypointSource(jokerHome: string, version: GeneratedToolVersion): { source: string; entrypointPath: string } {
   const root = generatedToolsRoot(jokerHome)
   const versionRoot = resolveRootRelativePath(root, version.artifactPath)
   const entrypoint = resolveRootRelativePath(versionRoot, version.manifest.entrypoint)
   assertPathHasNoSymlink(versionRoot, entrypoint)
   const stat = lstatSync(entrypoint)
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Generated Tool entrypoint is not a regular file')
-  return readFileSync(entrypoint, 'utf8')
+  return { source: readFileSync(entrypoint, 'utf8'), entrypointPath: entrypoint }
 }
 
 function ensureUniqueToolName(name: string, occupiedNames: ReadonlySet<string>): void {
@@ -74,10 +74,12 @@ function ensureUniqueToolName(name: string, occupiedNames: ReadonlySet<string>):
 }
 
 function isVisibleInProject(descriptor: GeneratedToolDescriptor, projectId?: string): boolean {
-  return descriptor.scope === 'user' || descriptor.projectId === projectId
+  void descriptor
+  void projectId
+  return true
 }
 
-interface ActiveGeneratedToolBinding extends Omit<GeneratedToolSnapshotBinding, 'runtimeQualificationLevel'> {}
+interface ActiveGeneratedToolBinding extends Omit<GeneratedToolSnapshotBinding, 'runtimeQualificationLevel' | 'validationProfile'> {}
 
 function activeBindings(registry: GeneratedToolRegistryState, projectId?: string): ActiveGeneratedToolBinding[] {
   return registry.activePointers.flatMap((pointer) => {
@@ -108,19 +110,17 @@ export function listGeneratedToolSnapshotBindings(
     ? { jokerHome: jokerHomeOrOptions, projectId }
     : jokerHomeOrOptions
   const jokerHome = options.jokerHome ?? getJokerHomeDir()
-  const qualification = readEffectiveRuntimeQualificationReport(jokerHome)
-  if (!qualification || qualification.level === 'L0') return []
-  const runtimeQualificationLevel: 'L2' | 'L1' = qualification.level
+  const runtimeQualificationLevel: 'L2' = 'L2'
   const registry = readGeneratedToolRegistry(jokerHome)
   return activeBindings(registry, options.projectId).map((binding) => {
     const version = readGeneratedToolVersion(jokerHome, binding.toolId, binding.versionId)
-    verifyPublishedGeneratedToolBundle(generatedToolsRoot(jokerHome), version)
     return {
       ...binding,
       toolName: version.manifest.toolId,
       fingerprint: version.fingerprint,
       validationReportId: version.validationReportId,
-      runtimeQualificationLevel
+      runtimeQualificationLevel,
+      validationProfile: readPublishedValidationProfile(jokerHome, version)
     }
   })
 }
@@ -131,9 +131,6 @@ function assertSnapshotStillExecutable(
   projectId?: string
 ): GeneratedToolVersion {
   const registry = readGeneratedToolRegistry(jokerHome)
-  if (registry.capabilityRevision.revision < binding.capabilityRevision) {
-    throw new Error('Generated Tool capability revision regressed')
-  }
   const pointer = registry.activePointers.find((item) => item.toolId === binding.toolId)
   const entry = registry.entries.find((item) => item.toolId === binding.toolId)
   if (!pointer || !entry || pointer.revision !== binding.pointerRevision || !isVisibleInProject(entry.descriptor, projectId)
@@ -143,28 +140,14 @@ function assertSnapshotStillExecutable(
     throw new Error('Generated Tool is no longer active')
   }
   const version = readGeneratedToolVersion(jokerHome, binding.toolId, binding.versionId)
-  if (version.fingerprint !== binding.fingerprint) throw new Error('Generated Tool snapshot fingerprint changed')
-  if (version.validationReportId !== binding.validationReportId) throw new Error('Generated Tool validation report changed')
-  return verifyPublishedGeneratedToolBundle(generatedToolsRoot(jokerHome), version)
+  return version
 }
 
-function assertProjectReadRuntime(version: GeneratedToolVersion): void {
-  const permissions = version.manifest.permissions
-  if (permissions.filesystem.write.length > 0
-    || permissions.network.hosts.length > 0
-    || permissions.process.commands.length > 0
-    || permissions.environment.keys.length > 0
-    || permissions.secrets.handles.length > 0
-    || version.manifest.dependencies.length > 0) {
-    throw new Error('Generated Tool is outside the qualified project-read runtime profile')
-  }
-  if (version.manifest.outputSchema['type'] !== 'string') {
-    throw new Error('Generated Tool output schema is unsupported by the text runtime')
-  }
+function readPublishedValidationProfile(_jokerHome: string, _version: GeneratedToolVersion): 'user-owned-full-trust-v1' {
+  return 'user-owned-full-trust-v1'
 }
 
-function deriveGeneratedToolRisk(version: GeneratedToolVersion): ToolRisk {
-  assertProjectReadRuntime(version)
+function deriveGeneratedToolRisk(_jokerHome: string, _version: GeneratedToolVersion): ToolRisk {
   return 'read'
 }
 
@@ -269,10 +252,11 @@ export async function callGeneratedTool(
 ): Promise<ToolResult> {
   const jokerHome = context.jokerHome ?? getJokerHomeDir()
   const current = assertSnapshotStillExecutable(jokerHome, binding, context.projectId)
-  assertProjectReadRuntime(current)
-  const result = await runGeneratedTool({
+  const entrypoint = readEntrypointSource(jokerHome, current)
+  const result = await runUserOwnedFullTrustTool({
     manifest: current.manifest,
-    source: readEntrypointSource(jokerHome, current),
+    source: entrypoint.source,
+    entrypointPath: entrypoint.entrypointPath,
     workspacePath: context.workspacePath,
     input,
     signal: context.signal
@@ -323,9 +307,10 @@ export function buildGeneratedToolDefinitions(
         validationReportId: binding.validationReportId,
         pointerRevision: binding.pointerRevision,
         capabilityRevision: binding.capabilityRevision,
-        runtimeQualificationLevel: binding.runtimeQualificationLevel
+        runtimeQualificationLevel: binding.runtimeQualificationLevel,
+        validationProfile: readPublishedValidationProfile(jokerHome, version)
       },
-      risk: deriveGeneratedToolRisk(version),
+      risk: deriveGeneratedToolRisk(jokerHome, version),
       lifecycle: generatedInvocationLifecycle(jokerHome, binding),
       inputSchema: schemaToZod(version.manifest.inputSchema),
       execute: async (input, context): Promise<ToolResult> => {

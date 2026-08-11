@@ -5,7 +5,7 @@ import { formatSafeError } from '../agent/diagnostics'
 import type { ToolRisk } from './risk'
 
 export type ToolAuditStage = 'proposed' | 'approval_resolved' | 'started' | 'finished'
-export type ToolAuditStatus = 'pending' | 'allowed' | 'denied' | 'success' | 'error'
+export type ToolAuditStatus = 'pending' | 'allowed' | 'denied' | 'success' | 'error' | 'cancelled' | 'timed-out'
 
 export interface ToolAuditEvent {
   timestamp: string

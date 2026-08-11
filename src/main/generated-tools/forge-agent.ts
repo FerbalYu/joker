@@ -4,6 +4,7 @@ import { streamUsageFromModelUsage } from '../agent/usage'
 import { createLanguageModel } from '../providers'
 import { loadConfig, resolveActiveModel } from '../store/config'
 import { buildToolSet, type ToolContext } from '../tools/registry'
+import { readForgeJob } from './forge-job-store'
 import { buildForgeAgentTools, type BuildForgeAgentToolsOptions } from './forge-tools'
 
 const MAX_FORGE_AGENT_STEPS = 20
@@ -25,6 +26,8 @@ export async function runForgeAgent(options: ForgeAgentRunOptions): Promise<Forg
   if (options.toolContext.abortSignal?.aborted) throw new Error('Aborted')
   const maxSteps = Math.min(Math.max(options.maxSteps ?? MAX_FORGE_AGENT_STEPS, 1), MAX_FORGE_AGENT_STEPS)
   const model = options.model ?? createLanguageModel(resolveActiveModel(loadConfig()))
+  const job = readForgeJob(options.jokerHome, options.jobId)
+  if (!job) throw new Error(`ForgeJob not found: ${options.jobId}`)
   const tools = buildForgeAgentTools(options)
   const forgeContext: ToolContext = {
     ...options.toolContext,
@@ -39,7 +42,8 @@ export async function runForgeAgent(options: ForgeAgentRunOptions): Promise<Forg
       'You are the dedicated ToolForge manufacturing agent.',
       'You may operate only through the provided Forge* tools in the current job-scoped workspace.',
       'You have no Bash, Git, network, MCP, environment, secret, Registry, Policy, Promote, or arbitrary workspace tools.',
-      'Build only an ES2020 quickjs-wasm Generated Tool matching ForgeReadSpec.',
+      'Build a Node.js node-child-process Generated Tool (runtime version 1) matching ForgeReadSpec. The tool runs with the desktop user account permissions.',
+      'Store implementation files under source/. If dist/index.js is a CommonJS wrapper, it must require an existing file such as ../source/index.js; never reference a nonexistent ../src path. Define operation-specific inputs so retrieval ignores irrelevant write-only fields supplied by a model.',
       'Use ForgeRunCheck before ForgeSubmitCandidate.',
       'Submission creates an immutable untrusted candidate only. Never claim validation, trust, promotion, activation, or completion of the original user task.'
     ].join(' '),

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AppConfig, AssistantSegment, ChatMessage, ContextUsage, StreamUsage, ToolCallInfo, ApprovalRequest, SessionSummary, ReasoningLevel, ProjectEntry, RunMode, PendingUserMessage, SubagentActivity } from '@shared/types'
+import type { AppConfig, AssistantSegment, ChatMessage, ContextUsage, StreamFlowState, StreamUsage, ToolCallInfo, ApprovalRequest, SessionSummary, ReasoningLevel, ProjectEntry, RunMode, PendingUserMessage, SubagentActivity } from '@shared/types'
 import { getInitialLanguage, persistLanguage, type Language } from './i18n'
 import { initialRunActivityState, runActivityReducer, type RunActivityAction, type RunActivityState } from './run-activity'
 import {
@@ -27,6 +27,7 @@ export interface SessionRuntimeState {
   pendingToolCalls: ToolCallInfo[]
   subagentActivities: SubagentActivity[]
   pendingUserMessages: PendingUserMessage[]
+  streamFlow: StreamFlowState | null
   runActivity: RunActivityState
 }
 
@@ -69,10 +70,12 @@ interface AppState extends SessionRuntimeState {
   setActiveRunMode: (sessionId: string, mode: RunMode) => void
   setStreamRunMode: (sessionId: string, mode: RunMode | undefined) => void
   addPendingToolCall: (sessionId: string, tc: ToolCallInfo) => void
-  resolveToolCall: (sessionId: string, toolCallId: string, toolName: string, output: string, metadata?: Record<string, unknown>) => void
-  failToolCall: (sessionId: string, toolCallId: string, toolName: string, error: string) => void
+  resolveToolCall: (sessionId: string, toolCallId: string, toolName: string, output: string, metadata?: Record<string, unknown>, timing?: Partial<ToolCallInfo>) => void
+  failToolCall: (sessionId: string, toolCallId: string, toolName: string, error: string, status?: Extract<ToolCallInfo['status'], 'error' | 'cancelled' | 'timed-out'>, timing?: Partial<ToolCallInfo>) => void
+  updateToolStatus: (sessionId: string, update: ToolCallInfo) => void
   failRunningToolCalls: (sessionId: string, error: string) => void
   updateSubagentActivity: (sessionId: string, activity: SubagentActivity) => void
+  setStreamFlow: (sessionId: string, flow: StreamFlowState | null) => void
   setPendingUserMessages: (sessionId: string, messages: PendingUserMessage[]) => void
   dispatchRunActivity: (sessionId: string, action: RunActivityAction) => void
   addApproval: (req: ApprovalRequest) => void
@@ -112,6 +115,7 @@ function createSessionRuntime(activeRunMode: RunMode = 'chat', reasoningLevel: R
     pendingToolCalls: [],
     subagentActivities: [],
     pendingUserMessages: [],
+    streamFlow: null,
     runActivity: { ...initialRunActivityState, toolCalls: [] }
   }
 }
@@ -281,11 +285,11 @@ export const useStore = create<AppState>((set, get) => ({
       streamText: runtime.streamText
     }
   })),
-  resolveToolCall: (sessionId, toolCallId, toolName, output, metadata) => set((state) => updateRuntime(state, sessionId, (runtime) => {
+  resolveToolCall: (sessionId, toolCallId, toolName, output, metadata, timing) => set((state) => updateRuntime(state, sessionId, (runtime) => {
     const streamSegments = updateToolInSegments(
       runtime.streamSegments,
-      (tc) => tc.status === 'running' && (tc.toolCallId === toolCallId || (!tc.toolCallId && tc.toolName === toolName)),
-      (tc) => ({ ...tc, output, metadata, status: 'done' as const })
+      (tc) => tc.toolCallId === toolCallId || (!tc.toolCallId && tc.toolName === toolName),
+      (tc) => ({ ...tc, ...timing, output, metadata, status: 'done' as const })
     )
     return {
       ...runtime,
@@ -294,11 +298,17 @@ export const useStore = create<AppState>((set, get) => ({
       streamText: runtime.streamText
     }
   })),
-  failToolCall: (sessionId, toolCallId, toolName, error) => set((state) => updateRuntime(state, sessionId, (runtime) => {
+  failToolCall: (sessionId, toolCallId, toolName, error, status = 'error', timing) => set((state) => updateRuntime(state, sessionId, (runtime) => {
     const streamSegments = updateToolInSegments(
       runtime.streamSegments,
-      (tc) => tc.status === 'running' && (tc.toolCallId === toolCallId || (!tc.toolCallId && tc.toolName === toolName)),
-      (tc) => ({ ...tc, output: error, status: 'error' as const })
+      (tc) => tc.toolCallId === toolCallId || (!tc.toolCallId && tc.toolName === toolName),
+      (tc) => ({
+        ...tc,
+        ...timing,
+        output: error,
+        error,
+        status: tc.status === 'timed-out' || tc.status === 'cancelled' || tc.status === 'denied' ? tc.status : status
+      })
     )
     return {
       ...runtime,
@@ -306,6 +316,18 @@ export const useStore = create<AppState>((set, get) => ({
       pendingToolCalls: flattenToolCalls(streamSegments),
       streamText: runtime.streamText
     }
+  })),
+  updateToolStatus: (sessionId, update) => set((state) => updateRuntime(state, sessionId, (runtime) => {
+    const streamSegments = updateToolInSegments(
+      runtime.streamSegments,
+      (tc) => (update.toolCallId !== undefined && tc.toolCallId === update.toolCallId) || (!tc.toolCallId && tc.toolName === update.toolName),
+      (tc) => {
+        if (tc.status !== 'running' && update.status === 'running') return tc
+        if (tc.updatedAt !== undefined && update.updatedAt !== undefined && update.updatedAt < tc.updatedAt) return tc
+        return { ...tc, ...update, input: Object.keys(update.input).length > 0 ? update.input : tc.input }
+      }
+    )
+    return { ...runtime, streamSegments, pendingToolCalls: flattenToolCalls(streamSegments) }
   })),
   failRunningToolCalls: (sessionId, error) => set((state) => updateRuntime(state, sessionId, (runtime) => {
     const streamSegments = updateRunningToolsInSegments(runtime.streamSegments, (tc) => ({
@@ -328,6 +350,7 @@ export const useStore = create<AppState>((set, get) => ({
       : [...runtime.subagentActivities, activity]
     return { ...runtime, subagentActivities: subagentActivities.slice(-8) }
   })),
+  setStreamFlow: (sessionId, streamFlow) => set((state) => updateRuntime(state, sessionId, (runtime) => ({ ...runtime, streamFlow }))),
 
   setPendingUserMessages: (sessionId, pendingUserMessages) => set((state) => updateRuntime(state, sessionId, (runtime) => ({ ...runtime, pendingUserMessages }))),
   dispatchRunActivity: (sessionId, action) => set((state) => updateRuntime(state, sessionId, (runtime) => ({

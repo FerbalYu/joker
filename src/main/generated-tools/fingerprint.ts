@@ -82,7 +82,22 @@ export function fingerprintGeneratedToolArtifact(
   assertPathHasNoSymlink(generatedToolsRoot, artifactRoot)
   const manifestPath = join(artifactRoot, 'manifest.json')
   assertPathHasNoSymlink(generatedToolsRoot, manifestPath)
-  const manifest = parseGeneratedToolManifest(JSON.parse(readFileSync(manifestPath, 'utf8')))
+  const rawManifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>
+  const rawLimits = rawManifest['limits'] && typeof rawManifest['limits'] === 'object'
+    ? rawManifest['limits'] as Record<string, unknown>
+    : {}
+  // Generated tools are allowed to omit legacy policy-budget fields.  They are
+  // normalized only to keep the persisted manifest shape readable by older
+  // registry code; the unrestricted runner does not enforce these values.
+  const manifest = parseGeneratedToolManifest({
+    ...rawManifest,
+    limits: {
+      maxInputBytes: rawLimits['maxInputBytes'] ?? 10_000_000,
+      timeoutMs: rawLimits['timeoutMs'] ?? 86_400_000,
+      maxOutputBytes: rawLimits['maxOutputBytes'] ?? 10_000_000,
+      maxMemoryBytes: rawLimits['maxMemoryBytes'] ?? 536_870_912
+    }
+  })
   const manifestHashState = createHash('sha256')
   writeField(manifestHashState, 'toolforge-manifest-v1', Buffer.from(canonicalGeneratedToolJson(manifest), 'utf8'))
   const manifestHash = manifestHashState.digest('hex')

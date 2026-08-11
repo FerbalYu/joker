@@ -59,15 +59,15 @@ const manifest = {
   limits: { timeoutMs: 500, maxInputBytes: 1024, maxOutputBytes: 4096, maxMemoryBytes: 32_000_000 }
 }
 
-function createJob(home: string, id: string): ForgeJob {
+function createJob(home: string, id: string, scope: 'project' | 'user' = 'project'): ForgeJob {
   const spec: ForgeJob['spec'] = {
     id: suite.toolId,
     displayName: manifest.displayName,
     goal: 'Read the project task fixture and return a summary.',
     reason: 'Capability missing during the task.',
     requestedBy: { sessionId: 'session-1', runId: 'run-1', userMessageId: 'message-1' },
-    scope: 'project',
-    projectId: 'project-1',
+    scope,
+    ...(scope === 'project' ? { projectId: 'project-1' } : {}),
     inputContract: manifest.inputSchema,
     outputContract: manifest.outputSchema,
     permissions,
@@ -114,10 +114,10 @@ function maker(): ForgeServiceMaker {
   }
 }
 
-async function setup() {
+async function setup(options: { scope?: 'project' | 'user' } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'joker-promotion-service-'))
   installRuntimeQualificationFixture(home)
-  const job = createJob(home, 'job-promotion-service')
+  const job = createJob(home, 'job-promotion-service', options.scope)
   const forge = new ForgeService({ jokerHome: home, maker: maker(), now: () => 5 })
   forge.start()
   await forge.waitForIdle()
@@ -127,8 +127,39 @@ async function setup() {
   return { home, job: awaiting! }
 }
 
+void test('PromotionService advance derives authoritative CAS inputs and binds explicit approval to GeneratedToolEnable', async () => {
+  const { home, job } = await setup({ scope: 'user' })
+  try {
+    installRuntimeQualificationFixture(home, 'L1')
+    const scheduler = new ContinuationScheduler({ jokerHome: home, now: () => 10, createId: () => 'advance-dispatch' })
+    setDefaultContinuationScheduler(scheduler)
+    const service = new PromotionService({ jokerHome: home, now: () => 10 })
+    let request: { toolName: string } | undefined
+    const result = await service.advance(job.id, {
+      requestApproval: async (approvalRequest) => {
+        request = approvalRequest
+        return {
+          requestId: 'advance-request',
+          webContentsId: 17,
+          sessionId: 'session-1',
+          runId: 'run-1',
+          toolName: 'GeneratedToolEnable',
+          requestHash: 'e'.repeat(64),
+          approvedAt: 11
+        }
+      }
+    })
+    assert.equal(request?.toolName, 'GeneratedToolEnable')
+    assert.equal(result.action, 'promoted')
+    assert.equal(result.job.status, 'completed')
+  } finally {
+    setDefaultContinuationScheduler(null)
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 void test('PromotionService deny writes no receipt and remains retryable', async () => {
-  const { home, job } = await setup()
+  const { home, job } = await setup({ scope: 'user' })
   try {
     installRuntimeQualificationFixture(home, 'L1')
     const scheduler = new ContinuationScheduler({ jokerHome: home, now: () => 10, createId: () => 'retry-dispatch' })
@@ -160,7 +191,7 @@ void test('PromotionService deny writes no receipt and remains retryable', async
         webContentsId: 17,
         sessionId: 'session-1',
         runId: 'run-1',
-        toolName: 'ToolPromote',
+        toolName: 'GeneratedToolEnable',
         requestHash: 'd'.repeat(64),
         approvedAt: 11
       })
@@ -175,7 +206,7 @@ void test('PromotionService deny writes no receipt and remains retryable', async
 })
 
 void test('PromotionService reads v1 receipt for recovery but requires a fresh v2 grant before pointer switch', async () => {
-  const { home, job } = await setup()
+  const { home, job } = await setup({ scope: 'user' })
   try {
     installRuntimeQualificationFixture(home, 'L1')
     const scheduler = new ContinuationScheduler({ jokerHome: home, now: () => 10, createId: () => 'v1-dispatch' })

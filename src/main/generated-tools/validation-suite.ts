@@ -1,19 +1,16 @@
 import { createHash } from 'node:crypto'
 
-import type { GeneratedToolCandidate } from '../../shared/generated-tools'
+import type {
+  GeneratedToolCandidate,
+  GeneratedToolSpec,
+  GeneratedToolValidationCase,
+  GeneratedToolValidationPlan
+} from '../../shared/generated-tools'
 import { canonicalGeneratedToolJson } from '../../shared/generated-tools-schema'
 
-export type GeneratedToolValidationExpectation =
-  | { outcome: 'succeeded'; output: unknown }
-  | { outcome: 'tool-failed'; error: unknown }
+export type { GeneratedToolValidationCase, GeneratedToolValidationExpectation } from '../../shared/generated-tools'
 
-export interface GeneratedToolValidationCase {
-  id: string
-  input: Record<string, unknown>
-  workspaceFiles: Record<string, string>
-  expected: GeneratedToolValidationExpectation
-}
-
+/** Legacy host suite shape retained only to compile existing fixtures into generic plans. */
 export interface GeneratedToolValidationSuite {
   id: string
   toolId: string
@@ -51,20 +48,8 @@ export const ELECTRON_VERTICAL_SLICE_VALIDATION_SUITE: GeneratedToolValidationSu
   id: 'electron-vertical-slice-task-summary-v1',
   toolId: 'electron-vertical-slice-task-summary',
   cases: [
-    {
-      id: 'success',
-      input: {},
-      workspaceFiles: {
-        'fixtures/tasks.json': JSON.stringify([{ status: 'open' }, { status: 'open' }, { status: 'done' }])
-      },
-      expected: { outcome: 'succeeded', output: 'open: 2\ndone: 1' }
-    },
-    {
-      id: 'invalid-json',
-      input: {},
-      workspaceFiles: { 'fixtures/tasks.json': '{invalid json' },
-      expected: { outcome: 'tool-failed', error: { message: 'invalid-task-json' } }
-    }
+    { id: 'success', input: {}, workspaceFiles: { 'fixtures/tasks.json': JSON.stringify([{ status: 'open' }, { status: 'open' }, { status: 'done' }]) }, expected: { outcome: 'succeeded', output: 'open: 2\ndone: 1' } },
+    { id: 'invalid-json', input: {}, workspaceFiles: { 'fixtures/tasks.json': '{invalid json' }, expected: { outcome: 'tool-failed', error: { message: 'invalid-task-json' } } }
   ]
 }
 
@@ -89,10 +74,8 @@ export function registerGeneratedToolValidationSuite(suite: GeneratedToolValidat
   suites.set(suite.id, structuredClone(suite))
 }
 
-export function resolveGeneratedToolValidationSuite(toolId: string): {
-  suite: GeneratedToolValidationSuite
-  hash: string
-} {
+/** @deprecated Use compileGeneratedToolValidationPlan for new validation contracts. */
+export function resolveGeneratedToolValidationSuite(toolId: string): { suite: GeneratedToolValidationSuite; hash: string } {
   const matches = [...suites.values()].filter((suite) => suite.toolId === toolId)
   if (matches.length === 0) throw new Error(`No host-owned validation suite is registered for Generated Tool: ${toolId}`)
   if (matches.length > 1) throw new Error(`Generated Tool validation suite is ambiguous: ${toolId}`)
@@ -100,14 +83,47 @@ export function resolveGeneratedToolValidationSuite(toolId: string): {
   return { suite, hash: fingerprintGeneratedToolValidationSuite(suite) }
 }
 
-export function getGeneratedToolValidationSuite(candidate: Pick<GeneratedToolCandidate, 'validationSuiteId' | 'validationSuiteHash' | 'toolId'>): GeneratedToolValidationSuite {
-  const suite = suites.get(candidate.validationSuiteId)
-  if (!suite) throw new Error(`Unknown Generated Tool validation suite: ${candidate.validationSuiteId}`)
-  if (suite.toolId !== candidate.toolId) throw new Error('Validation suite toolId does not match candidate')
-  if (fingerprintGeneratedToolValidationSuite(suite) !== candidate.validationSuiteHash) throw new Error('Validation suite hash does not match candidate')
-  return structuredClone(suite)
+function legacyCasesFor(spec: GeneratedToolSpec): { cases: GeneratedToolValidationCase[]; fromRegisteredSuite: boolean } {
+  const matches = [...suites.values()].filter((suite) => suite.toolId === spec.id)
+  if (matches.length === 1) return { cases: structuredClone(matches[0].cases), fromRegisteredSuite: true }
+  if (matches.length > 1) throw new Error(`Generated Tool validation suite is ambiguous: ${spec.id}`)
+  return {
+    cases: spec.examples.map((example, index) => ({
+      id: `legacy-example-${index + 1}`,
+      input: structuredClone(example.input),
+      workspaceFiles: {},
+      expected: { outcome: 'succeeded', output: example.expected }
+    })),
+    fromRegisteredSuite: false
+  }
 }
 
+/** Compiles explicit generic cases or legacy suites into the immutable candidate plan. */
+export function compileGeneratedToolValidationPlan(spec: GeneratedToolSpec): GeneratedToolValidationPlan {
+  const legacy = legacyCasesFor(spec)
+  const cases = spec.validationCases && spec.validationCases.length > 0
+    ? structuredClone(spec.validationCases)
+    : legacy.cases
+  if (cases.length === 0) throw new Error('Generated Tool validation plan requires at least one case')
+  if (new Set(cases.map((item) => item.id)).size !== cases.length) throw new Error('Generated Tool validation case ids must be unique')
+  if (!cases.some((item) => item.expected.outcome === 'succeeded')) {
+    throw new Error('Generated Tool validation plan requires at least one expected-success case')
+  }
+  return { schemaVersion: 1, id: 'host-compiled-validation-plan-v1', cases }
+}
+
+export function fingerprintGeneratedToolValidationPlan(plan: GeneratedToolValidationPlan): string {
+  return createHash('sha256').update(canonicalGeneratedToolJson(plan)).digest('hex')
+}
+
+export function getGeneratedToolValidationPlan(candidate: Pick<GeneratedToolCandidate, 'validationPlan' | 'validationPlanHash'>): GeneratedToolValidationPlan {
+  if (fingerprintGeneratedToolValidationPlan(candidate.validationPlan) !== candidate.validationPlanHash) {
+    throw new Error('Validation plan hash does not match candidate')
+  }
+  return structuredClone(candidate.validationPlan)
+}
+
+/** @deprecated Legacy suite hash retained for fixture compatibility. */
 export function fingerprintGeneratedToolValidationSuite(suite: GeneratedToolValidationSuite): string {
   return createHash('sha256').update(canonicalGeneratedToolJson(suite)).digest('hex')
 }

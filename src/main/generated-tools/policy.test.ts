@@ -51,6 +51,7 @@ function createPolicyFixture(options: {
   mode?: ForgeJob['mode']
   baseVersionId?: string
   baseFingerprint?: string
+  scope?: 'project' | 'user'
 } = {}): PolicyFixture {
   const home = mkdtempSync(join(tmpdir(), 'joker-generated-tool-policy-'))
   const installedVersion = installSummarizeTaskJsonFixture(home, 1, { fixtureRoot: FIXTURE_ROOT })
@@ -69,8 +70,8 @@ function createPolicyFixture(options: {
     goal: 'Read the project task fixture deterministically.',
     reason: 'Policy branch coverage fixture.',
     requestedBy: { sessionId: 'policy-session', runId: 'policy-run', userMessageId: 'policy-message' },
-    scope: 'project',
-    projectId: PROJECT_ID,
+    scope: options.scope ?? 'project',
+    ...((options.scope ?? 'project') === 'project' ? { projectId: PROJECT_ID } : {}),
     inputContract: manifest.inputSchema,
     outputContract: manifest.outputSchema,
     permissions,
@@ -162,16 +163,20 @@ void test('policy denies unqualified L0 runtime', () => {
   }
 })
 
-void test('policy requires approval at L1', () => {
+void test('low-risk project promotion is automatically allowed at L1 while execution still asks', () => {
   const fixture = createPolicyFixture({ level: 'L1' })
   try {
-    const result = evaluate(fixture, { approvalMode: 'full-auto' })
-    assert.equal(result.input.runtimeQualificationLevel, 'L1')
-    assert.equal(result.input.approvalMode, 'full-auto')
-    assert.equal(result.decision.action, 'ask')
-    assert.equal(result.decision.reasonCode, 'runtime-l1-approval-required')
-    assert.equal(result.decision.requiresApproval, true)
-    assert.equal(result.decision.hardDeny, false)
+    const promotion = evaluate(fixture, { operation: 'promote', approvalMode: 'full-auto' })
+    assert.equal(promotion.input.runtimeQualificationLevel, 'L1')
+    assert.equal(promotion.decision.action, 'allow')
+    assert.equal(promotion.decision.reasonCode, 'runtime-l2-project-read')
+    assert.equal(promotion.decision.requiresApproval, false)
+
+    const execution = evaluate(fixture, { operation: 'execute', approvalMode: 'full-auto' })
+    assert.equal(execution.decision.action, 'ask')
+    assert.equal(execution.decision.reasonCode, 'runtime-l1-approval-required')
+    assert.equal(execution.decision.requiresApproval, true)
+    assert.equal(execution.decision.hardDeny, false)
   } finally {
     rmSync(fixture.home, { recursive: true, force: true })
   }
@@ -192,15 +197,28 @@ void test('qualified L2 project-read candidate is automatically allowed', () => 
   }
 })
 
+void test('qualified L2 zero-permission project candidate is automatically allowed', () => {
+  const permissions: GeneratedToolPermissionManifest = structuredClone(readOnlyPermissions)
+  permissions.filesystem.read = []
+  const fixture = createPolicyFixture({ level: 'L2', permissions })
+  try {
+    const result = evaluate(fixture, { operation: 'promote' })
+    assert.equal(result.decision.action, 'allow')
+    assert.equal(result.decision.requiresApproval, false)
+  } finally {
+    rmSync(fixture.home, { recursive: true, force: true })
+  }
+})
+
 for (const kind of ['write', 'network'] as const) {
-  void test(`policy asks for approval for unsupported ${kind} permissions`, () => {
+  void test(`policy fail-closes unsupported ${kind} permissions`, () => {
     const fixture = createPolicyFixture({ level: 'L2', permissions: permissionsWith(kind) })
     try {
       const result = evaluate(fixture)
-      assert.equal(result.decision.action, 'ask')
+      assert.equal(result.decision.action, 'deny')
       assert.equal(result.decision.reasonCode, 'permission-profile-unsupported')
-      assert.equal(result.decision.requiresApproval, true)
-      assert.equal(result.decision.hardDeny, false)
+      assert.equal(result.decision.requiresApproval, false)
+      assert.equal(result.decision.hardDeny, true)
     } finally {
       rmSync(fixture.home, { recursive: true, force: true })
     }
@@ -258,7 +276,7 @@ void test('policy hard-denies an edit based on a version that is no longer activ
 })
 
 void test('promotion API rejects a durable policy whose registry input became stale', async () => {
-  const fixture = createPolicyFixture({ level: 'L1' })
+  const fixture = createPolicyFixture({ level: 'L1', scope: 'user' })
   try {
     const service = new PromotionService({ jokerHome: fixture.home, now: () => 100 })
     const first = await service.promote({

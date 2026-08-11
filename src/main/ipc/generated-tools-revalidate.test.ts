@@ -19,7 +19,7 @@ void test('generated tools IPC revalidate validates strict input before invoking
     }
   }
   const handlers: GeneratedToolsMutationHandlers = {
-    promote: () => ({ success: false, error: { code: 'read-failed', message: 'unused' } }),
+    enable: () => ({ success: false, error: { code: 'read-failed', message: 'unused' } }),
     revalidate: (input) => {
       calls.push(input)
       return result
@@ -49,7 +49,7 @@ void test('generated tools IPC revalidate validates strict input before invoking
 
 void test('generated tools IPC revalidate reports unavailable services without throwing', () => {
   const handlers: GeneratedToolsMutationHandlers = {
-    promote: () => ({ success: false, error: { code: 'read-failed', message: 'unused' } })
+    enable: () => ({ success: false, error: { code: 'read-failed', message: 'unused' } })
   }
   const result = handleGeneratedToolRevalidate(handlers, {
     toolId: 'tool-1',

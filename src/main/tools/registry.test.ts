@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildToolSet, type ToolContext } from './registry'
+import { buildToolSet, executeToolDefinition, type ToolContext } from './registry'
 import { z } from 'zod'
 
 void test('buildToolSet passes sessionId through to tool execution', async () => {
@@ -118,7 +118,7 @@ void test('generated tools reuse approval, audit, and observability lifecycle', 
       validationReportId: 'report-1',
       pointerRevision: 1,
       capabilityRevision: 1,
-      runtimeQualificationLevel: 'L2'
+      runtimeQualificationLevel: 'L2', validationProfile: 'gate2-project-read-v1'
     },
     risk: 'read',
     inputSchema: z.object({}),
@@ -143,6 +143,41 @@ void test('generated tools reuse approval, audit, and observability lifecycle', 
     ['call-generated', 'running'],
     ['call-generated', 'done']
   ])
+})
+
+void test('full-trust generated tools bypass the host approval callback', async () => {
+  let executed = false
+  const toolSet = buildToolSet([{
+    name: 'FullTrustGeneratedFixture',
+    description: 'full-trust generated fixture',
+    source: {
+      type: 'generated',
+      toolId: 'full-trust-tool',
+      name: 'Full Trust Tool',
+      versionId: 'v1',
+      fingerprint: 'b'.repeat(64),
+      validationReportId: 'report-1',
+      pointerRevision: 1,
+      capabilityRevision: 1,
+      runtimeQualificationLevel: 'L2',
+      validationProfile: 'user-owned-full-trust-v1'
+    },
+    risk: 'read',
+    inputSchema: z.object({}),
+    execute: async () => {
+      executed = true
+      return { output: 'full-trust output' }
+    }
+  }], {
+    workspacePath: process.cwd(),
+    sessionId: 'session-full-trust',
+    approvalGate: async () => { throw new Error('Generated Tool must not request approval') }
+  })
+  const result = await (toolSet.FullTrustGeneratedFixture as unknown as {
+    execute: (input: Record<string, unknown>) => Promise<{ output: string }>
+  }).execute({})
+  assert.equal(executed, true)
+  assert.equal(result.output, 'full-trust output')
 })
 
 void test('host approval grant propagates only after the approval gate resolves', async () => {
@@ -233,6 +268,62 @@ void test('audit writer failures never change tool execution', async () => {
 
   const result = await (toolSet.AuditFailure as unknown as { execute: (input: Record<string, unknown>) => Promise<{ output: string }> }).execute({})
   assert.equal(result.output, 'ok')
+})
+
+void test('host deadline settles a tool that never returns and records timed-out status', async () => {
+  const observed: Array<{ status: string; deadlineAt?: number; durationMs?: number }> = []
+  await assert.rejects(executeToolDefinition({
+    name: 'NeverReturns',
+    description: 'deadline fixture',
+    inputSchema: z.object({}),
+    timeoutMs: 25,
+    heartbeatMs: 5,
+    execute: async () => await new Promise<never>(() => undefined)
+  }, {}, {
+    workspacePath: process.cwd(),
+    sessionId: 'session-timeout',
+    runId: 'run-timeout',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test' }),
+    onToolCall: (event) => { observed.push(event) }
+  }), /timed out/i)
+
+  assert.equal(observed[0]?.status, 'running')
+  assert.ok(observed.some((event) => event.status === 'running' && event.deadlineAt !== undefined))
+  assert.equal(observed.at(-1)?.status, 'timed-out')
+  assert.equal(typeof observed.at(-1)?.durationMs, 'number')
+})
+
+void test('a never-settling observability callback cannot block tool completion', async () => {
+  const result = await executeToolDefinition({
+    name: 'UncooperativeObserver',
+    description: 'observer fixture',
+    inputSchema: z.object({}),
+    execute: async () => ({ output: 'completed' })
+  }, {}, {
+    workspacePath: process.cwd(),
+    sessionId: 'session-observer',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test' }),
+    onToolCall: async () => await new Promise<void>(() => undefined)
+  })
+  assert.equal(result.output, 'completed')
+})
+
+void test('external cancellation settles an uncooperative tool', async () => {
+  const controller = new AbortController()
+  const promise = executeToolDefinition({
+    name: 'CancelledFixture',
+    description: 'cancel fixture',
+    inputSchema: z.object({}),
+    timeoutMs: 5_000,
+    execute: async () => await new Promise<never>(() => undefined)
+  }, {}, {
+    workspacePath: process.cwd(),
+    sessionId: 'session-cancelled',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test' }),
+    abortSignal: controller.signal
+  })
+  controller.abort(new Error('user cancelled'))
+  await assert.rejects(promise, /cancelled/i)
 })
 
 void test('tool observability reports running and completion with the provider tool call id', async () => {

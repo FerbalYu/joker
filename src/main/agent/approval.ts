@@ -228,13 +228,20 @@ export function evaluateToolPermission(
   }
 
   if (tool?.source?.type === 'generated') {
+    if (tool.source.validationProfile === 'user-owned-full-trust-v1') {
+      return {
+        action: 'allow',
+        risk,
+        reason: 'active workspace full trust authorizes this Generated Tool'
+      }
+    }
     if (tool.source.runtimeQualificationLevel === 'L1') {
       return { action: 'ask', risk, reason: 'L1 Generated Tool execution requires approval' }
     }
   }
 
-  if (toolName === 'ToolPromote') {
-    return { action: 'allow', risk, reason: 'promotion service owns explicit approval' }
+  if (toolName === 'ToolForgeStart') {
+    return { action: 'allow', risk, reason: 'host owns ToolForge lifecycle' }
   }
 
   if (risk === 'read') return { action: 'allow', risk, reason: 'read-only tool' }

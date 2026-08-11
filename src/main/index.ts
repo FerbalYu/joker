@@ -1,5 +1,7 @@
 import { app, shell, BrowserWindow } from 'electron'
-import { join } from 'node:path'
+import { cpSync, existsSync, mkdirSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { is, optimizer } from '@electron-toolkit/utils'
 import { retireStreaming, setupStreaming } from './stream'
 import { registerApprovalIpc } from './agent/approval'
@@ -14,6 +16,7 @@ import { registerImageConfigIpc } from './ipc/image-config'
 import { registerGeneratedImageIpc } from './ipc/generated-image'
 import { registerGeneratedToolsIpc } from './ipc/generated-tools'
 import { registerProjectIpc } from './ipc/projects'
+import { registerToolForgeTrustIpc } from './ipc/toolforge-trust'
 import { closeMarkdownWindow } from './markdown-window'
 import { runPackagedGeneratedToolQualification } from './generated-tools/runtime/packaged-qualification'
 import { runPackagedGeneratedToolFixtureQualification } from './generated-tools/runtime/packaged-fixture-qualification'
@@ -29,6 +32,34 @@ import { RuntimeQualificationService } from './generated-tools/runtime-qualifica
 import { setDefaultRuntimeQualificationService, stopDefaultRuntimeQualificationService } from './generated-tools/runtime-qualification-service-runtime'
 import { getJokerHomeDir } from './store/paths'
 
+function migrateLegacyJokerState(legacyStateRoot: string, targetStateRoot: string): void {
+  if (!existsSync(legacyStateRoot)) return
+  mkdirSync(targetStateRoot, { recursive: true })
+  for (const entry of readdirSync(legacyStateRoot, { withFileTypes: true })) {
+    const source = join(legacyStateRoot, entry.name)
+    const target = join(targetStateRoot, entry.name)
+    if (existsSync(target)) continue
+    cpSync(source, target, { recursive: entry.isDirectory(), force: false, errorOnExist: false })
+  }
+}
+
+function configureLocalRuntimePaths(): void {
+  const explicitHome = process.env['JOKER_HOME']?.trim()
+  const jokerHome = resolve(explicitHome || app.getAppPath())
+  const runtimeRoot = resolve(process.env['JOKER_RUNTIME_ROOT']?.trim() || join(jokerHome, '.joker-runtime'))
+  if (!explicitHome) migrateLegacyJokerState(join(homedir(), '.joker'), join(jokerHome, '.joker'))
+  process.env['JOKER_HOME'] = jokerHome
+  for (const directory of [runtimeRoot, join(runtimeRoot, 'user-data'), join(runtimeRoot, 'session-data'), join(runtimeRoot, 'cache'), join(runtimeRoot, 'crash-dumps')]) {
+    mkdirSync(directory, { recursive: true })
+  }
+  app.setPath('home', jokerHome)
+  app.setPath('userData', join(runtimeRoot, 'user-data'))
+  app.setPath('sessionData', join(runtimeRoot, 'session-data'))
+  app.setPath('cache', join(runtimeRoot, 'cache'))
+  app.setPath('crashDumps', join(runtimeRoot, 'crash-dumps'))
+}
+
+configureLocalRuntimePaths()
 
 let shuttingDown = false
 
@@ -139,6 +170,8 @@ function createWindow(): BrowserWindow {
     }
   })
 
+  win.once('closed', () => retireStreaming(win.id, 'BrowserWindow closed'))
+
   let streamingInstalled = false
   const installStreaming = (): void => {
     if (streamingInstalled || win.webContents.isDestroyed()) return
@@ -184,7 +217,6 @@ function createWindow(): BrowserWindow {
 }
 
 app.whenReady().then(async () => {
-  if (process.env['JOKER_HOME']?.trim()) app.setPath('home', process.env['JOKER_HOME'].trim())
   if (await runPackagedGeneratedToolQualification()) return
   if (await runPackagedGeneratedToolFixtureQualification()) return
   if (await runPackagedGate2Qualification()) return
@@ -193,8 +225,8 @@ app.whenReady().then(async () => {
   const qualificationService = new RuntimeQualificationService({ jokerHome })
   qualificationService.recover()
   setDefaultRuntimeQualificationService(qualificationService)
-  const forgeService = new ForgeService({ jokerHome })
   const promotionService = new PromotionService({ jokerHome })
+  const forgeService = new ForgeService({ jokerHome, activationDriver: promotionService.advance.bind(promotionService) })
   const continuationScheduler = new ContinuationScheduler({ jokerHome })
   setDefaultForgeService(forgeService)
   setDefaultPromotionService(promotionService)
@@ -221,6 +253,7 @@ app.whenReady().then(async () => {
   registerGeneratedImageIpc()
   registerGeneratedToolsIpc()
   registerProjectIpc()
+  registerToolForgeTrustIpc()
   await registerApprovalIpc()
   await restoreMcpServers()
   app.on('browser-window-created', (_, window) => {

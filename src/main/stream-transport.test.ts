@@ -104,6 +104,30 @@ void test('endpoint retirement cancellation never emits drain', async () => {
   assert.equal(flows.filter((flow) => flow.event === 'drain').length, 0)
 })
 
+void test('terminal send has a deadline before renderer readiness', async () => {
+  const transport = new StreamTransport({
+    highWaterMark: 2,
+    terminalReserve: 1,
+    terminalSendTimeoutMs: 20,
+    postMessage: () => undefined
+  })
+  await assert.rejects(transport.send(done('run-not-ready')), /timed out/)
+  assert.equal(transport.snapshot().pending, 0)
+  assert.equal(transport.snapshot().blockedPending, 0)
+})
+
+void test('flow snapshot exposes ACK and blocked timing health', async () => {
+  const { transport, sent } = createTransport(2, 1)
+  const runId = 'run-health'
+  await transport.send(token(runId, 0))
+  const blocked = transport.send(token(runId, 1))
+  assert.equal(typeof transport.snapshot().blockedSince, 'number')
+  assert.equal(transport.ack(sent[0]!.seq, runId), true)
+  await blocked
+  assert.equal(typeof transport.snapshot().lastAckAt, 'number')
+  assert.ok(transport.snapshot().maxBlockedDurationMs >= 0)
+})
+
 void test('aborted pending sends reject and close unblocks all waiters', async () => {
   const { transport } = createTransport(2, 1)
   const controller = new AbortController()

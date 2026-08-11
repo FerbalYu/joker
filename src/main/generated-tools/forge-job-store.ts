@@ -118,7 +118,7 @@ export function recoverInterruptedForgeJobs(jokerHome: string, recoveredAt: numb
 export function isLegalForgeJobTransition(current: ForgeJob, next: ForgeJob): boolean {
   if (next.status === 'interrupted' && ['planning', 'building', 'validating', 'promoting'].includes(current.status)) return true
   const transitions: Record<ForgeJob['status'], ForgeJob['status'][]> = {
-    queued: ['planning', 'cancelled'],
+    queued: ['planning', 'failed', 'cancelled'],
     planning: ['building', 'failed', 'cancelled'],
     building: ['validating', 'failed', 'cancelled'],
     validating: ['building', 'awaiting-policy', 'failed', 'cancelled'],

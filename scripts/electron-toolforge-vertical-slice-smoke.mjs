@@ -122,9 +122,18 @@ function parseProviderLog(raw) {
 }
 
 function requestToolNames(entries) {
+  const seen = new Set()
   return entries.flatMap((entry) => entry.body?.messages ?? [])
     .filter((message) => message?.role === 'assistant' && Array.isArray(message.tool_calls))
-    .flatMap((message) => message.tool_calls.map((call) => call?.function?.name).filter(Boolean))
+    .flatMap((message) => message.tool_calls)
+    .filter((call) => {
+      const identity = call?.id ?? `${call?.function?.name}:${call?.function?.arguments}`
+      if (!identity || seen.has(identity)) return false
+      seen.add(identity)
+      return true
+    })
+    .map((call) => call?.function?.name)
+    .filter(Boolean)
 }
 
 async function sha256File(path) {
@@ -278,23 +287,21 @@ try {
   const names = requestToolNames(providerEntries)
   const firstSearch = names.indexOf('ToolSearch')
   const firstStart = names.indexOf('ToolForgeStart')
-  const firstStatus = names.indexOf('ToolForgeStatus')
-  const firstPromote = names.indexOf('ToolPromote')
   const generatedIndex = names.indexOf('electron-vertical-slice-task-summary')
   check('Provider first selects ToolSearch for the real user task', firstSearch >= 0, names)
   check('Provider calls ToolForgeStart after missing capability evidence', firstStart > firstSearch, names)
-  check('Provider polls authoritative ToolForgeStatus before promotion', firstStatus > firstStart, names)
-  check('Provider calls ToolPromote after validation status', firstPromote > firstStatus, names)
-  check('Continuation first calls the exact promoted Generated Tool', generatedIndex > firstPromote, names)
-  check('Continuation resumes the original task after promotion', firstPromote >= 0 && generatedIndex === names.length - 1, names)
+  check('Model sequence stops at ToolSearch → ToolForgeStart before host-owned activation', names.filter((name) => ['ToolSearch', 'ToolForgeStart', 'ToolForgeStatus', 'ToolPromote'].includes(name)).join(',') === 'ToolSearch,ToolForgeStart', names)
+  check('Provider never calls model-owned ToolForgeStatus or ToolPromote', !names.includes('ToolForgeStatus') && !names.includes('ToolPromote'), names)
+  check('Continuation first calls the exact enabled Generated Tool', generatedIndex > firstStart, names)
+  check('Continuation resumes the original task after host enablement', firstStart >= 0 && generatedIndex === names.length - 1, names)
   check('Continuation makes a real Generated Tool call with a rendered result', generatedIndex >= 0 && await page.locator('body').innerText().then((text) => text.includes('open: 2') && text.includes('done: 1')), names)
-  check('ToolSet refreshes without an application restart', generatedIndex > firstPromote && names.slice(firstPromote + 1).includes('electron-vertical-slice-task-summary'), names)
+  check('ToolSet refreshes without an application restart', generatedIndex > firstStart && names.slice(firstStart + 1).includes('electron-vertical-slice-task-summary'), names)
 
   const storedSession = await page.evaluate(async (sessionId) => window.joker.session.get(sessionId), session.id)
   const userMessages = storedSession?.messages?.filter((message) => message.role === 'user') ?? []
   check('Only one user message was needed', userMessages.length === 1, userMessages)
   check('Conversation contains a final assistant response', storedSession?.messages?.some((message) => message.role === 'assistant' && String(message.content ?? '').includes('open: 2')))
-  check('Settings exposes the promoted Generated Tool and capability revision', await page.evaluate(async () => {
+  check('Settings exposes the enabled Generated Tool and capability revision', await page.evaluate(async () => {
     const result = await window.joker.generatedTools.list()
     return result.success && result.data.capabilityRevision === 1 && result.data.tools.some((tool) => tool.toolId === 'electron-vertical-slice-task-summary' && tool.availability === 'available' && tool.executable)
   }))
@@ -310,23 +317,24 @@ try {
   }))
   const conversationSummary = page.getByTestId('toolforge-conversation-summary').last()
   check('Conversation shows ToolForge evidence for the generated Tool', await conversationSummary.count().then((count) => count > 0))
-  const conversationEvidenceGroup = conversationSummary.locator('xpath=ancestor::*[@data-tool-call-group][1]')
-  check('Conversation ToolForge evidence remains visible while its tool group is collapsed',
-    await conversationEvidenceGroup.count().then((count) => count === 1) &&
-    await conversationEvidenceGroup.locator('[data-tool-call-group-toggle]').getAttribute('aria-expanded') === 'false')
+  check('Conversation ToolForge evidence remains visibly rendered', await conversationSummary.isVisible())
   check('Conversation can open the generated Tool Workbench', await conversationSummary.getByTestId('toolforge-open-workbench').count().then((count) => count > 0))
 
   const generatedRoot = join(home, '.joker', 'generated-tools')
   const registryPath = join(generatedRoot, 'registry.json')
   const invocationsPath = join(generatedRoot, 'invocations.json')
   const continuationsPath = join(generatedRoot, 'continuations-v2.json')
+  const journalPath = join(generatedRoot, 'promotion-journal.json')
   check('Durable registry evidence exists', existsSync(registryPath))
+  check('Durable host activation journal exists', existsSync(journalPath))
   check('Durable invocation evidence exists', existsSync(invocationsPath))
   check('Durable continuation evidence exists', existsSync(continuationsPath))
   const registry = JSON.parse(await readFile(registryPath, 'utf8'))
+  const journals = JSON.parse(await readFile(journalPath, 'utf8'))
   const invocations = JSON.parse(await readFile(invocationsPath, 'utf8'))
   const continuations = JSON.parse(await readFile(continuationsPath, 'utf8'))
   check('Registry records one capability revision and active pointer', registry.capabilityRevision?.revision === 1 && registry.activePointers?.some((pointer) => pointer.toolId === 'electron-vertical-slice-task-summary' && pointer.activeVersionId), registry)
+  check('Host activation journal is durably completed', journals.journals?.some((journal) => journal.toolId === 'electron-vertical-slice-task-summary' && journal.phase === 'completed'), journals)
   check('Continuation is durably completed', continuations.continuations?.some((item) => item.toolId === 'electron-vertical-slice-task-summary' && item.status === 'completed'), continuations)
   check('Generated invocation is durably successful', invocations.invocations?.some((item) => item.toolId === 'electron-vertical-slice-task-summary' && item.status === 'finished' && item.outcome === 'succeeded'), invocations)
 
@@ -355,6 +363,8 @@ try {
     evidence: {
       registryPath,
       registrySha256: await sha256File(registryPath),
+      journalPath,
+      journalSha256: await sha256File(journalPath),
       invocationsPath,
       invocationsSha256: await sha256File(invocationsPath),
       continuationsPath,

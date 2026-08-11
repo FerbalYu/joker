@@ -123,8 +123,10 @@ try {
   check('fresh preload exposes no qualification', initial.success && initial.data.qualification === null)
   check('renderer payload has no host paths', !JSON.stringify(initial).includes(home) && !/artifactPath|logsPath|evidencePath/.test(JSON.stringify(initial)))
   await openGeneratedTools(page)
-  check('fresh settings offers verification action', await page.getByTestId('generated-tools-qualification-missing').count() === 1)
+  check('fresh settings offers Verification action', await page.getByTestId('generated-tools-qualification-missing').count() === 1)
   check('fresh settings shows empty inventory', await page.getByTestId('generated-tools-empty').count() === 1)
+  const freshUiText = await page.locator('body').innerText()
+  check('fresh default UI uses Verification and hides internal diagnostics', /验证|Verification|Verify/.test(freshUiText) && !/候选|Candidate|指纹|Fingerprint|修订|Revision|Promote/.test(freshUiText), freshUiText)
   await screenshot(page, 'fresh-before-verification')
   const observed = []
   await page.getByRole('button', { name: /验证 ToolForge|Verify ToolForge/ }).click()
@@ -143,7 +145,7 @@ try {
   check('qualification operation does not remain running after restart', restarted.success && restarted.data.qualificationOperation?.status === 'completed')
   check('inventory remains empty until a user creates a tool', restarted.success && restarted.data.tools.length === 0)
   await openGeneratedTools(page)
-  check('restart settings still exposes the verified L1 state', await page.getByTestId('generated-tools-qualification').textContent().then((value) => /L1/.test(value ?? '')))
+  check('restart settings still exposes the simple verified ToolForge state', await page.getByTestId('generated-tools-qualification').textContent().then((value) => /已验证|verified/i.test(value ?? '')))
   await screenshot(page, 'fresh-after-restart')
 } catch (error) {
   failure = error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) }

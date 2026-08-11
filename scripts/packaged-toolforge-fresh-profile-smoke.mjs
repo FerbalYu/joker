@@ -117,7 +117,9 @@ try {
   check('packaged fresh preload exposes no qualification', initial.success && initial.data.qualification === null)
   check('packaged renderer payload has no host paths', !JSON.stringify(initial).includes(home) && !/artifactPath|logsPath|evidencePath/.test(JSON.stringify(initial)))
   await openGeneratedTools(page)
-  check('packaged fresh settings offers verification', await page.getByTestId('generated-tools-qualification-missing').count() === 1)
+  check('packaged fresh settings offers Verification', await page.getByTestId('generated-tools-qualification-missing').count() === 1)
+  const freshUiText = await page.locator('body').innerText()
+  check('packaged default UI uses Verification and hides internal diagnostics', /验证|Verification|Verify/.test(freshUiText) && !/候选|Candidate|指纹|Fingerprint|修订|Revision|Promote/.test(freshUiText), freshUiText)
   await screenshot(page, 'packaged-fresh-before-verification')
   const observed = []
   await page.getByRole('button', { name: /验证 ToolForge|Verify ToolForge/ }).click()
@@ -135,7 +137,7 @@ try {
   check('packaged L1 qualification survives restart', restarted.success && restarted.data.qualification?.level === 'L1')
   check('packaged operation is not left running after restart', restarted.success && restarted.data.qualificationOperation?.status === 'completed')
   await openGeneratedTools(page)
-  check('packaged restart renders verified L1 state', await page.getByTestId('generated-tools-qualification').textContent().then((value) => /L1/.test(value ?? '')))
+  check('packaged restart renders the simple verified ToolForge state', await page.getByTestId('generated-tools-qualification').textContent().then((value) => /已验证|verified/i.test(value ?? '')))
   await screenshot(page, 'packaged-fresh-after-restart')
 } catch (error) {
   failure = error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) }

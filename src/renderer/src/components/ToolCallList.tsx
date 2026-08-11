@@ -4,6 +4,7 @@ import type { ToolCallInfo } from '@shared/types'
 import { useStore } from '../store'
 import { t, toolLabel } from '../i18n'
 import ToolCard, { getToolForgeSummary, ToolForgeSummary } from './ToolCard'
+import { visibleToolCards } from '../tool-visibility'
 
 interface Props {
   toolCalls: ToolCallInfo[]
@@ -11,10 +12,11 @@ interface Props {
 
 export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | null {
   const language = useStore((s) => s.language)
-  const hasRunning = toolCalls.some((toolCall) => toolCall.status === 'running')
+  const visibleToolCalls = useMemo(() => visibleToolCards(toolCalls), [toolCalls])
+  const hasRunning = visibleToolCalls.some((toolCall) => toolCall.status === 'running')
   const [expanded, setExpanded] = useState(false)
 
-  const summary = useMemo(() => buildSummary(toolCalls, language), [language, toolCalls])
+  const summary = useMemo(() => buildSummary(visibleToolCalls, language), [language, visibleToolCalls])
   const forgeSummaries = useMemo(() => {
     const byTool = new Map<string, { key: string; summary: NonNullable<ReturnType<typeof getToolForgeSummary>> }>()
     toolCalls.forEach((toolCall, index) => {
@@ -28,16 +30,25 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
 
   if (toolCalls.length === 0) return null
 
-  if (toolCalls.length === 1) {
+  if (visibleToolCalls.length === 0) {
+    return forgeSummaries.length > 0 ? (
+      <div className="w-full max-w-[640px] space-y-1.5">
+        {forgeSummaries.map((item) => <ToolForgeSummary key={item.key} summary={item.summary} language={language} />)}
+      </div>
+    ) : null
+  }
+
+  if (visibleToolCalls.length === 1) {
     return (
       <div className="w-full max-w-[640px] space-y-1.5">
-        <ToolCard toolCall={toolCalls[0]} />
+        <ToolCard toolCall={visibleToolCalls[0]} />
+        {forgeSummaries.map((item) => <ToolForgeSummary key={item.key} summary={item.summary} language={language} />)}
       </div>
     )
   }
 
-  const errorCount = toolCalls.filter((toolCall) => toolCall.status === 'error').length
-  const doneCount = toolCalls.filter((toolCall) => toolCall.status === 'done').length
+  const errorCount = visibleToolCalls.filter((toolCall) => toolCall.status === 'error').length
+  const doneCount = visibleToolCalls.filter((toolCall) => toolCall.status === 'done').length
 
   return (
     <div
@@ -61,7 +72,7 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
           {hasRunning ? <Loader2 size={14} className="animate-spin text-[var(--color-accent)]" /> : <Wrench size={14} />}
         </span>
         <span className="shrink-0 whitespace-nowrap rounded-md bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-[12px] font-medium leading-none text-[var(--color-text-primary)]">
-          {t(language, 'tool.group.title', { count: toolCalls.length })}
+          {t(language, 'tool.group.title', { count: visibleToolCalls.length })}
         </span>
         <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-muted)]" title={summary}>
           {summary}
@@ -90,7 +101,7 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
 
       {expanded && (
         <div className="space-y-1.5 border-t border-[var(--color-border)]/70 p-1.5">
-          {toolCalls.map((toolCall, index) => (
+          {visibleToolCalls.map((toolCall, index) => (
             <ToolCard
               key={toolCall.toolCallId ?? `${toolCall.toolName}-${index}`}
               toolCall={toolCall}

@@ -74,6 +74,9 @@ export type {
   GeneratedToolIntegrityState,
   GeneratedToolInventoryItem,
   GeneratedToolInvocationView,
+  GeneratedToolJobStatusInput,
+  GeneratedToolJobStatusResult,
+  GeneratedToolJobStatusView,
   GeneratedToolJobView,
   GeneratedToolReadIssue,
   GeneratedToolsInventorySnapshot,
@@ -86,8 +89,8 @@ export type {
   GeneratedToolsReadResult,
   GeneratedToolValidationCheckView,
   GeneratedToolValidationReportView,
-  GeneratedToolPromoteInput,
-  GeneratedToolPromoteResult,
+  GeneratedToolEnableInput,
+  GeneratedToolEnableResult,
   GeneratedToolEditRequest,
   GeneratedToolEditResult,
   GeneratedToolContinuationView,
@@ -100,13 +103,15 @@ export type {
 } from './generated-tools-management'
 export {
   GeneratedToolEditRequestSchema,
-  GeneratedToolPromoteInputSchema,
+  GeneratedToolJobStatusInputSchema,
+  GeneratedToolEnableInputSchema,
   GeneratedToolLifecycleMutationRequestSchema,
   GeneratedToolRemoveInputSchema,
   GeneratedToolExportInputSchema,
   GeneratedToolRevalidateInputSchema,
   parseGeneratedToolEditRequest,
-  parseGeneratedToolPromoteInput,
+  parseGeneratedToolJobStatusInput,
+  parseGeneratedToolEnableInput,
   parseGeneratedToolRemoveInput,
   parseGeneratedToolExportInput,
   parseGeneratedToolRevalidateInput
@@ -276,13 +281,21 @@ export interface PendingUserMessageListResult {
   error?: 'invalid-session'
 }
 
+export type ToolCallStatus = 'running' | 'done' | 'error' | 'denied' | 'cancelled' | 'timed-out'
+
 export interface ToolCallInfo {
   toolCallId?: string
   toolName: string
   input: Record<string, unknown>
   output?: string
   metadata?: Record<string, unknown>
-  status: 'running' | 'done' | 'error'
+  status: ToolCallStatus
+  startedAt?: number
+  updatedAt?: number
+  lastProgressAt?: number
+  deadlineAt?: number
+  durationMs?: number
+  error?: string
 }
 
 export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -292,7 +305,7 @@ export interface SubagentToolActivity {
   id: string
   toolName: string
   summary?: string
-  status: 'running' | 'done' | 'error' | 'denied'
+  status: ToolCallStatus
   startedAt: number
   completedAt?: number
   durationMs?: number
@@ -383,9 +396,10 @@ export type StreamEvent =
   | { type: 'message-deferred'; sessionId: string; runId?: string; pendingMessageId: string; reason: string }
   | { type: 'goal-update'; sessionId: string; runId?: string; goal?: GoalState }
   | { type: 'context-usage'; sessionId: string; runId?: string; usage: ContextUsage }
-  | { type: 'tool-call'; sessionId: string; runId?: string; toolCallId: string; toolName: string; input: Record<string, unknown> }
-  | { type: 'tool-result'; sessionId: string; runId?: string; toolCallId: string; toolName: string; output: string; metadata?: Record<string, unknown> }
-  | { type: 'tool-error'; sessionId: string; runId?: string; toolCallId: string; toolName: string; error: string }
+  | { type: 'tool-call'; sessionId: string; runId?: string; toolCallId: string; toolName: string; input: Record<string, unknown>; startedAt?: number; updatedAt?: number; lastProgressAt?: number; deadlineAt?: number }
+  | { type: 'tool-status'; sessionId: string; runId?: string; toolCallId: string; toolName: string; status: ToolCallStatus; startedAt?: number; updatedAt: number; lastProgressAt?: number; deadlineAt?: number; durationMs?: number; error?: string; heartbeat?: boolean }
+  | { type: 'tool-result'; sessionId: string; runId?: string; toolCallId: string; toolName: string; output: string; metadata?: Record<string, unknown>; startedAt?: number; updatedAt?: number; lastProgressAt?: number; deadlineAt?: number; durationMs?: number }
+  | { type: 'tool-error'; sessionId: string; runId?: string; toolCallId: string; toolName: string; error: string; status?: Extract<ToolCallStatus, 'error' | 'cancelled' | 'timed-out'>; startedAt?: number; updatedAt?: number; lastProgressAt?: number; deadlineAt?: number; durationMs?: number }
   | { type: 'subagent-update'; sessionId: string; runId?: string; activity: SubagentActivity }
   | { type: 'error'; sessionId: string; runId?: string; error: string }
   | { type: 'abort'; sessionId: string; runId?: string }
@@ -401,9 +415,12 @@ export interface StreamFlowState {
   ready: boolean
   closed: boolean
   queueDepth: number
-  pending: number
+  blockedPending: number
   inFlight: number
   availableCredit: number
+  lastAckAt?: number
+  blockedSince?: number
+  maxBlockedDurationMs: number
   maxQueueDepth: number
   maxInFlight: number
   sentCount: number
@@ -584,6 +601,24 @@ export interface SkillActionResult {
   skill?: SkillDescriptor
 }
 
+export interface ToolForgeFullTrustConfig {
+  /** Canonical workspace paths for explicit, user-owned ToolForge full-trust grants. */
+  workspacePaths: string[]
+}
+
+export interface ToolForgeFullTrustState {
+  projectId: string
+  projectName: string
+  workspacePath: string
+  granted: boolean
+}
+
+export interface ToolForgeFullTrustResult {
+  success: boolean
+  data?: ToolForgeFullTrustState
+  error?: string
+}
+
 export interface AppConfig {
   providers: ProviderEntry[]
   activeProviderId: string
@@ -594,6 +629,8 @@ export interface AppConfig {
   /** Current content fingerprints that the user enabled. */
   trustedSkills?: TrustedSkillRecord[]
   skillStateVersion?: 1
+  /** Explicit, user-owned ToolForge full-trust grants, bound to canonical workspaces. */
+  toolForgeFullTrust?: ToolForgeFullTrustConfig
 }
 
 

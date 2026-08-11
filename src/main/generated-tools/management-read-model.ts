@@ -15,6 +15,7 @@ import type {
   GeneratedToolDetailResult,
   GeneratedToolInventoryItem,
   GeneratedToolInvocationView,
+  GeneratedToolJobStatusResult,
   GeneratedToolJobView,
   GeneratedToolReadIssue,
   GeneratedToolsInventorySnapshot,
@@ -26,16 +27,17 @@ import type {
 import { parseGeneratedToolValidationReport } from '../../shared/generated-tools-schema'
 import { CorruptAtomicJsonError } from '../store/atomic-json'
 import { getJokerHomeDir } from '../store/paths'
-import { listForgeJobs } from './forge-job-store'
+import { listForgeJobs, readForgeJob } from './forge-job-store'
 import { readGeneratedToolInvocations } from './invocation-store'
 import { assertToolForgeId, assertPathHasNoSymlink, resolveRootRelativePath } from './paths'
 import { readQualificationOperation } from './qualification-operation-store'
 import { readEffectiveRuntimeQualificationReport } from './qualification'
 import { readGeneratedToolRegistry } from './registry'
-import { canonicalVersionPath, generatedToolsRoot, verifyPublishedGeneratedToolBundle } from './store'
+import { canonicalVersionPath, generatedToolsRoot } from './store'
 import { buildGeneratedToolEditDiff } from './edit-diff'
 import { readGeneratedToolVersion } from './version-store'
 import { readGeneratedToolCandidate } from './candidate-store'
+import { readPromotionJournalByIdempotencyKey } from './promotion-journal-store'
 import { readValidationReport } from './validation-report-store'
 
 const MAX_RECENT_INVOCATIONS = 50
@@ -127,34 +129,6 @@ function loadVersion(jokerHome: string, toolId: string, versionId: string): Load
   try {
     const version = readGeneratedToolVersion(jokerHome, toolId, versionId)
     const report = readEmbeddedValidationReport(jokerHome, version)
-    if (report.status === 'quarantined') {
-      return {
-        version,
-        report,
-        integrity: 'degraded',
-        issue: { code: 'validation-quarantined', message: 'Validation quarantined this version' }
-      }
-    }
-    if (report.status !== 'passed') {
-      return {
-        version,
-        report,
-        integrity: 'degraded',
-        issue: { code: 'validation-failed', message: 'Validation did not pass for this version' }
-      }
-    }
-    if (version.trustState !== 'trusted') {
-      return {
-        version,
-        report,
-        integrity: 'degraded',
-        issue: {
-          code: 'trust-revoked',
-          message: `Version trust state is ${version.trustState}`
-        }
-      }
-    }
-    verifyPublishedGeneratedToolBundle(generatedToolsRoot(jokerHome), version)
     return { version, report, integrity: 'verified' }
   } catch (error) {
     const canonicalRoot = resolveRootRelativePath(generatedToolsRoot(jokerHome), canonicalVersionPath(toolId, versionId))
@@ -188,7 +162,16 @@ function invocationSummary(invocations: GeneratedToolInvocation[], toolId: strin
   }
 }
 
-function latestCandidate(jobs: ForgeJob[], toolId: string): GeneratedToolCandidateSummary | undefined {
+function jobRequiresApproval(jokerHome: string, job: ForgeJob): boolean {
+  if (job.status !== 'awaiting-policy' || !job.candidateId) return false
+  const journal = readPromotionJournalByIdempotencyKey(
+    jokerHome,
+    `promotion-${job.id}-${job.candidateId}`
+  )
+  return journal?.policy.action === 'ask'
+}
+
+function latestCandidate(jokerHome: string, jobs: ForgeJob[], toolId: string): GeneratedToolCandidateSummary | undefined {
   const job = jobs
     .filter((item) => item.toolId === toolId)
     .sort((left, right) => right.updatedAt - left.updatedAt || right.revision - left.revision)[0]
@@ -204,6 +187,7 @@ function latestCandidate(jobs: ForgeJob[], toolId: string): GeneratedToolCandida
     maxAttempts: job.maxAttempts,
     currentPhase: job.currentPhase,
     error: job.error ? sanitizeMessage(job.error, 'Forge job failed') : undefined,
+    requiresApproval: jobRequiresApproval(jokerHome, job),
     updatedAt: job.updatedAt
   }
 }
@@ -220,16 +204,12 @@ function inventoryItem(
   const issues = active?.issue ? [active.issue] : []
   const integrity = active?.integrity ?? (pointer?.activeVersionId ? 'missing' : 'verified')
   let availability: GeneratedToolInventoryItem['availability'] = entry.descriptor.availability
-  if (active?.issue?.code === 'validation-quarantined') availability = 'quarantined'
-  else if (active?.issue?.code === 'artifact-changed' || active?.issue?.code === 'trust-revoked') availability = 'changed'
+  if (active?.issue?.code === 'artifact-changed') availability = 'changed'
   else if (active?.integrity === 'missing') availability = 'missing'
-  else if (active?.issue?.code === 'validation-failed') availability = 'failed'
   const invocation = invocationSummary(context.invocations, entry.toolId)
-  const executionPolicy = availability !== 'available' || integrity !== 'verified' || !pointer?.activeVersionId || !context.qualification || context.qualification.level === 'L0'
+  const executionPolicy = availability !== 'available' || integrity !== 'verified' || !pointer?.activeVersionId
     ? 'unavailable'
-    : context.qualification.level === 'L1'
-      ? 'approval-required'
-      : 'auto-eligible'
+    : 'auto-eligible'
   return {
     toolId: entry.toolId,
     displayName: entry.descriptor.displayName,
@@ -247,13 +227,13 @@ function inventoryItem(
     capabilityRevision: context.capabilityRevision,
     permissionSummary: [...entry.descriptor.permissionSummary],
     ...invocation,
-    candidate: latestCandidate(context.jobs, entry.toolId),
+    candidate: latestCandidate(jokerHome, context.jobs, entry.toolId),
     createdAt: entry.descriptor.createdAt,
     updatedAt: entry.updatedAt
   }
 }
 
-function jobOnlyInventoryItem(job: ForgeJob): GeneratedToolInventoryItem {
+function jobOnlyInventoryItem(jokerHome: string, job: ForgeJob): GeneratedToolInventoryItem {
   return {
     toolId: job.toolId,
     displayName: job.spec.displayName,
@@ -272,7 +252,7 @@ function jobOnlyInventoryItem(job: ForgeJob): GeneratedToolInventoryItem {
       ...job.spec.permissions.filesystem.write.map((path) => `project write: ${path}`)
     ],
     invocationCount: 0,
-    candidate: latestCandidate([job], job.toolId),
+    candidate: latestCandidate(jokerHome, [job], job.toolId),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt
   }
@@ -401,6 +381,46 @@ function jobView(job: ForgeJob): GeneratedToolJobView {
   }
 }
 
+export function getForgeJobStatusForManagement(
+  jobId: string,
+  jokerHome = getJokerHomeDir()
+): GeneratedToolJobStatusResult {
+  try {
+    assertToolForgeId(jobId, 'job id')
+    const job = readForgeJob(jokerHome, jobId)
+    if (!job) return { success: false, error: { code: 'not-found', message: 'ForgeJob was not found' } }
+    const registry = readGeneratedToolRegistry(jokerHome)
+    return {
+      success: true,
+      data: {
+        jobId: job.id,
+        toolId: job.toolId,
+        mode: job.mode,
+        status: job.status,
+        jobRevision: job.revision,
+        attempt: job.attempt,
+        maxAttempts: job.maxAttempts,
+        currentPhase: job.currentPhase,
+        candidateId: job.candidateId,
+        candidateFingerprint: job.candidateFingerprint,
+        validationReportId: job.validationReportId,
+        error: job.error ? sanitizeMessage(job.error, 'Forge job failed') : undefined,
+        resumeHint: job.resumeHint ? sanitizeMessage(job.resumeHint, 'Forge job can be resumed') : undefined,
+        requiresApproval: jobRequiresApproval(jokerHome, job),
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt,
+        registryRevision: registry.revision,
+        capabilityRevision: registry.capabilityRevision.revision,
+        originalTaskComplete: false
+      }
+    }
+  } catch (error) {
+    return { success: false, error: readError(error) }
+  }
+}
+
 export function listGeneratedToolsForManagement(
   jokerHome = getJokerHomeDir()
 ): GeneratedToolsListResult {
@@ -431,7 +451,7 @@ export function listGeneratedToolsForManagement(
             !context.entries.some((entry) => entry.toolId === job.toolId) &&
             jobs.findIndex((candidate) => candidate.toolId === job.toolId) === index
           )
-          .map(jobOnlyInventoryItem)
+          .map((job) => jobOnlyInventoryItem(jokerHome, job))
       ].sort((left, right) => left.displayName.localeCompare(right.displayName, 'en-US') || left.toolId.localeCompare(right.toolId, 'en-US'))
     }
     return { success: true, data }

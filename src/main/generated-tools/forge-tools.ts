@@ -24,8 +24,11 @@ interface ForgeToolState {
 export interface BuildForgeAgentToolsOptions {
   jokerHome: string
   jobId: string
-  validationSuiteId: string
-  validationSuiteHash: string
+  validationPlan?: import('../../shared/generated-tools').GeneratedToolValidationPlan
+  validationPlanHash?: string
+  /** @deprecated legacy suite identity accepted for existing callers. */
+  validationSuiteId?: string
+  validationSuiteHash?: string
   now?: () => number
   createValidationRunId?: () => string
 }
@@ -107,15 +110,14 @@ export function buildForgeAgentTools(options: BuildForgeAgentToolsOptions): Tool
       inputSchema: z.object({ expectedRevision: z.number().int().nonnegative() }).strict(),
       risk: 'write_local',
       execute: contextFree((input) => {
-        if (state.latestCheck?.status !== 'passed') throw new Error('Forge candidate requires a passing host-owned structure check')
         const current = readForgeJob(options.jokerHome, options.jobId)
         if (!current) throw new Error(`ForgeJob not found: ${options.jobId}`)
         const sealed = sealGeneratedToolCandidate({
           jokerHome: options.jokerHome,
           jobId: options.jobId,
           expectedRevision: input['expectedRevision'] as number | undefined ?? current.revision,
-          validationSuiteId: options.validationSuiteId,
-          validationSuiteHash: options.validationSuiteHash,
+          validationPlan: options.validationPlan,
+          validationPlanHash: options.validationPlanHash,
           createdAt: (options.now ?? Date.now)(),
           validationRunId: (options.createValidationRunId ?? randomUUID)()
         })

@@ -1,14 +1,16 @@
 import { createHash } from 'node:crypto'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { canonicalGeneratedToolJson } from '../../shared/generated-tools-schema'
 import { createForgeJob } from '../generated-tools/forge-job-store'
 import { installRuntimeQualificationFixture } from '../generated-tools/test-fixtures'
+import { registerGeneratedToolValidationSuite } from '../generated-tools/validation-suite'
 import { buildToolForgeMetaTools } from './tool-forge'
+import { normalizeConfig, setToolForgeFullTrust } from '../store/config'
 import { searchTools } from './tool-search'
 
 void test('ToolSearch reports exact builtin and in-progress ForgeJob capabilities deterministically', () => {
@@ -34,71 +36,158 @@ void test('ToolSearch reports exact builtin and in-progress ForgeJob capabilitie
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-void test('ToolPromote schema rejects spoofed approval and propagates host approval plumbing', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'joker-tool-promote-'))
+void test('ToolForge exposes only search and start to the agent', () => {
+  const tools = buildToolForgeMetaTools({ jokerHome: 'E:/unused-toolforge-home' })
+  assert.deepEqual(tools.map((tool) => tool.name), ['ToolSearch', 'ToolForgeStart'])
+})
+
+void test('ToolForgeStart accepts unrestricted profiles and generic validation plans', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'joker-tool-forge-blocked-'))
   try {
-    const calls: unknown[] = []
-    const promotionService = {
-      promote: async (input: unknown) => {
-        calls.push(input)
-        return {
-          job: { id: 'job-1', toolId: 'tool-1', status: 'awaiting-policy', revision: 4 },
-          journal: { id: 'promotion-1', phase: 'intent' },
-          action: 'approval-required',
-          reason: 'approval required'
-        }
+    installRuntimeQualificationFixture(home, 'L1')
+    const controller = {
+      enqueue: () => true,
+      cancel: async () => { throw new Error('not used') }
+    }
+    const tools = buildToolForgeMetaTools({ jokerHome: home, controller })
+    const start = tools.find((item) => item.name === 'ToolForgeStart')!
+    const baseSpec = {
+      id: 'unsupported-memory-tool', displayName: 'UnsupportedMemoryTool', goal: 'Persist project memory', reason: 'Missing capability',
+      requestedBy: { sessionId: 'session-1', runId: 'run-1', userMessageId: 'message-1' }, scope: 'project' as const, projectId: 'project-1',
+      inputContract: { type: 'object', additionalProperties: false }, outputContract: { type: 'string' },
+      permissions: { filesystem: { read: [], write: ['.joker/project-memory'] }, network: { hosts: [] }, process: { commands: [] }, environment: { keys: [] }, secrets: { handles: [] } },
+      acceptance: ['works'], examples: [{ input: {}, expected: 'ok' }]
+    }
+    const context = { workspacePath: null, sessionId: 'session-1', approvalGate: async () => ({ outcome: 'allow' as const, risk: 'write_local' as const, reason: 'test' }) }
+    const unrestricted = JSON.parse((await start.execute({ idempotencyKey: 'blocked-write', mode: 'create', maxAttempts: 3, spec: baseSpec }, context)).output)
+    assert.equal(unrestricted.status, 'queued')
+    assert.equal(searchTools(baseSpec.id, { jokerHome: home })[0]?.match, 'building')
+
+    const genericPlan = JSON.parse((await start.execute({
+      idempotencyKey: 'generic-plan', mode: 'create', maxAttempts: 3,
+      spec: {
+        ...baseSpec,
+        id: 'generic-plan-tool',
+        permissions: { ...baseSpec.permissions, filesystem: { read: [], write: [] } },
+        validationCases: [
+          { id: 'success', input: {}, workspaceFiles: {}, expected: { outcome: 'succeeded', output: 'ok' } },
+          { id: 'failure', input: { fail: true }, workspaceFiles: {}, expected: { outcome: 'tool-failed', error: { message: 'expected-failure' } } }
+        ]
       }
+    }, context)).output)
+    assert.equal(genericPlan.status, 'queued')
+    assert.equal(searchTools('generic-plan-tool', { jokerHome: home })[0]?.match, 'building')
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+void test('ToolForgeStart accepts a full-trust Memory Tool only for the active granted workspace', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'joker-tool-forge-full-trust-'))
+  const workspace = join(home, 'workspace')
+  try {
+    mkdirSync(workspace, { recursive: true })
+    installRuntimeQualificationFixture(home, 'L1')
+    const controller = {
+      enqueue: () => true,
+      cancel: async () => { throw new Error('not used') }
     }
-    const promote = buildToolForgeMetaTools({ jokerHome: home, promotionService: promotionService as never }).find((item) => item.name === 'ToolPromote')!
-    const valid = {
-      jobId: 'job-1',
-      expectedJobRevision: 4,
-      registryRevision: 9,
-      expectedCandidateFingerprint: 'a'.repeat(64)
+    const config = setToolForgeFullTrust(normalizeConfig({}), workspace, true)
+    const projectId = 'project-full-trust'
+    const start = buildToolForgeMetaTools({
+      jokerHome: home,
+      controller,
+      loadConfig: () => config,
+      resolveProjectPath: (id) => id === projectId ? workspace : null
+    }).find((item) => item.name === 'ToolForgeStart')!
+    const spec = {
+      id: 'persistent-project-memory',
+      displayName: 'PersistentProjectMemory',
+      goal: 'Persist project memory in the reserved memory file.',
+      reason: 'Project memory capability is missing',
+      requestedBy: { sessionId: 'session-1', runId: 'run-1', userMessageId: 'message-1' },
+      scope: 'project' as const,
+      projectId,
+      validationProfile: 'user-owned-full-trust-v1' as const,
+      inputContract: { type: 'object', additionalProperties: false },
+      outputContract: { type: 'object', additionalProperties: false },
+      permissions: {
+        filesystem: { read: [], write: ['.project-memory/MEMORY.md'] },
+        network: { hosts: [] },
+        process: { commands: [] },
+        environment: { keys: [] },
+        secrets: { handles: [] }
+      },
+      acceptance: ['Writes the declared project memory file and reports success.'],
+      examples: [{ input: {}, expected: 'unused legacy example' }],
+      validationCases: [
+        { id: 'success', input: { value: 'remembered' }, workspaceFiles: {}, expected: { outcome: 'succeeded', output: { saved: true } } },
+        { id: 'failure', input: { fail: true }, workspaceFiles: {}, expected: { outcome: 'tool-failed', error: { message: 'expected-failure' } } }
+      ]
     }
-    assert.throws(() => promote.inputSchema.parse({ ...valid, approval: { approved: true } }))
-    const requestHostApproval = async () => null
-    const output = JSON.parse((await promote.execute(valid, {
-      workspacePath: null,
+    const context = {
+      workspacePath: workspace,
       sessionId: 'session-1',
       runId: 'run-1',
-      approvalGate: async () => ({ outcome: 'allow', risk: 'write_local', reason: 'test' }),
-      requestHostApproval
-    })).output)
-    assert.equal(output.jobRevision, 4)
-    assert.equal('revision' in output, false)
-    assert.equal((calls[0] as { expectedJobRevision: number }).expectedJobRevision, 4)
-    assert.equal((calls[0] as { registryRevision: number }).registryRevision, 9)
-    assert.equal((calls[0] as { requestApproval: unknown }).requestApproval, requestHostApproval)
+      approvalGate: async () => ({ outcome: 'allow' as const, risk: 'write_local' as const, reason: 'test' })
+    }
+    const result = JSON.parse((await start.execute({ idempotencyKey: 'full-trust-memory', mode: 'create', maxAttempts: 1, spec }, context)).output)
+    assert.equal(result.status, 'queued')
+    assert.equal(result.toolId, spec.id)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
 })
 
-void test('ToolForge meta tools create, inspect, and cancel durable jobs without claiming task completion', async () => {
+void test('ToolForgeStart fails a durable job when enqueue is rejected', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'joker-tool-forge-enqueue-'))
+  try {
+    installRuntimeQualificationFixture(home, 'L1')
+    registerGeneratedToolValidationSuite({
+      id: 'enqueue-rejected-tool-v1',
+      toolId: 'enqueue-rejected-tool',
+      cases: [
+        { id: 'success', input: {}, workspaceFiles: {}, expected: { outcome: 'succeeded', output: 'ok' } },
+        { id: 'failure', input: { fail: true }, workspaceFiles: {}, expected: { outcome: 'tool-failed', error: { message: 'expected-failure' } } }
+      ]
+    })
+    const controller = { enqueue: () => false, cancel: async () => { throw new Error('not used') } }
+    const start = buildToolForgeMetaTools({ jokerHome: home, controller, createId: () => 'enqueue-job', now: () => 7 }).find((item) => item.name === 'ToolForgeStart')!
+    const spec = {
+      id: 'enqueue-rejected-tool', displayName: 'EnqueueRejectedTool', goal: 'Return ok', reason: 'Missing capability',
+      requestedBy: { sessionId: 'session-1', runId: 'run-1', userMessageId: 'message-1' }, scope: 'project' as const, projectId: 'project-1',
+      inputContract: { type: 'object', additionalProperties: false }, outputContract: { type: 'string' },
+      permissions: { filesystem: { read: [], write: [] }, network: { hosts: [] }, process: { commands: [] }, environment: { keys: [] }, secrets: { handles: [] } },
+      acceptance: ['works'], examples: [{ input: {}, expected: 'ok' }]
+    }
+    const context = { workspacePath: null, sessionId: 'session-1', approvalGate: async () => ({ outcome: 'allow' as const, risk: 'write_local' as const, reason: 'test' }) }
+    const result = JSON.parse((await start.execute({ idempotencyKey: 'enqueue-failed', mode: 'create', maxAttempts: 3, spec }, context)).output)
+    assert.equal(result.status, 'failed')
+    assert.equal(result.currentPhase, 'enqueue-failed')
+    assert.equal(result.error, 'ToolForge service rejected the queued ForgeJob')
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+void test('ToolForgeStart creates and enqueues durable work without claiming task completion', async () => {
   const home = mkdtempSync(join(tmpdir(), 'joker-tool-forge-'))
   try {
     installRuntimeQualificationFixture(home, 'L1')
+    registerGeneratedToolValidationSuite({
+      id: 'new-tool-test-v1',
+      toolId: 'new-tool',
+      cases: [
+        { id: 'success', input: {}, workspaceFiles: {}, expected: { outcome: 'succeeded', output: 'ok' } },
+        { id: 'failure', input: { fail: true }, workspaceFiles: {}, expected: { outcome: 'tool-failed', error: { message: 'expected-failure' } } }
+      ]
+    })
     const enqueued: string[] = []
-    const cancelled: Array<{ jobId: string; expectedRevision: number }> = []
     const controller = {
-      enqueue: (jobId: string) => { enqueued.push(jobId) },
-      cancel: async (jobId: string, expectedRevision: number) => {
-        cancelled.push({ jobId, expectedRevision })
-        const { updateForgeJob } = await import('../generated-tools/forge-job-store')
-        return updateForgeJob(home, jobId, expectedRevision, (current) => ({
-          ...current, revision: current.revision + 1, status: 'cancelled', updatedAt: 5, finishedAt: 5,
-          candidateId: undefined, candidateFingerprint: undefined, attemptRecordId: undefined,
-          validationRunId: undefined, validationReportId: undefined, error: 'cancelled-by-user'
-        }))
-      }
+      enqueue: (jobId: string) => { enqueued.push(jobId); return true },
+      cancel: async () => { throw new Error('not exposed to the agent') }
     }
     const tools = buildToolForgeMetaTools({ jokerHome: home, now: () => 5, createId: () => 'job-1', controller })
     const start = tools.find((item) => item.name === 'ToolForgeStart')!
     const spec = {
       id: 'new-tool', displayName: 'NewTool', goal: 'Return ok', reason: 'Missing capability',
       requestedBy: { sessionId: 'session-1', runId: 'run-1', userMessageId: 'message-1' }, scope: 'project' as const, projectId: 'project-1',
-      inputContract: {}, outputContract: { type: 'string' },
+      inputContract: { type: 'object', additionalProperties: false }, outputContract: { type: 'string' },
       permissions: { filesystem: { read: [], write: [] }, network: { hosts: [] }, process: { commands: [] }, environment: { keys: [] }, secrets: { handles: [] } },
       acceptance: ['works'], examples: [{ input: {}, expected: 'ok' }]
     }
@@ -107,15 +196,5 @@ void test('ToolForge meta tools create, inspect, and cancel durable jobs without
     assert.equal(started.status, 'queued')
     assert.deepEqual(enqueued, [started.jobId])
     assert.equal(started.originalTaskComplete, false)
-    const status = tools.find((item) => item.name === 'ToolForgeStatus')!
-    const observed = JSON.parse((await status.execute({ jobId: started.jobId }, context)).output)
-    assert.equal(observed.status, 'queued')
-    assert.equal(observed.jobRevision, 0)
-    assert.equal(observed.registryRevision, 0)
-    const cancel = tools.find((item) => item.name === 'ToolForgeCancel')!
-    const cancelledResult = JSON.parse((await cancel.execute({ jobId: started.jobId, expectedRevision: 0 }, context)).output)
-    assert.deepEqual(cancelled, [{ jobId: started.jobId, expectedRevision: 0 }])
-    assert.equal(cancelledResult.status, 'cancelled')
-    assert.equal(cancelledResult.originalTaskComplete, false)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })

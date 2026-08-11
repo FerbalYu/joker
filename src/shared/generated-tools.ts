@@ -39,7 +39,26 @@ export interface GeneratedToolPermissionManifest {
 // ---------------------------------------------------------------------------
 
 export type GeneratedToolScope = 'project' | 'user'
-export type GeneratedToolRuntimeId = 'quickjs-wasm'
+export type GeneratedToolRuntimeId = 'quickjs-wasm' | 'node-child-process'
+
+export type GeneratedToolValidationExpectation =
+  | { outcome: 'succeeded'; output: unknown }
+  | { outcome: 'tool-failed'; error: unknown }
+
+/** A deterministic host-executed acceptance case sealed with the ToolSpec. */
+export interface GeneratedToolValidationCase {
+  id: string
+  input: Record<string, unknown>
+  workspaceFiles: Record<string, string>
+  expected: GeneratedToolValidationExpectation
+}
+
+/** Immutable generic plan compiled by the host from a ToolSpec's validation cases. */
+export interface GeneratedToolValidationPlan {
+  schemaVersion: 1
+  id: 'host-compiled-validation-plan-v1'
+  cases: GeneratedToolValidationCase[]
+}
 
 /** Complete immutable runtime contract carried by every generated Tool version. */
 export interface GeneratedToolManifest {
@@ -85,6 +104,10 @@ export interface GeneratedToolSpec {
   inputContract: Record<string, unknown>
   outputContract: Record<string, unknown>
   permissions: GeneratedToolPermissionManifest
+  /** Defaults to the qualified project-read profile unless explicit user-owned workspace trust permits full trust. */
+  validationProfile?: GeneratedToolValidationProfileId
+  /** Optional while legacy ToolSpecs are migrated; examples compile to success cases. */
+  validationCases?: GeneratedToolValidationCase[]
   acceptance: string[]
   examples: Array<{
     input: Record<string, unknown>
@@ -109,7 +132,7 @@ export type ForgeJobStatus =
   | 'interrupted'
 
 export type ForgeJobMode = 'create' | 'edit' | 'repair'
-export type GeneratedToolValidationProfileId = 'gate2-project-read-v1'
+export type GeneratedToolValidationProfileId = 'gate2-project-read-v1' | 'user-owned-full-trust-v1'
 
 export type GeneratedToolPolicyOperation = 'promote' | 'execute'
 export type GeneratedToolPolicyAction = 'allow' | 'ask' | 'deny'
@@ -117,6 +140,8 @@ export type GeneratedToolPolicyReasonCode =
   | 'runtime-l0'
   | 'runtime-l1-approval-required'
   | 'runtime-l2-project-read'
+  | 'workspace-full-trust-authorized'
+  | 'workspace-full-trust-required'
   | 'permission-profile-unsupported'
   | 'permission-profile-hard-deny'
   | 'validation-not-passed'
@@ -137,6 +162,8 @@ export interface GeneratedToolPolicyInput {
   runtimeQualificationLevel: RuntimeQualificationLevel
   scope: GeneratedToolScope
   projectId?: string
+  validationProfile: GeneratedToolValidationProfileId
+  workspaceFullTrustGranted: boolean
   permissions: GeneratedToolPermissionManifest
   baseVersionId?: string
   registryRevision: number
@@ -328,8 +355,8 @@ export interface GeneratedToolCandidate {
   manifest: GeneratedToolManifest
   specHash: string
   validationProfile: GeneratedToolValidationProfileId
-  validationSuiteId: string
-  validationSuiteHash: string
+  validationPlan: GeneratedToolValidationPlan
+  validationPlanHash: string
   createdAt: number
 }
 
@@ -344,8 +371,8 @@ export interface GeneratedToolForgeAttempt {
   candidateFingerprint: string
   specHash: string
   validationProfile: GeneratedToolValidationProfileId
-  validationSuiteId: string
-  validationSuiteHash: string
+  validationPlan: GeneratedToolValidationPlan
+  validationPlanHash: string
   createdAt: number
 }
 
@@ -562,6 +589,8 @@ export interface GeneratedToolValidationReport {
   jobId?: string
   attempt?: number
   validationRunId?: string
+  validationPlanId?: string
+  validationPlanHash?: string
   validationSuiteId?: string
   validationSuiteHash?: string
   startedAt: number

@@ -22,8 +22,8 @@ void test('Generated Tool compatibility accepts the current host contract', () =
   if (result.compatible) assert.deepEqual(result.contract, GENERATED_TOOL_COMPATIBILITY_CONTRACT)
   assert.deepEqual(SUPPORTED_GENERATED_TOOL_SCHEMA_VERSIONS, [1])
   assert.deepEqual(SUPPORTED_GENERATED_TOOL_SDK_VERSIONS, ['1.0.0', '1'])
-  assert.deepEqual(SUPPORTED_GENERATED_TOOL_RUNTIME_IDS, ['quickjs-wasm'])
-  assert.deepEqual(SUPPORTED_GENERATED_TOOL_RUNTIME_VERSIONS, ['0.32.0'])
+  assert.deepEqual(SUPPORTED_GENERATED_TOOL_RUNTIME_IDS, ['quickjs-wasm', 'node-child-process'])
+  assert.deepEqual(SUPPORTED_GENERATED_TOOL_RUNTIME_VERSIONS, ['0.32.0', '1'])
 })
 
 void test('Generated Tool compatibility fails closed with structured reasons', () => {
@@ -38,8 +38,8 @@ void test('Generated Tool compatibility fails closed with structured reasons', (
     assert.deepEqual(result.reasons.map(({ code, field, expected, actual }) => ({ code, field, expected, actual })), [
       { code: 'unsupported-schema-version', field: 'schemaVersion', expected: [1], actual: 2 },
       { code: 'unsupported-sdk-version', field: 'sdkVersion', expected: ['1.0.0', '1'], actual: '2.0.0' },
-      { code: 'unsupported-runtime-id', field: 'runtime.id', expected: ['quickjs-wasm'], actual: 'node-vm' },
-      { code: 'unsupported-runtime-version', field: 'runtime.version', expected: ['0.32.0'], actual: '99.0.0' }
+      { code: 'unsupported-runtime-id', field: 'runtime.id', expected: ['quickjs-wasm', 'node-child-process'], actual: 'node-vm' },
+      { code: 'unsupported-runtime-version', field: 'runtime.version', expected: ['0.32.0', '1'], actual: '99.0.0' }
     ])
   }
 })

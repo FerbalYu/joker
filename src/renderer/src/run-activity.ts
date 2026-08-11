@@ -120,11 +120,16 @@ export function runActivityReducer(state: RunActivityState, action: RunActivityA
     case 'token':
       return { ...state, phase: 'streaming-text', approval: null }
     case 'tool-call': {
+      const now = action.startedAt ?? action.updatedAt ?? Date.now()
       const toolCall: ToolCallInfo = {
         toolCallId: action.toolCallId,
         toolName: action.toolName,
         input: action.input,
-        status: 'running'
+        status: 'running',
+        startedAt: now,
+        updatedAt: action.updatedAt ?? now,
+        lastProgressAt: action.lastProgressAt ?? now,
+        deadlineAt: action.deadlineAt
       }
       return {
         ...state,
@@ -133,16 +138,47 @@ export function runActivityReducer(state: RunActivityState, action: RunActivityA
         approval: null
       }
     }
+    case 'tool-status': {
+      const toolCalls = state.toolCalls.map((toolCall) => sameToolCall(toolCall, action.toolCallId, action.toolName)
+        ? {
+            ...toolCall,
+            status: action.status,
+            startedAt: action.startedAt ?? toolCall.startedAt,
+            updatedAt: action.updatedAt,
+            lastProgressAt: action.lastProgressAt ?? toolCall.lastProgressAt,
+            deadlineAt: action.deadlineAt ?? toolCall.deadlineAt,
+            durationMs: action.durationMs ?? toolCall.durationMs,
+            error: action.error ?? toolCall.error
+          }
+        : toolCall)
+      return {
+        ...state,
+        phase: toolCalls.some((toolCall) => toolCall.status === 'running') ? 'running-tools' : 'waiting-model',
+        toolCalls,
+        approval: null
+      }
+    }
     case 'tool-result':
       return settleToolCall(state, action.toolCallId, action.toolName, {
         status: 'done',
         output: action.output,
-        metadata: action.metadata
+        metadata: action.metadata,
+        startedAt: action.startedAt,
+        updatedAt: action.updatedAt,
+        lastProgressAt: action.lastProgressAt,
+        deadlineAt: action.deadlineAt,
+        durationMs: action.durationMs
       })
     case 'tool-error':
       return settleToolCall(state, action.toolCallId, action.toolName, {
-        status: 'error',
-        output: action.error
+        status: action.status ?? 'error',
+        output: action.error,
+        error: action.error,
+        startedAt: action.startedAt,
+        updatedAt: action.updatedAt,
+        lastProgressAt: action.lastProgressAt,
+        deadlineAt: action.deadlineAt,
+        durationMs: action.durationMs
       })
     case 'message-end':
       return { ...state, phase: 'finalizing', approval: null }
@@ -216,7 +252,7 @@ function settleToolCall(
   state: RunActivityState,
   toolCallId: string,
   toolName: string,
-  result: Pick<ToolCallInfo, 'status' | 'output' | 'metadata'>
+  result: Partial<Pick<ToolCallInfo, 'status' | 'output' | 'metadata' | 'startedAt' | 'updatedAt' | 'lastProgressAt' | 'deadlineAt' | 'durationMs' | 'error'>> & Pick<ToolCallInfo, 'status'>
 ): RunActivityState {
   const toolCalls = state.toolCalls.map((toolCall) => sameToolCall(toolCall, toolCallId, toolName)
     ? { ...toolCall, ...result }

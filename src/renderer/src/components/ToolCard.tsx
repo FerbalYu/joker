@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   FileText,
   FilePen,
@@ -19,14 +19,17 @@ import {
   GitCommit,
   Hammer,
   ShieldCheck,
-  XCircle
+  XCircle,
+  LockKeyhole
 } from 'lucide-react'
-import type { GeneratedImageRef, ToolCallInfo } from '@shared/types'
+import type { GeneratedImageRef, GeneratedToolJobStatusView, ToolCallInfo } from '@shared/types'
 import { useStore } from '../store'
 import { t, toolLabel } from '../i18n'
 import GeneratedImagePreview from './GeneratedImagePreview'
 import { getToolOutputPreview } from '../tool-output-preview'
 import { getEditDiffPreview } from '../edit-diff'
+import { isInternalToolForgeTool } from '../tool-visibility'
+import { generatedToolJobProductState, isTransientGeneratedToolJobStatus } from './generated-tools/generated-tools-settings-state'
 
 interface Props {
   toolCall: ToolCallInfo
@@ -53,11 +56,13 @@ const TOOL_ICONS: Record<string, React.ElementType> = {
   ToolForgeStart: Hammer,
   ToolForgeStatus: ShieldCheck,
   ToolPromote: ShieldCheck,
-  ToolForgeCancel: XCircle
+  ToolForgeCancel: XCircle,
+  GeneratedToolEnable: LockKeyhole
 }
 
 export default function ToolCard({ toolCall, showForgeSummary = true }: Props): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
+  const [now, setNow] = useState(Date.now())
   const Icon = TOOL_ICONS[toolCall.toolName] ?? Wrench
   const isRunning = toolCall.status === 'running'
   const isDone = toolCall.status === 'done'
@@ -65,7 +70,8 @@ export default function ToolCard({ toolCall, showForgeSummary = true }: Props): 
   const diffText = editDiff?.text ?? (typeof toolCall.metadata?.diff === 'string' ? toolCall.metadata.diff : '')
   const hasDiff = diffText.length > 0
   const generatedImages = useMemo(() => getGeneratedImages(toolCall.metadata), [toolCall.metadata])
-  const canExpand = (toolCall.toolName !== 'GenerateImage' || toolCall.status === 'error') && (Boolean(toolCall.output) || hasDiff)
+  const internalForgeTool = isInternalToolForgeTool(toolCall.toolName)
+  const canExpand = !internalForgeTool && (toolCall.toolName !== 'GenerateImage' || toolCall.status === 'error') && (Boolean(toolCall.output) || hasDiff)
 
   const language = useStore((s) => s.language)
   const forgeSummary = useMemo(
@@ -75,6 +81,14 @@ export default function ToolCard({ toolCall, showForgeSummary = true }: Props): 
   const primaryArg = getPrimaryArg(toolCall.toolName, toolCall.input, language)
   const additions = editDiff?.additions ?? getMetadataCount(toolCall.metadata, 'additions')
   const deletions = editDiff?.deletions ?? getMetadataCount(toolCall.metadata, 'deletions')
+  const activity = toolActivityView(toolCall, now, language)
+
+  useEffect(() => {
+    if (!isRunning) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [isRunning])
 
   return (
     <div
@@ -110,6 +124,7 @@ export default function ToolCard({ toolCall, showForgeSummary = true }: Props): 
           </span>
         )}
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          {activity && <span data-tool-health={activity.level} className={`font-mono text-[10px] tabular-nums ${activity.className}`} title={activity.title}>{activity.label}</span>}
           {toolCall.toolName === 'Edit' && isDone && (
             <span className="flex items-center gap-1 font-mono text-[10px] tabular-nums">
               <span className="text-green-400">+{additions}</span>
@@ -156,10 +171,66 @@ export default function ToolCard({ toolCall, showForgeSummary = true }: Props): 
   )
 }
 
+function toolActivityView(toolCall: ToolCallInfo, now: number, language: import('../i18n').Language): { level: string; label: string; title: string; className: string } | null {
+  const startedAt = toolCall.startedAt
+  if (startedAt === undefined) {
+    if (toolCall.status === 'timed-out') return { level: 'timed-out', label: t(language, 'tool.status.timedOut'), title: t(language, 'tool.status.timedOut'), className: 'text-red-400' }
+    if (toolCall.status === 'cancelled') return { level: 'cancelled', label: t(language, 'tool.status.cancelled'), title: t(language, 'tool.status.cancelled'), className: 'text-amber-400' }
+    return null
+  }
+  const elapsedMs = toolCall.durationMs ?? Math.max(0, now - startedAt)
+  const progressAgeMs = Math.max(0, now - (toolCall.lastProgressAt ?? startedAt))
+  const deadlineRemainingMs = toolCall.deadlineAt === undefined ? undefined : toolCall.deadlineAt - now
+  const elapsed = formatToolDuration(elapsedMs)
+  if (toolCall.status === 'timed-out') return { level: 'timed-out', label: `${t(language, 'tool.status.timedOut')} · ${elapsed}`, title: t(language, 'tool.status.timedOutDetail', { elapsed }), className: 'text-red-400' }
+  if (toolCall.status === 'cancelled') return { level: 'cancelled', label: `${t(language, 'tool.status.cancelled')} · ${elapsed}`, title: t(language, 'tool.status.cancelled'), className: 'text-amber-400' }
+  if (toolCall.status !== 'running') return { level: toolCall.status, label: elapsed, title: t(language, 'tool.status.completedDetail', { elapsed }), className: 'text-[var(--color-text-muted)]' }
+  const level = deadlineRemainingMs !== undefined && deadlineRemainingMs <= 0
+    ? 'overdue'
+    : progressAgeMs >= 60_000
+      ? 'stalled'
+      : progressAgeMs >= 15_000
+        ? 'quiet'
+        : 'active'
+  const label = level === 'stalled'
+    ? `${t(language, 'tool.status.possiblyStalled')} · ${elapsed}`
+    : level === 'quiet'
+      ? `${t(language, 'tool.status.noProgress')} · ${elapsed}`
+      : level === 'overdue'
+        ? `${t(language, 'tool.status.deadlineReached')} · ${elapsed}`
+        : elapsed
+  const title = t(language, 'tool.status.runningDetail', {
+    elapsed,
+    progress: formatToolDuration(progressAgeMs),
+    deadline: deadlineRemainingMs === undefined ? '—' : formatToolDuration(Math.max(0, deadlineRemainingMs))
+  })
+  return {
+    level,
+    label,
+    title,
+    className: level === 'active' ? 'text-[var(--color-text-muted)]' : level === 'quiet' ? 'text-amber-300' : 'text-red-400'
+  }
+}
+
+function formatToolDuration(durationMs: number): string {
+  const seconds = Math.max(0, Math.floor(durationMs / 1_000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`
+}
+
 interface ToolForgeSummaryView {
+  jobId?: string
   toolId?: string
   goal?: string
   status?: string
+  requiresApproval?: boolean
+  jobRevision?: number
+  currentPhase?: string
+  attempt?: number
+  maxAttempts?: number
+  error?: string
   permissionSummary?: string
   candidateFingerprint?: string
   validationReportId?: string
@@ -174,15 +245,85 @@ export function ToolForgeSummary({
   summary: ToolForgeSummaryView
   language: import('../i18n').Language
 }): React.JSX.Element {
+  const [liveJob, setLiveJob] = useState<GeneratedToolJobStatusView | null>(null)
+  const [enabling, setEnabling] = useState(false)
+  const [enableError, setEnableError] = useState('')
+  const effective = liveJob && (!summary.jobRevision || liveJob.jobRevision >= summary.jobRevision)
+    ? {
+        ...summary,
+        jobId: liveJob.jobId,
+        toolId: liveJob.toolId,
+        status: liveJob.status,
+        requiresApproval: liveJob.requiresApproval,
+        jobRevision: liveJob.jobRevision,
+        currentPhase: liveJob.currentPhase,
+        attempt: liveJob.attempt,
+        maxAttempts: liveJob.maxAttempts,
+        error: liveJob.error,
+        candidateFingerprint: liveJob.candidateFingerprint,
+        validationReportId: liveJob.validationReportId,
+        capabilityRevision: liveJob.capabilityRevision,
+        canOpenWorkbench: liveJob.status === 'completed'
+      }
+    : summary
+
+  useEffect(() => {
+    const jobId = summary.jobId
+    if (!jobId) {
+      setLiveJob(null)
+      return
+    }
+    let cancelled = false
+    let timer: number | undefined
+    const poll = async (): Promise<void> => {
+      try {
+        const result = await window.joker.generatedTools.jobStatus(jobId)
+        if (cancelled) return
+        if (result.success) {
+          setLiveJob((current) => !current || result.data.jobRevision >= current.jobRevision ? result.data : current)
+          if (isTransientGeneratedToolJobStatus(result.data.status)) {
+            timer = window.setTimeout(() => { void poll() }, 1_000)
+          }
+        }
+      } catch {
+        // The original tool output remains available when the management channel is unavailable.
+      }
+    }
+    void poll()
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [summary.jobId])
+
   const openWorkbench = (focus: 'overview' | 'edit'): void => {
-    if (!summary.toolId) return
+    if (!effective.toolId) return
     window.dispatchEvent(new CustomEvent('joker:open-generated-tool', {
       detail: {
-        toolId: summary.toolId,
+        toolId: effective.toolId,
         focus,
         requestedFrom: focus === 'edit' ? 'conversation' : 'settings'
       }
     }))
+  }
+
+  const enableTool = async (): Promise<void> => {
+    if (!effective.jobId || enabling) return
+    setEnabling(true)
+    setEnableError('')
+    try {
+      const result = await window.joker.generatedTools.enable({ jobId: effective.jobId })
+      if (!result.success) {
+        setEnableError(result.error.message)
+        return
+      }
+      const statusResult = await window.joker.generatedTools.jobStatus(effective.jobId)
+      if (statusResult.success) setLiveJob(statusResult.data)
+    } catch (error) {
+      setEnableError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setEnabling(false)
+    }
   }
 
   return (
@@ -195,53 +336,43 @@ export function ToolForgeSummary({
           <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--color-accent)]">
             {t(language, 'toolforge.conversationEvidence')}
           </p>
-          {summary.goal && (
+          {effective.goal && (
             <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">
-              {summary.goal}
+              {effective.goal}
             </p>
           )}
         </div>
-        {summary.status && (
+        {effective.status && (
           <span className="rounded-full border border-[var(--color-border-light)] bg-[var(--color-surface-active)] px-2 py-1 text-[10px] font-semibold text-[var(--color-text-secondary)]">
-            {formatToolForgeStatus(language, summary.status)}
+            {formatToolForgeStatus(language, effective.status)}
           </span>
         )}
       </div>
 
       <dl className="mt-3 grid gap-2 text-[11px] sm:grid-cols-2">
-        {summary.toolId && (
-          <div className="min-w-0">
-            <dt className="text-[var(--color-text-muted)]">{t(language, 'toolforge.conversationTool')}</dt>
-            <dd className="truncate font-mono text-[var(--color-text-secondary)]" title={summary.toolId}>{summary.toolId}</dd>
-          </div>
-        )}
-        {summary.permissionSummary && (
+        {effective.permissionSummary && (
           <div className="min-w-0">
             <dt className="text-[var(--color-text-muted)]">{t(language, 'toolforge.permissions')}</dt>
-            <dd className="truncate text-[var(--color-text-secondary)]" title={summary.permissionSummary}>{summary.permissionSummary}</dd>
-          </div>
-        )}
-        {summary.validationReportId && (
-          <div className="min-w-0">
-            <dt className="text-[var(--color-text-muted)]">{t(language, 'toolforge.validationEvidence')}</dt>
-            <dd className="truncate font-mono text-[var(--color-text-secondary)]" title={summary.validationReportId}>{summary.validationReportId}</dd>
-          </div>
-        )}
-        {summary.candidateFingerprint && (
-          <div className="min-w-0">
-            <dt className="text-[var(--color-text-muted)]">{t(language, 'toolforge.candidateFingerprint')}</dt>
-            <dd className="truncate font-mono text-[var(--color-text-secondary)]" title={summary.candidateFingerprint}>{summary.candidateFingerprint.slice(0, 16)}…</dd>
-          </div>
-        )}
-        {summary.capabilityRevision !== undefined && (
-          <div className="min-w-0">
-            <dt className="text-[var(--color-text-muted)]">{t(language, 'toolforge.capabilityRevision')}</dt>
-            <dd className="font-mono text-[var(--color-text-secondary)]">{summary.capabilityRevision}</dd>
+            <dd className="truncate text-[var(--color-text-secondary)]" title={effective.permissionSummary}>{effective.permissionSummary}</dd>
           </div>
         )}
       </dl>
 
-      {summary.canOpenWorkbench && (
+      {effective.error && (
+        <p className="mt-2 whitespace-pre-wrap break-words rounded-md border border-red-900/60 bg-red-950/30 px-2 py-1.5 text-[11px] leading-5 text-red-300">
+          {effective.error}
+        </p>
+      )}
+      {enableError && <p className="mt-2 text-[11px] text-red-300">{enableError}</p>}
+
+      {effective.status === 'awaiting-policy' && effective.jobId && (
+        <div className="mt-3">
+          <p className="text-xs text-amber-300">{t(language, effective.requiresApproval ? 'toolforge.waitingPermissionHint' : 'toolforge.readyToEnableHint')}</p>
+          <button data-testid="toolforge-enable" type="button" onClick={() => void enableTool()} disabled={enabling} className="mt-2 inline-flex min-h-8 items-center gap-1.5 rounded-md bg-amber-300/15 px-3 text-xs font-semibold text-amber-200 hover:bg-amber-300/25 disabled:opacity-50"><LockKeyhole size={13} /> {enabling ? t(language, 'toolforge.enabling') : t(language, 'toolforge.enable')}</button>
+        </div>
+      )}
+
+      {effective.canOpenWorkbench && (
         <div className="mt-3 flex flex-wrap gap-2">
           <button
             data-testid="toolforge-open-workbench"
@@ -371,21 +502,23 @@ export function getToolForgeSummary(
     : null
   const toolId = stringValue(output?.toolId) ?? stringValue(spec?.id)
   const status = stringValue(output?.status)
+  const jobId = stringValue(output?.jobId) ?? stringValue(toolCall.input.jobId)
   return {
+    jobId,
     toolId,
     goal: stringValue(spec?.goal) ?? stringValue(spec?.reason),
     status,
+    requiresApproval: typeof output?.requiresApproval === 'boolean' ? output.requiresApproval : undefined,
+    jobRevision: numberValue(output?.jobRevision) ?? numberValue(output?.revision),
+    currentPhase: stringValue(output?.currentPhase),
+    attempt: numberValue(output?.attempt),
+    maxAttempts: numberValue(output?.maxAttempts),
+    error: stringValue(output?.error) ?? stringValue(output?.reason),
     permissionSummary: permissionSummary(spec?.permissions, language),
     candidateFingerprint: stringValue(output?.candidateFingerprint),
     validationReportId: stringValue(output?.validationReportId),
     capabilityRevision: numberValue(output?.capabilityRevision),
-    canOpenWorkbench: Boolean(
-      toolId &&
-      (
-        toolCall.toolName === 'ToolPromote' ||
-        ['awaiting-policy', 'promoting', 'completed', 'failed', 'cancelled', 'interrupted'].includes(status ?? '')
-      )
-    )
+    canOpenWorkbench: Boolean(toolId && status === 'completed')
   }
 }
 
@@ -393,6 +526,8 @@ function formatToolForgeStatus(
   language: import('../i18n').Language,
   status: string
 ): string {
+  const productState = generatedToolJobProductState(status)
+  if (productState) return t(language, `toolforge.productState.${productState}`)
   const key = `toolforge.job.${status}`
   const translated = t(language, key)
   return translated === key ? status : translated

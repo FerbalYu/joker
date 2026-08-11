@@ -3,6 +3,7 @@ import { ResearchReportSchema, type ResearchReport } from '../../shared/research
 
 export const DETAIL_ONLY_TOOL_NAMES = new Set(['TodoWrite'])
 export const REPORT_ARTIFACT_TOOL_NAMES = new Set(['PresentResearchReport'])
+export const INTERNAL_TOOLFORGE_TOOL_NAMES = new Set(['ToolForgeStart', 'ToolForgeStatus', 'ToolPromote', 'ToolForgeCancel'])
 
 export interface ResearchReportArtifact {
   toolCall: ToolCallInfo
@@ -21,6 +22,14 @@ export function extractResearchReports(toolCalls: ToolCallInfo[]): ResearchRepor
         error: parsed.success ? null : 'invalid-research-report'
       }
     })
+}
+
+export function isInternalToolForgeTool(toolName: string): boolean {
+  return INTERNAL_TOOLFORGE_TOOL_NAMES.has(toolName)
+}
+
+export function visibleToolCards(toolCalls: ToolCallInfo[]): ToolCallInfo[] {
+  return toolCalls.filter((toolCall) => !isInternalToolForgeTool(toolCall.toolName))
 }
 
 export function visibleChatTools(toolCalls: ToolCallInfo[]): ToolCallInfo[] {

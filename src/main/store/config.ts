@@ -1,9 +1,10 @@
-import { join } from 'node:path'
+import { join, normalize } from 'node:path'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
-import type { ApiFormat, AppConfig, McpServerConfig, ModelConfig, ProviderConfig, ProviderEntry, ProviderType, TrustedSkillRecord } from '../../shared/types'
+import type { ApiFormat, AppConfig, McpServerConfig, ModelConfig, ProviderConfig, ProviderEntry, ProviderType, ToolForgeFullTrustConfig, TrustedSkillRecord } from '../../shared/types'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../../shared/types'
 import { normalizeContextOptimizationMode } from '../../shared/context'
 import { getJokerHomeDir } from './paths'
+import { canonicalizeProjectPath } from './projects'
 
 function getConfigDir(): string {
   return join(getJokerHomeDir(), '.joker')
@@ -81,6 +82,49 @@ function normalizeTrustedSkills(value: unknown): TrustedSkillRecord[] {
   return records
 }
 
+function normalizeToolForgeFullTrust(value: unknown): ToolForgeFullTrustConfig {
+  if (!value || typeof value !== 'object') return { workspacePaths: [] }
+  const candidate = value as Partial<ToolForgeFullTrustConfig>
+  const seen = new Set<string>()
+  const workspacePaths: string[] = []
+  for (const workspacePath of Array.isArray(candidate.workspacePaths) ? candidate.workspacePaths : []) {
+    if (typeof workspacePath !== 'string' || !workspacePath.trim() || workspacePath.length > 4096) continue
+    const canonical = canonicalizeProjectPath(workspacePath)
+    if (!canonical) continue
+    const normalized = normalize(canonical)
+    const key = workspacePathKey(normalized)
+    if (seen.has(key)) continue
+    seen.add(key)
+    workspacePaths.push(normalized)
+  }
+  return { workspacePaths }
+}
+
+function workspacePathKey(workspacePath: string): string {
+  return process.platform === 'win32' ? workspacePath.toLowerCase() : workspacePath
+}
+
+export function hasToolForgeFullTrust(config: AppConfig, workspacePath: string): boolean {
+  const canonical = canonicalizeProjectPath(workspacePath)
+  if (!canonical) return false
+  return normalizeToolForgeFullTrust(config.toolForgeFullTrust).workspacePaths
+    .some((candidate) => workspacePathKey(candidate) === workspacePathKey(normalize(canonical)))
+}
+
+export function setToolForgeFullTrust(config: AppConfig, workspacePath: string, granted: boolean): AppConfig {
+  const canonical = canonicalizeProjectPath(workspacePath)
+  if (!canonical) throw new Error('Workspace folder is no longer available')
+  const normalizedPath = normalize(canonical)
+  const workspacePaths = normalizeToolForgeFullTrust(config.toolForgeFullTrust).workspacePaths
+  const nextWorkspacePaths = granted
+    ? [...workspacePaths, normalizedPath]
+    : workspacePaths.filter((candidate) => workspacePathKey(candidate) !== workspacePathKey(normalizedPath))
+  return {
+    ...config,
+    toolForgeFullTrust: normalizeToolForgeFullTrust({ workspacePaths: nextWorkspacePaths })
+  }
+}
+
 function defaultApiFormat(type: ProviderType): ApiFormat {
   return type === 'anthropic' ? 'anthropic-messages' : type === 'openai' ? 'responses' : 'chat-completions'
 }
@@ -107,7 +151,8 @@ function getDefaults(): AppConfig {
     contextOptimizationMode: 'legacy',
     mcpServers: [],
     trustedSkills: [],
-    skillStateVersion: 1
+    skillStateVersion: 1,
+    toolForgeFullTrust: { workspacePaths: [] }
   }
 }
 
@@ -178,7 +223,8 @@ export function normalizeConfig(raw: unknown): AppConfig {
       contextOptimizationMode: normalizeContextOptimizationMode(value.contextOptimizationMode),
       mcpServers: normalizeMcpServers(value.mcpServers),
       trustedSkills,
-      skillStateVersion: 1
+      skillStateVersion: 1,
+      toolForgeFullTrust: normalizeToolForgeFullTrust(value.toolForgeFullTrust)
     }
   }
 
@@ -203,7 +249,7 @@ export function normalizeConfig(raw: unknown): AppConfig {
       models: [createModel(modelName)],
       currentModelId: modelName
     }
-    return { providers: [migrated], activeProviderId: migrated.id, contextOptimizationMode: 'legacy', mcpServers: [], trustedSkills: [], skillStateVersion: 1 }
+    return { providers: [migrated], activeProviderId: migrated.id, contextOptimizationMode: 'legacy', mcpServers: [], trustedSkills: [], skillStateVersion: 1, toolForgeFullTrust: { workspacePaths: [] } }
   }
 
   return getDefaults()
@@ -213,7 +259,8 @@ export function preserveSkillConfigState(incoming: AppConfig, existing: AppConfi
   return {
     ...incoming,
     trustedSkills: existing.trustedSkills,
-    skillStateVersion: 1
+    skillStateVersion: 1,
+    toolForgeFullTrust: existing.toolForgeFullTrust
   }
 }
 

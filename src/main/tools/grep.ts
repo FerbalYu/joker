@@ -1,9 +1,12 @@
 import { z } from 'zod'
-import { readdir, stat, lstat } from 'node:fs/promises'
+import { readdir, stat, lstat, readFile } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import { existsSync } from 'node:fs'
 import type { ToolDefinition, ToolResult, ToolContext } from './registry'
 import { resolveWorkspacePath } from '../store/projects'
+
+const MAX_GREP_RESULTS = 500
+const MAX_GLOB_RESULTS = 200
 
 function requireWorkspace(workspacePath: string | null): string {
   if (!workspacePath) throw new Error('No working folder selected for this conversation.')
@@ -15,31 +18,35 @@ function safePath(workspacePath: string | null, filePath: string): string {
   return resolveWorkspacePath(root, filePath)
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return
+  throw signal.reason instanceof Error ? signal.reason : new Error('Search cancelled')
+}
+
 async function searchDirectory(
   dir: string,
-  pattern: string,
+  regex: RegExp,
   options: GrepOptions,
   results: string[],
-  maxResults: number
+  signal?: AbortSignal
 ): Promise<void> {
-  if (results.length >= maxResults) return
+  throwIfAborted(signal)
+  if (results.length >= options.maxResults) return
 
   const entries = await readdir(dir, { withFileTypes: true })
   for (const entry of entries) {
-    if (results.length >= maxResults) return
-
-    // Skip common ignored directories
+    throwIfAborted(signal)
+    if (results.length >= options.maxResults) return
     if (entry.isDirectory() && shouldIgnore(entry.name)) continue
 
     const fullPath = join(dir, entry.name)
     const entryStat = await lstat(fullPath)
     if (entryStat.isSymbolicLink()) continue
     if (entry.isDirectory()) {
-      await searchDirectory(fullPath, pattern, options, results, maxResults)
+      await searchDirectory(fullPath, regex, options, results, signal)
     } else if (entry.isFile()) {
-      const matched = await searchFile(fullPath, pattern, options)
-      results.push(...matched)
-      if (results.length >= maxResults) return
+      const matched = await searchFile(fullPath, regex, options, signal)
+      results.push(...matched.slice(0, options.maxResults - results.length))
     }
   }
 }
@@ -50,17 +57,17 @@ function shouldIgnore(name: string): boolean {
 }
 
 interface GrepOptions {
-  caseSensitive: boolean
   maxResults: number
   contextLines: number
 }
 
 async function searchFile(
   filePath: string,
-  pattern: string,
-  options: GrepOptions
+  regex: RegExp,
+  options: GrepOptions,
+  signal?: AbortSignal
 ): Promise<string[]> {
-  const { readFile } = await import('node:fs/promises')
+  throwIfAborted(signal)
   let content: string
   try {
     content = await readFile(filePath, 'utf-8')
@@ -70,11 +77,9 @@ async function searchFile(
 
   const lines = content.split('\n')
   const matches: string[] = []
-  const regex = options.caseSensitive
-    ? new RegExp(pattern)
-    : new RegExp(pattern, 'i')
-
   for (let i = 0; i < lines.length; i++) {
+    throwIfAborted(signal)
+    regex.lastIndex = 0
     if (regex.test(lines[i]!)) {
       const start = Math.max(0, i - options.contextLines)
       const end = Math.min(lines.length - 1, i + options.contextLines)
@@ -87,6 +92,7 @@ async function searchFile(
         })
         .join('\n')
       matches.push(`${filePath}:\n${context}`)
+      if (matches.length >= options.maxResults) break
     }
   }
   return matches
@@ -118,27 +124,26 @@ export const grepTool: ToolDefinition = {
       contextLines?: number
     }
 
+    throwIfAborted(context.abortSignal)
     const searchPath = safePath(context.workspacePath, path)
-    if (!existsSync(searchPath)) {
-      return { output: `Path not found: ${path}` }
+    if (!existsSync(searchPath)) return { output: `Path not found: ${path}` }
+
+    const options: GrepOptions = {
+      maxResults: Math.max(1, Math.min(MAX_GREP_RESULTS, Math.floor(maxResults))),
+      contextLines: Math.max(0, Math.min(20, Math.floor(contextLines)))
     }
-
-    const options: GrepOptions = { caseSensitive, maxResults, contextLines }
+    const regex = new RegExp(pattern, caseSensitive ? '' : 'i')
     const results: string[] = []
-
     const stats = await stat(searchPath)
     if (stats.isDirectory()) {
-      await searchDirectory(searchPath, pattern, options, results, maxResults)
+      await searchDirectory(searchPath, regex, options, results, context.abortSignal)
     } else {
-      const matched = await searchFile(searchPath, pattern, options)
-      results.push(...matched)
+      const matched = await searchFile(searchPath, regex, options, context.abortSignal)
+      results.push(...matched.slice(0, options.maxResults))
     }
 
-    if (results.length === 0) {
-      return { output: 'No matches found.' }
-    }
-
-    const truncated = results.length >= maxResults ? `\n... (truncated at ${maxResults} results)` : ''
+    if (results.length === 0) return { output: 'No matches found.' }
+    const truncated = results.length >= options.maxResults ? `\n... (truncated at ${options.maxResults} results)` : ''
     return { output: results.join('\n\n') + truncated }
   }
 }
@@ -154,52 +159,52 @@ export const globTool: ToolDefinition = {
     const { pattern, path = '.' } = input as { pattern: string; path?: string }
     const basePath = safePath(context.workspacePath, path)
     const workspaceRoot = requireWorkspace(context.workspacePath)
-
-    // Simple glob: convert ** to recursive walk, * to single-level
-    const { glob } = await import('node:fs/promises')
-    const matches: string[] = []
+    const matches = new Set<string>()
 
     async function walk(dir: string, remaining: string[]): Promise<void> {
-      if (matches.length > 200) return
-      if (remaining.length === 0) {
-        matches.push(relative(workspaceRoot, dir))
+      throwIfAborted(context.abortSignal)
+      if (matches.size >= MAX_GLOB_RESULTS || remaining.length === 0) return
+      const [seg, ...rest] = remaining
+
+      if (seg === '**') {
+        if (rest.length > 0) await walk(dir, rest)
+        const entries = await readdir(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          throwIfAborted(context.abortSignal)
+          if (matches.size >= MAX_GLOB_RESULTS) return
+          if (shouldIgnore(entry.name)) continue
+          const fullPath = join(dir, entry.name)
+          const entryStat = await lstat(fullPath)
+          if (entryStat.isSymbolicLink()) continue
+          if (entry.isDirectory()) await walk(fullPath, remaining)
+          else if (entry.isFile() && rest.length === 0) matches.add(relative(workspaceRoot, fullPath).replaceAll('\\', '/'))
+        }
         return
       }
-      const [seg, ...rest] = remaining
+
+      const regex = segmentRegex(seg)
       const entries = await readdir(dir, { withFileTypes: true })
       for (const entry of entries) {
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        throwIfAborted(context.abortSignal)
+        if (matches.size >= MAX_GLOB_RESULTS) return
+        if (shouldIgnore(entry.name) || !regex.test(entry.name)) continue
         const fullPath = join(dir, entry.name)
-        if (seg === '**') {
-          if (entry.isDirectory()) {
-            await walk(fullPath, remaining) // ** matches zero
-            await walk(fullPath, ['**', ...rest]) // ** matches more
-          }
-        } else if (seg.includes('*')) {
-          const regex = new RegExp('^' + seg.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$')
-          if (regex.test(entry.name)) {
-            if (rest.length === 0 && entry.isFile()) {
-              matches.push(relative(workspaceRoot, fullPath))
-            } else if (entry.isDirectory()) {
-              await walk(fullPath, rest)
-            }
-          }
-        } else if (entry.name === seg) {
-          if (rest.length === 0 && entry.isFile()) {
-            matches.push(relative(workspaceRoot, fullPath))
-          } else if (entry.isDirectory()) {
-            await walk(fullPath, rest)
-          }
-        }
+        const entryStat = await lstat(fullPath)
+        if (entryStat.isSymbolicLink()) continue
+        if (rest.length === 0 && entry.isFile()) matches.add(relative(workspaceRoot, fullPath).replaceAll('\\', '/'))
+        else if (entry.isDirectory()) await walk(fullPath, rest)
       }
     }
 
-    const segments = pattern.split('/')
+    const segments = pattern.replaceAll('\\', '/').split('/').filter(Boolean)
     await walk(basePath, segments)
-
-    void glob // suppress unused
-    return { output: matches.length > 0 ? matches.join('\n') : 'No files found.' }
+    return { output: matches.size > 0 ? [...matches].join('\n') : 'No files found.' }
   }
+}
+
+function segmentRegex(segment: string): RegExp {
+  const escaped = segment.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+  return new RegExp(`^${escaped}$`)
 }
 
 export const searchTools: ToolDefinition[] = [grepTool, globTool]

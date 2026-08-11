@@ -22,14 +22,14 @@ void test('fixture installs immutable v1 and executes through the production Qui
     installRuntimeQualificationFixture(home)
     installSummarizeTaskJsonFixture(home, 1)
     const bindings = listGeneratedToolSnapshotBindings({ jokerHome: home, projectId: 'qualification-p0' })
-    assert.deepEqual(bindings.map(({ toolId, versionId, validationReportId, pointerRevision, capabilityRevision, runtimeQualificationLevel, projectId }) => ({ toolId, versionId, validationReportId, pointerRevision, capabilityRevision, runtimeQualificationLevel, projectId })), [
+    assert.deepEqual(bindings.map(({ toolId, versionId, validationReportId, pointerRevision, capabilityRevision, runtimeQualificationLevel, validationProfile, projectId }) => ({ toolId, versionId, validationReportId, pointerRevision, capabilityRevision, runtimeQualificationLevel, validationProfile, projectId })), [
       {
         toolId: 'summarize-task-json',
         versionId: 'v1',
         validationReportId: 'summarize-task-json-v1-report',
         pointerRevision: 1,
         capabilityRevision: 1,
-        runtimeQualificationLevel: 'L2',
+        runtimeQualificationLevel: 'L2', validationProfile: 'gate2-project-read-v1',
         projectId: 'qualification-p0'
       }
     ])
@@ -49,7 +49,7 @@ void test('fixture installs immutable v1 and executes through the production Qui
       validationReportId: 'summarize-task-json-v1-report',
       pointerRevision: 1,
       capabilityRevision: 1,
-      runtimeQualificationLevel: 'L2'
+      runtimeQualificationLevel: 'L2', validationProfile: 'gate2-project-read-v1'
     })
     const toolSet = buildToolSet(definitions, {
       workspacePath: workspace,

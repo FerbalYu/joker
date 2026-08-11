@@ -129,6 +129,23 @@ export class PromotionService {
     this.options.phaseCheckpoint?.(journal.phase, journal)
   }
 
+  async advance(jobId: string, options?: {
+    approvalGrant?: HostApprovalGrant
+    requestApproval?: (request: HostApprovalRequest) => Promise<HostApprovalGrant | null>
+  }): Promise<PromoteGeneratedToolResult> {
+    const job = readForgeJob(this.options.jokerHome, jobId)
+    if (!job) throw new Error(`ForgeJob not found: ${jobId}`)
+    if (!job.candidateFingerprint) throw new Error('ForgeJob has no authoritative candidate fingerprint')
+    const registry = readGeneratedToolRegistry(this.options.jokerHome)
+    return this.promote({
+      jobId: job.id,
+      expectedJobRevision: job.revision,
+      registryRevision: registry.revision,
+      expectedCandidateFingerprint: job.candidateFingerprint,
+      ...options
+    })
+  }
+
   async recover(): Promise<GeneratedToolPromotionJournal[]> {
     const recovered: GeneratedToolPromotionJournal[] = []
     for (const storedJournal of readPromotionJournals(this.options.jokerHome).journals) {
@@ -272,7 +289,7 @@ export class PromotionService {
     }
     if (policy.action === 'ask' && !authorizingReceipt) {
       const grant = input.approvalGrant ?? await input.requestApproval?.({
-        toolName: 'ToolPromote',
+        toolName: 'GeneratedToolEnable',
         sessionId: current.spec.requestedBy.sessionId,
         runId: current.spec.requestedBy.runId,
         input: {
@@ -286,7 +303,7 @@ export class PromotionService {
         }
       })
       if (!grant) return { job: current, journal, action: 'approval-required', reason: policy.reason }
-      if (grant.sessionId !== current.spec.requestedBy.sessionId || grant.runId !== current.spec.requestedBy.runId || grant.toolName !== 'ToolPromote') {
+      if (grant.sessionId !== current.spec.requestedBy.sessionId || grant.runId !== current.spec.requestedBy.runId || grant.toolName !== 'GeneratedToolEnable') {
         throw new ToolForgeCasError('Promotion approval grant is not bound to the owning session and run')
       }
       const writtenReceipt = writePromotionApprovalReceipt(this.options.jokerHome, parseGeneratedToolPromotionApprovalReceipt({

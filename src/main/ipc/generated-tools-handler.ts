@@ -2,23 +2,25 @@ import type { HostApprovalRequest } from '../tools/registry'
 import type {
   GeneratedToolDetailResult,
   GeneratedToolEditResult,
-  GeneratedToolPromoteInput,
-  GeneratedToolPromoteResult,
+  GeneratedToolJobStatusResult,
+  GeneratedToolEnableInput,
+  GeneratedToolEnableResult,
   GeneratedToolRevalidateInput,
   GeneratedToolRevalidateResult,
   GeneratedToolEditRequest,
   GeneratedToolContinuationListResult,
   GeneratedToolsListResult
 } from '../../shared/generated-tools-management'
-import { parseGeneratedToolEditRequest, parseGeneratedToolGetInput, parseGeneratedToolPromoteInput, parseGeneratedToolRevalidateInput } from '../../shared/generated-tools-management'
+import { parseGeneratedToolEditRequest, parseGeneratedToolEnableInput, parseGeneratedToolGetInput, parseGeneratedToolJobStatusInput, parseGeneratedToolRevalidateInput } from '../../shared/generated-tools-management'
 
 export interface GeneratedToolsReadModel {
   list: () => GeneratedToolsListResult
   get: (toolId: string) => GeneratedToolDetailResult
+  jobStatus: (jobId: string) => GeneratedToolJobStatusResult
 }
 
 export interface GeneratedToolsMutationHandlers {
-  promote: (input: GeneratedToolPromoteInput, requestApproval?: (request: HostApprovalRequest) => Promise<import('../tools/registry').HostApprovalGrant | null>) => GeneratedToolPromoteResult | Promise<GeneratedToolPromoteResult>
+  enable: (input: GeneratedToolEnableInput, requestApproval?: (request: HostApprovalRequest) => Promise<import('../tools/registry').HostApprovalGrant | null>) => GeneratedToolEnableResult | Promise<GeneratedToolEnableResult>
   revalidate?: (input: GeneratedToolRevalidateInput) => GeneratedToolRevalidateResult
   edit?: (input: GeneratedToolEditRequest, sessionId: string, runId?: string) => GeneratedToolEditResult
 }
@@ -45,6 +47,24 @@ export function handleGeneratedToolGet(
   }
 }
 
+export function handleGeneratedToolJobStatus(
+  readModel: GeneratedToolsReadModel,
+  input: unknown
+): GeneratedToolJobStatusResult {
+  try {
+    const parsed = parseGeneratedToolJobStatusInput(input)
+    return readModel.jobStatus(parsed.jobId)
+  } catch {
+    return {
+      success: false,
+      error: {
+        code: 'invalid-input',
+        message: 'Invalid ForgeJob request'
+      }
+    }
+  }
+}
+
 export function handleGeneratedToolEdit(
   handlers: GeneratedToolsMutationHandlers,
   input: unknown,
@@ -60,32 +80,32 @@ export function handleGeneratedToolEdit(
   }
 }
 
-export async function handleGeneratedToolPromote(
+export async function handleGeneratedToolEnable(
   handlers: GeneratedToolsMutationHandlers,
   input: unknown,
   requestApproval?: (request: HostApprovalRequest) => Promise<import('../tools/registry').HostApprovalGrant | null>
-): Promise<GeneratedToolPromoteResult> {
-  let parsed: GeneratedToolPromoteInput
+): Promise<GeneratedToolEnableResult> {
+  let parsed: GeneratedToolEnableInput
   try {
-    parsed = parseGeneratedToolPromoteInput(input)
+    parsed = parseGeneratedToolEnableInput(input)
   } catch {
     return {
       success: false,
       error: {
         code: 'invalid-input',
-        message: 'Invalid Generated Tool promotion request'
+        message: 'Invalid Generated Tool enable request'
       }
     }
   }
 
   try {
-    return await handlers.promote(parsed, requestApproval)
+    return await handlers.enable(parsed, requestApproval)
   } catch (error) {
     return {
       success: false,
       error: {
         code: 'read-failed',
-        message: error instanceof Error ? error.message : 'Generated Tool promotion failed'
+        message: error instanceof Error ? error.message : 'Generated Tool enable failed'
       }
     }
   }

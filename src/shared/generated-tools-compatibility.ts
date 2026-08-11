@@ -4,8 +4,8 @@
 
 export const SUPPORTED_GENERATED_TOOL_SCHEMA_VERSIONS = Object.freeze([1] as const)
 export const SUPPORTED_GENERATED_TOOL_SDK_VERSIONS = Object.freeze(['1.0.0', '1'] as const)
-export const SUPPORTED_GENERATED_TOOL_RUNTIME_IDS = Object.freeze(['quickjs-wasm'] as const)
-export const SUPPORTED_GENERATED_TOOL_RUNTIME_VERSIONS = Object.freeze(['0.32.0'] as const)
+export const SUPPORTED_GENERATED_TOOL_RUNTIME_IDS = Object.freeze(['quickjs-wasm', 'node-child-process'] as const)
+export const SUPPORTED_GENERATED_TOOL_RUNTIME_VERSIONS = Object.freeze(['0.32.0', '1'] as const)
 
 export type SupportedGeneratedToolSchemaVersion = typeof SUPPORTED_GENERATED_TOOL_SCHEMA_VERSIONS[number]
 export type SupportedGeneratedToolSdkVersion = typeof SUPPORTED_GENERATED_TOOL_SDK_VERSIONS[number]
@@ -17,15 +17,21 @@ export interface GeneratedToolCompatibilityContract {
   sdkVersions: typeof SUPPORTED_GENERATED_TOOL_SDK_VERSIONS
   runtimes: readonly {
     id: SupportedGeneratedToolRuntimeId
-    versions: typeof SUPPORTED_GENERATED_TOOL_RUNTIME_VERSIONS
+    versions: readonly string[]
   }[]
 }
+
+const RUNTIME_VERSIONS = Object.freeze({
+  'quickjs-wasm': Object.freeze(['0.32.0'] as const),
+  'node-child-process': Object.freeze(['1'] as const)
+})
 
 export const GENERATED_TOOL_COMPATIBILITY_CONTRACT: GeneratedToolCompatibilityContract = Object.freeze({
   schemaVersions: SUPPORTED_GENERATED_TOOL_SCHEMA_VERSIONS,
   sdkVersions: SUPPORTED_GENERATED_TOOL_SDK_VERSIONS,
   runtimes: Object.freeze([
-    Object.freeze({ id: 'quickjs-wasm' as const, versions: SUPPORTED_GENERATED_TOOL_RUNTIME_VERSIONS })
+    Object.freeze({ id: 'quickjs-wasm' as const, versions: RUNTIME_VERSIONS['quickjs-wasm'] }),
+    Object.freeze({ id: 'node-child-process' as const, versions: RUNTIME_VERSIONS['node-child-process'] })
   ])
 })
 
@@ -108,12 +114,14 @@ export function checkGeneratedToolCompatibility(value: unknown): GeneratedToolCo
     }
 
     const runtimeVersion = value.runtime.version
-    if (typeof runtimeVersion !== 'string' ||
-      !SUPPORTED_GENERATED_TOOL_RUNTIME_VERSIONS.includes(runtimeVersion as SupportedGeneratedToolRuntimeVersion)) {
+    const versions = typeof runtimeId === 'string' && runtimeId in RUNTIME_VERSIONS
+      ? RUNTIME_VERSIONS[runtimeId as keyof typeof RUNTIME_VERSIONS]
+      : SUPPORTED_GENERATED_TOOL_RUNTIME_VERSIONS
+    if (typeof runtimeVersion !== 'string' || !versions.includes(runtimeVersion as never)) {
       reasons.push({
         code: 'unsupported-runtime-version',
         field: 'runtime.version',
-        expected: SUPPORTED_GENERATED_TOOL_RUNTIME_VERSIONS,
+        expected: versions,
         actual: toReasonValue(runtimeVersion)
       })
     }
@@ -129,6 +137,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function toReasonValue(value: unknown): string | number | null | undefined {
-  return typeof value === 'string' || typeof value === 'number' || value === null ? value : undefined
+  if (typeof value === 'string' || typeof value === 'number' || value === null) return value
+  return undefined
 }
-

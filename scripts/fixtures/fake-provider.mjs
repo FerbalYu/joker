@@ -353,9 +353,7 @@ const ELECTRON_TOOLFORGE_TOOL_ID = 'electron-vertical-slice-task-summary'
 const ELECTRON_TOOLFORGE_PROJECT_ID = 'electron-vertical-slice-project'
 const ELECTRON_TOOLFORGE_CALLS = {
   search: 'call_electron_tool_search',
-  start: 'call_electron_tool_forge_start',
-  status: 'call_electron_tool_forge_status',
-  promote: 'call_electron_tool_promote'
+  start: 'call_electron_tool_forge_start'
 }
 
 const ELECTRON_TOOLFORGE_MANIFEST = {
@@ -429,7 +427,7 @@ function electronEditForgeAgentResponse(messages, failure) {
       expectedRevision: Number(spec.forgeJobRevision ?? 2)
     }, `call_electron_edit_submit_${attempt}`)
   }
-  return textResponse('Forge edit candidate submitted without claiming trust or promotion.')
+  return textResponse('Forge edit submitted for host verification and automatic enablement.')
 }
 
 function electronToolForgeEditResponse(messages, tools, systemText, failure) {
@@ -466,7 +464,7 @@ function electronForgeAgentResponse(messages) {
       expectedRevision: Number(spec.forgeJobRevision ?? 2)
     }, 'call_electron_forge_submit')
   }
-  return textResponse('Forge candidate submitted without claiming trust or promotion.')
+  return textResponse('Forge manufacturing submitted for host verification and automatic enablement.')
 }
 
 function electronToolForgeResponse(messages, tools, systemText) {
@@ -474,7 +472,7 @@ function electronToolForgeResponse(messages, tools, systemText) {
   if (/dedicated ToolForge manufacturing agent/i.test(systemText)) return electronForgeAgentResponse(messages)
   if (/tool-forge-continuation/i.test(systemText)) {
     const generated = (Array.isArray(tools) ? tools : []).map((tool) => tool?.function?.name).find((name) => name === ELECTRON_TOOLFORGE_TOOL_ID)
-    if (!generated) return textResponse('Continuation could not find the promoted Generated Tool.')
+    if (!generated) return textResponse('Continuation could not find the enabled Generated Tool.')
     if (!history.calls.some((call) => call.name === generated && history.results.has(call.id))) return toolCall(generated, {}, 'call_electron_generated_first_tool')
     return textResponse('Electron ToolForge vertical slice completed: open: 2\ndone: 1')
   }
@@ -500,23 +498,7 @@ function electronToolForgeResponse(messages, tools, systemText) {
       }
     }, ELECTRON_TOOLFORGE_CALLS.start)
   }
-  let status = parseToolJson(messages, history, 'ToolForgeStatus')
-  if (!status.jobId) {
-    const start = parseToolJson(messages, history, 'ToolForgeStart')
-    status = { ...status, ...start }
-  }
-  if (!completedTool(history, 'ToolForgeStatus') || !['awaiting-policy', 'promoting', 'completed'].includes(status.status)) {
-    return toolCall('ToolForgeStatus', { jobId: status.jobId ?? '' }, ELECTRON_TOOLFORGE_CALLS.status)
-  }
-  if (!completedTool(history, 'ToolPromote')) {
-    return toolCall('ToolPromote', {
-      jobId: status.jobId,
-      expectedJobRevision: status.jobRevision,
-      registryRevision: status.registryRevision,
-      expectedCandidateFingerprint: status.candidateFingerprint
-    }, ELECTRON_TOOLFORGE_CALLS.promote)
-  }
-  return textResponse('ToolForge promotion completed; the original task will continue with the promoted tool.')
+  return textResponse('ToolForge manufacturing started; the host will verify, enable, and continue the original task.')
 }
 
 const server = http.createServer((req, res) => {

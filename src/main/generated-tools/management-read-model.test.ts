@@ -7,7 +7,7 @@ import { join } from 'node:path'
 
 import { canonicalGeneratedToolJson } from '../../shared/generated-tools-schema'
 import { installSummarizeTaskJsonFixture } from './fixture'
-import { listGeneratedToolsForManagement, getGeneratedToolForManagement } from './management-read-model'
+import { listGeneratedToolsForManagement, getForgeJobStatusForManagement, getGeneratedToolForManagement } from './management-read-model'
 import { proposeGeneratedToolInvocation, updateGeneratedToolInvocation } from './invocation-store'
 import { disableGeneratedTool, readGeneratedToolRegistry } from './registry'
 import { canonicalVersionPath, generatedToolsRoot } from './store'
@@ -181,6 +181,16 @@ void test('management read model preserves stable availability alongside candida
       assert.equal(listed.data.tools[0].executable, true)
       assert.equal(listed.data.tools[0].candidate?.status, 'failed')
     }
+    const jobStatus = getForgeJobStatusForManagement(job.id, home)
+    assert.equal(jobStatus.success, true)
+    if (jobStatus.success) {
+      assert.equal(jobStatus.data.status, 'failed')
+      assert.equal(jobStatus.data.jobRevision, 3)
+      assert.equal(jobStatus.data.error, 'candidate failed')
+      assert.equal(jobStatus.data.originalTaskComplete, false)
+      const serialized = JSON.stringify(jobStatus)
+      assert.doesNotMatch(serialized, /artifactPath|idempotencyKey|"spec"/)
+    }
     const detail = getGeneratedToolForManagement('summarize-task-json', home)
     assert.equal(detail.success, true)
     if (detail.success) {
@@ -291,6 +301,8 @@ void test('management read model rejects tampered version metadata and sanitizes
 void test('management detail rejects invalid and unknown tool ids', () => {
   const home = mkdtempSync(join(tmpdir(), 'joker-generated-management-'))
   try {
+    assert.equal(getForgeJobStatusForManagement('../escape', home).success, false)
+    assert.deepEqual(getForgeJobStatusForManagement('unknown-job', home), { success: false, error: { code: 'not-found', message: 'ForgeJob was not found' } })
     assert.equal(getGeneratedToolForManagement('../escape', home).success, false)
     installRuntimeQualificationFixture(home)
     installSummarizeTaskJsonFixture(home, 1)

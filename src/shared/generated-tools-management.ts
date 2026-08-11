@@ -48,12 +48,8 @@ export function parseGeneratedToolRevalidateInput(value: unknown): GeneratedTool
   return GeneratedToolRevalidateInputSchema.parse(value)
 }
 
-export const GeneratedToolPromoteInputSchema = z.object({
-  jobId: ToolForgeIdSchema,
-  expectedJobRevision: z.number().int().nonnegative(),
-  registryRevision: z.number().int().nonnegative(),
-  expectedCandidateFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  promotionId: ToolForgeIdSchema.optional()
+export const GeneratedToolEnableInputSchema = z.object({
+  jobId: ToolForgeIdSchema
 }).strict()
 
 export const GeneratedToolEditRequestSchema = z.object({
@@ -86,24 +82,16 @@ export function parseGeneratedToolEditRequest(value: unknown): GeneratedToolEdit
   return GeneratedToolEditRequestSchema.parse(value)
 }
 
-export interface GeneratedToolPromoteInput {
+export interface GeneratedToolEnableInput {
   jobId: string
-  expectedJobRevision: number
-  registryRevision: number
-  expectedCandidateFingerprint: string
-  promotionId?: string
 }
 
-export type GeneratedToolPromoteResult = GeneratedToolsReadResult<{
+export type GeneratedToolEnableResult = GeneratedToolsReadResult<{
   jobId: string
+  toolId: string
   status: ForgeJobStatus
-  jobRevision: number
-  action: 'promoted' | 'approval-required' | 'denied'
+  action: 'enabled' | 'permission-required' | 'denied'
   reason: string
-  promotionId: string
-  phase: string
-  versionId?: string
-  capabilityRevision?: number
   originalTaskComplete: false
 }>
 
@@ -133,8 +121,42 @@ export interface GeneratedToolGetInput {
   toolId: string
 }
 
-export function parseGeneratedToolPromoteInput(value: unknown): GeneratedToolPromoteInput {
-  return GeneratedToolPromoteInputSchema.parse(value)
+export const GeneratedToolJobStatusInputSchema = z.object({
+  jobId: ToolForgeIdSchema
+}).strict()
+
+export interface GeneratedToolJobStatusInput {
+  jobId: string
+}
+
+export interface GeneratedToolJobStatusView {
+  jobId: string
+  toolId: string
+  mode: ForgeJobMode
+  status: ForgeJobStatus
+  jobRevision: number
+  attempt: number
+  maxAttempts: number
+  currentPhase?: string
+  candidateId?: string
+  candidateFingerprint?: string
+  validationReportId?: string
+  error?: string
+  resumeHint?: string
+  requiresApproval?: boolean
+  createdAt: number
+  updatedAt: number
+  startedAt?: number
+  finishedAt?: number
+  registryRevision: number
+  capabilityRevision: number
+  originalTaskComplete: false
+}
+
+export type GeneratedToolJobStatusResult = GeneratedToolsReadResult<GeneratedToolJobStatusView>
+
+export function parseGeneratedToolEnableInput(value: unknown): GeneratedToolEnableInput {
+  return GeneratedToolEnableInputSchema.parse(value)
 }
 
 
@@ -157,7 +179,7 @@ export type GeneratedToolsReadResult<T> =
   | { success: true; data: T }
   | { success: false; error: GeneratedToolsReadError }
 
-export type GeneratedToolEffectiveAvailability = GeneratedToolAvailability | 'missing'
+export type GeneratedToolEffectiveAvailability = GeneratedToolAvailability | 'missing' | 'permission-required'
 export type GeneratedToolIntegrityState = 'verified' | 'degraded' | 'missing'
 
 export interface GeneratedToolReadIssue {
@@ -169,6 +191,7 @@ export interface GeneratedToolReadIssue {
     | 'validation-failed'
     | 'validation-quarantined'
     | 'trust-revoked'
+    | 'workspace-full-trust-required'
   message: string
 }
 
@@ -183,6 +206,7 @@ export interface GeneratedToolCandidateSummary {
   maxAttempts: number
   currentPhase?: string
   error?: string
+  requiresApproval?: boolean
   updatedAt: number
 }
 
@@ -465,4 +489,8 @@ export type GeneratedToolDetailResult = GeneratedToolsReadResult<GeneratedToolDe
 
 export function parseGeneratedToolGetInput(value: unknown): GeneratedToolGetInput {
   return GeneratedToolGetInputSchema.parse(value)
+}
+
+export function parseGeneratedToolJobStatusInput(value: unknown): GeneratedToolJobStatusInput {
+  return GeneratedToolJobStatusInputSchema.parse(value)
 }

@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import type { ToolDefinition, ToolResult, ToolContext } from './registry'
 
 const DEFAULT_TIMEOUT_MS = 120_000
+const TERMINATION_GRACE_MS = 1_000
 const MAX_OUTPUT_BYTES = 1024 * 1024
 const OUTPUT_TRUNCATION_MARKER = '\n[output truncated: 1 MiB limit]'
 
@@ -82,6 +83,8 @@ export const bashTool: ToolDefinition = {
       .optional()
       .describe('Timeout in milliseconds (default 120000)')
   }),
+  timeoutMs: 10 * 60 * 1000 + 2_000,
+  heartbeatMs: 1_000,
   execute: async (input, context: ToolContext): Promise<ToolResult> => {
     const { command, timeout = DEFAULT_TIMEOUT_MS } = input as { command: string; timeout?: number }
     if (!context.workspacePath) return { output: 'No working folder selected for this conversation.' }
@@ -94,6 +97,21 @@ export const bashTool: ToolDefinition = {
       let reason: 'timeout' | 'aborted' | undefined
       let settled = false
       let timer: NodeJS.Timeout | undefined
+      let forceSettleTimer: NodeJS.Timeout | undefined
+
+      const finish = (code: number | null, error?: Error): void => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        if (forceSettleTimer) clearTimeout(forceSettleTimer)
+        context.abortSignal?.removeEventListener('abort', onAbort)
+        if (error) {
+          resolveResult({ output: `Error executing command: ${error.message}`, metadata: { truncated: outputTruncated, reason } })
+          return
+        }
+        const output = formatOutput(stdout, stderr, code, reason)
+        resolveResult({ output: outputTruncated ? `${output}${OUTPUT_TRUNCATION_MARKER}` : output, metadata: { truncated: outputTruncated, reason } })
+      }
 
       const child = spawn(command, {
         shell: true,
@@ -107,6 +125,8 @@ export const bashTool: ToolDefinition = {
         if (settled || reason) return
         reason = terminationReason
         killProcessTree(child)
+        forceSettleTimer = setTimeout(() => finish(null), TERMINATION_GRACE_MS)
+        forceSettleTimer.unref?.()
       }
 
       const onAbort = (): void => terminate('aborted')
@@ -125,20 +145,8 @@ export const bashTool: ToolDefinition = {
         outputTruncated ||= result.truncated
       })
 
-      child.on('close', (code) => {
-        if (timer) clearTimeout(timer)
-        context.abortSignal?.removeEventListener('abort', onAbort)
-        settled = true
-        const output = formatOutput(stdout, stderr, code, reason)
-        resolveResult({ output: outputTruncated ? `${output}${OUTPUT_TRUNCATION_MARKER}` : output, metadata: { truncated: outputTruncated, reason } })
-      })
-
-      child.on('error', (err) => {
-        if (timer) clearTimeout(timer)
-        context.abortSignal?.removeEventListener('abort', onAbort)
-        settled = true
-        resolveResult({ output: `Error executing command: ${err.message}`, metadata: { truncated: outputTruncated, reason } })
-      })
+      child.on('close', (code) => finish(code))
+      child.on('error', (err) => finish(null, err))
     })
   }
 }

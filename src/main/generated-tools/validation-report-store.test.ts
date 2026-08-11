@@ -24,7 +24,8 @@ void test('Gate 2 validation bundles bind content-addressed reports to evidence 
       report: {
         toolId: 'tool-1', versionId: 'candidate-1', artifactFingerprint: 'a'.repeat(64),
         validationProfile: 'gate2-project-read-v1', jobId: 'job-1', attempt: 1,
-        validationRunId: 'validation-1', validationSuiteId: 'suite-1', validationSuiteHash: 'b'.repeat(64),
+        validationRunId: 'validation-1',
+        validationPlanId: 'host-compiled-validation-plan-v1', validationPlanHash: 'b'.repeat(64),
         startedAt: 1, finishedAt: 2, status: 'failed',
         checks: [{ id: 'schema', category: 'schema', status: 'failed', evidencePath: 'evidence/schema.json', message: 'failed' }],
         declaredPermissions: report.declaredPermissions, observedCapabilities: []
