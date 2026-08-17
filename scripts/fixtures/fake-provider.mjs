@@ -588,6 +588,14 @@ function fsOccResponse(messages) {
   return textResponse(`FS_OCC_OK ${FS_OCC_MARKER}`)
 }
 
+const UNKNOWN_OUTCOME_MARKER = 'zzqunknownoutcome41x'
+
+function unknownOutcomeRetryResponse(messages) {
+  const history = researchToolHistory(messages)
+  if (history.results.has('call_unknown_outcome_retry')) return textResponse(`UNKNOWN_OUTCOME_BLOCKED ${UNKNOWN_OUTCOME_MARKER}`)
+  return toolCall('Write', { filePath: 'unknown-outcome.txt', content: 'must not be written twice' }, 'call_unknown_outcome_retry')
+}
+
 const INVOKE_FALLBACK_MARKER = 'zzqinvokefallback41x'
 const TOOL_REPEAT_MARKER = 'zzqtoolrepeat41x'
 
@@ -656,6 +664,7 @@ const server = http.createServer((req, res) => {
     if (/plan-only mode/i.test(systemText)) return respond(planResponse(messages))
     if (scenario === 'toolforge-vertical-slice') return respond(electronToolForgeResponse(messages, parsed.tools, systemText))
     if (scenario === 'fs-optimistic-concurrency') return respond(fsOccResponse(messages))
+    if (scenario === 'unknown-outcome-retry') return respond(unknownOutcomeRetryResponse(messages))
     if (scenario === 'invoke-fallback') return respond(invokeFallbackResponse(messages))
     if (scenario === 'tool-repeat-reminder') return respond(toolRepeatReminderResponse(messages))
     if (scenario === 'toolforge-edit-success') return respond(electronToolForgeEditResponse(messages, parsed.tools, systemText, false))

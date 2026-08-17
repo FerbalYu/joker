@@ -5,7 +5,7 @@ import type { ResearchContext } from '../research/context'
 import type { SubagentActivity } from '../../shared/types'
 import { writeToolAudit, type ToolAuditWriter } from './audit'
 import { classifyToolRisk, type ToolRisk } from './risk'
-import type { OperationJournal } from '../store/operations'
+import { toolInputFingerprint, type OperationJournal } from '../store/operations'
 
 const DEFAULT_TOOL_TIMEOUT_MS = 3 * 60_000
 const DEFAULT_TOOL_HEARTBEAT_MS = 2_000
@@ -233,7 +233,7 @@ export async function executeToolDefinition(
       ? await boundedLifecycle('proposed', () => definition.lifecycle!.proposed(lifecycleEvent(Date.now())))
       : undefined
     safeAudit(audit, { ...auditBase, stage: 'proposed', status: 'pending', arguments: input })
-    context.operationJournal?.append({ type: 'tool-proposed', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId, toolName: definition.name })
+    context.operationJournal?.append({ type: 'tool-proposed', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId, toolName: definition.name, inputFingerprint: toolInputFingerprint(definition.name, input) })
     let decision: ApprovalDecision
     try {
       if (generatedSource?.validationProfile !== 'user-owned-full-trust-v1') {

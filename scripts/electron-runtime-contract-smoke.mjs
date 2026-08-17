@@ -7,6 +7,7 @@
 import { chromium } from 'playwright-core'
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -53,7 +54,7 @@ async function waitFor(predicate, timeoutMs = 15_000, description = 'condition')
   throw new Error(`Timed out waiting for ${description}${lastError instanceof Error ? `: ${lastError.message}` : ''}`)
 }
 
-async function runPhase({ scenario, seedFiles, drive }) {
+async function runPhase({ scenario, seedFiles, prepareHome, drive }) {
   const phaseDir = await mkdtemp(join(runDir, `${scenario}-`))
   const home = join(phaseDir, 'home')
   const project = join(phaseDir, 'project')
@@ -115,6 +116,7 @@ async function runPhase({ scenario, seedFiles, drive }) {
       projects: [{ id: 'runtime-contract-workspace', name: 'Runtime Contract', path: project, lastUsedAt: Date.now() }],
       activeProjectId: 'runtime-contract-workspace'
     }, null, 2))
+    if (prepareHome) await prepareHome({ home, project, phaseDir })
 
     electron = spawn(resolve(root, 'node_modules/electron/dist/electron.exe'), [
       `--remote-debugging-port=${cdpPort}`,
@@ -237,6 +239,58 @@ try {
       check('fs-occ phase leaves no renderer console errors', consoleErrors.length === 0, consoleErrors)
       check('fs-occ phase leaves no renderer page errors', pageErrors.length === 0, pageErrors)
       await screenshot('fs-occ-complete')
+    }
+  })
+
+  await runPhase({
+    scenario: 'unknown-outcome-retry',
+    prepareHome: async ({ home }) => {
+      const sessionId = randomUUID()
+      const now = Date.now()
+      await mkdir(join(home, '.joker', 'sessions'), { recursive: true })
+      await writeFile(join(home, '.joker', 'sessions', `${sessionId}.json`), JSON.stringify({
+        schemaVersion: 9,
+        revision: 1,
+        session: { id: sessionId, title: 'Unknown outcome recovery', createdAt: now, updatedAt: now, messages: [], pendingUserMessages: [], messageQueueRevision: 0, runActivity: { status: 'idle', revision: 0 } }
+      }, null, 2))
+      const input = { filePath: 'unknown-outcome.txt', content: 'must not be written twice' }
+      const canonical = JSON.stringify(Object.fromEntries(Object.entries(input).sort(([left], [right]) => left.localeCompare(right))))
+      const fingerprint = createHash('sha256').update(`Write\0${canonical}`).digest('hex')
+      await writeFile(join(home, '.joker', 'sessions', `${sessionId}.operations.jsonl`), [
+        { type: 'request-prepared', at: now - 3, runId: 'interrupted-run', step: 1 },
+        { type: 'tool-proposed', at: now - 2, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write', inputFingerprint: fingerprint },
+        { type: 'tool-started', at: now - 1, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write' }
+      ].map((event) => JSON.stringify(event)).join('\n') + '\n')
+    },
+    drive: async ({ page, home, project, screenshot, providerRequests, consoleErrors, pageErrors }, check) => {
+      await waitFor(async () => (await page.evaluate(() => window.joker.session.list())).length > 0, 20_000, 'initial recovery session')
+      const session = (await page.evaluate(() => window.joker.session.list()))[0]
+      const projectId = (await page.evaluate(() => window.joker.project.get())).state?.activeProjectId
+      const bound = await page.evaluate(({ sessionId, projectId }) => window.joker.session.setProject(sessionId, projectId), { sessionId: session.id, projectId })
+      check('unknown-outcome session is bound to the seeded workspace', Boolean(bound))
+      const now = Date.now()
+      const input = { filePath: 'unknown-outcome.txt', content: 'must not be written twice' }
+      const canonical = JSON.stringify(Object.fromEntries(Object.entries(input).sort(([left], [right]) => left.localeCompare(right))))
+      const fingerprint = createHash('sha256').update(`Write\0${canonical}`).digest('hex')
+      await writeFile(join(home, '.joker', 'sessions', `${session.id}.operations.jsonl`), [
+        { type: 'request-prepared', at: now - 3, runId: 'interrupted-run', step: 1 },
+        { type: 'tool-proposed', at: now - 2, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write', inputFingerprint: fingerprint },
+        { type: 'tool-started', at: now - 1, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write' }
+      ].map((event) => JSON.stringify(event)).join('\n') + '\n')
+      const textarea = page.locator('textarea').first()
+      await textarea.fill('Retry the interrupted Write exactly as requested by the provider.')
+      await textarea.press('Enter')
+      await page.waitForFunction(() => document.body.innerText.includes('UNKNOWN_OUTCOME_BLOCKED'), undefined, { timeout: 60_000 })
+      check('unknown-outcome retry did not write the file', !(await readdir(project)).includes('unknown-outcome.txt'))
+      const stored = await page.evaluate((sessionId) => window.joker.session.get(sessionId), session.id)
+      const tools = stored.messages.flatMap((message) => message.toolCalls ?? []).filter((tool) => tool.toolName === 'Write')
+      check('identical recovered Write persists as denied', tools.some((tool) => tool.status === 'denied' && String(tool.metadata?.reason ?? '').includes('interrupted previous run')), tools)
+      check('denied recovery ToolCard is visible', await page.locator('[data-tool-health="denied"]').count() >= 1)
+      const requests = await providerRequests()
+      check('provider received a denied tool result for the retry', requests.some((entry) => (entry.body?.messages ?? []).some((message) => message.role === 'tool' && String(message.content ?? '').includes('terminalStatus'))))
+      check('unknown-outcome phase leaves no renderer console errors', consoleErrors.length === 0, consoleErrors)
+      check('unknown-outcome phase leaves no renderer page errors', pageErrors.length === 0, pageErrors)
+      await screenshot('unknown-outcome-blocked')
     }
   })
 

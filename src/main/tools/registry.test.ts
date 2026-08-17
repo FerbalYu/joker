@@ -409,6 +409,26 @@ void test('tool observability reports running and completion with the provider t
   assert.equal(typeof events[1]?.durationMs, 'number')
 })
 
+void test('final guard blocks an identical unknown-outcome retry before the tool starts', async () => {
+  let executed = false
+  const events: OperationEvent[] = []
+  const toolSet = buildToolSet([{
+    name: 'Write', description: 'write fixture', risk: 'write_local', inputSchema: z.object({ filePath: z.string() }),
+    execute: async () => { executed = true; return { output: 'unexpected' } }
+  }], {
+    workspacePath: process.cwd(), sessionId: 'session-recovery', runId: 'run-recovery',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'write_local', reason: 'test approval' }),
+    operationJournal: { append: (event) => events.push(event) },
+    guards: [({ toolName, input }) => toolName === 'Write' && input.filePath === 'a.txt' ? 'unknown previous outcome' : undefined]
+  })
+  const result = await (toolSet.Write as unknown as { execute: (input: Record<string, unknown>) => Promise<{ output: string; metadata?: Record<string, unknown> }> }).execute({ filePath: 'a.txt' })
+  assert.equal(executed, false)
+  assert.equal(result.metadata?.terminalStatus, 'denied')
+  assert.match(String(result.metadata?.reason), /unknown previous outcome/)
+  assert.equal(events.some((event) => event.type === 'tool-started'), false)
+  assert.equal(events.some((event) => event.type === 'tool-result' && event.status === 'denied'), true)
+})
+
 void test('operation journal records intent before the tool body runs', async () => {
   const journal: OperationEvent[] = []
   const order: string[] = []
