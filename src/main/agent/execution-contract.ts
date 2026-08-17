@@ -8,6 +8,7 @@ export type ExecutionTaskKind =
   | 'workspace-validation'
   | 'workspace-change'
   | 'web-research'
+  | 'git-publish'
 
 export interface RequiredFirstToolBinding {
   toolName: string
@@ -49,6 +50,7 @@ const CHANGE_PATTERN = /^(?:请|麻烦|帮我)?\s*(?:(?:把|将)\s*.+?\s*)?(?:�
 const ENGLISH_CHANGE_PATTERN = /^(?:please\s+)?(?:fix|change|edit|implement|develop|write|refactor|update|upgrade|install|add|remove|delete|adjust|optimi[sz]e|commit|push|publish|deploy)\b/iu
 const WEB_RESEARCH_PATTERN = /^(?:请|麻烦|帮我)?\s*(?:联网(?:搜索|查找|查询|检索)|(?:搜索|查找|查询|检索)(?:一下|下)?(?:网上|网络|网页|公开资料|最新公开信息))/u
 const ENGLISH_WEB_RESEARCH_PATTERN = /^(?:please\s+)?(?:search|look\s+up|research)\s+(?:the\s+)?(?:web|internet|online|latest\s+public)\b/iu
+const GIT_PUBLISH_PATTERN = /^(?:commit\s*\/\s*push|commit\s+push|commit\s+and\s+push|提交并推送)[。！？!?.\s]*$/iu
 
 const TOOL_PREFERENCES: Record<ExecutionTaskKind, readonly string[]> = {
   plan: ['TodoWrite'],
@@ -57,7 +59,8 @@ const TOOL_PREFERENCES: Record<ExecutionTaskKind, readonly string[]> = {
   'workspace-inspection': ['Read', 'Grep', 'Glob', 'GitStatus', 'GitDiff', 'GitLog', 'GitBranch', 'Bash'],
   'workspace-validation': ['Bash', 'Read', 'Grep', 'Glob', 'GitStatus', 'GitDiff'],
   'workspace-change': ['Read', 'Grep', 'Glob', 'GitStatus', 'GitDiff', 'Bash', 'Edit', 'Write'],
-  'web-research': ['WebSearch', 'WebRead']
+  'web-research': ['WebSearch', 'WebRead'],
+  'git-publish': ['GitStatus', 'Bash']
 }
 
 export function resolveExecutionContract(input: ResolveExecutionContractInput): AgentExecutionContract | null {
@@ -75,6 +78,9 @@ export function resolveExecutionContract(input: ResolveExecutionContractInput): 
 
   if (!input.workspacePath) return null
 
+  if (GIT_PUBLISH_PATTERN.test(text)) {
+    return buildContract('git-publish', available)
+  }
   if (CONTINUATION_PATTERN.test(text) || ENGLISH_CONTINUATION_PATTERN.test(text)) {
     return buildContract('continuation', available)
   }
@@ -97,11 +103,31 @@ export function executionContractInstructions(contract: AgentExecutionContract):
     'Your first step must be a structured call to one of the tools provided for this step.',
     'Do not output a preamble, status summary, plan, or completion claim before the tool call.',
     'If the tool call fails or is denied, report that concrete result. Never claim work was performed without a tool result.',
+    ...(contract.taskKind === 'git-publish' ? GIT_PUBLISH_INSTRUCTIONS : []),
     '</HOST_EXECUTION_CONTRACT>'
   ].join('\n')
 }
 
+const GIT_PUBLISH_INSTRUCTIONS = [
+  'First step: inspect the working tree with git status. Do not commit or push before you know what changed.',
+  'Protect unrelated dirty files; only stage and commit the target changes for this request.',
+  'Report the actual number of commits created from the real git result, not an assumed count.',
+  'Perform a real git push. Do not claim the remote was updated without a push result.',
+  'Before claiming success, re-check git status and confirm the branch is in sync with its upstream.'
+]
+
 function buildContract(taskKind: ExecutionTaskKind, available: Set<string>): AgentExecutionContract | null {
+  if (taskKind === 'git-publish') {
+    const firstTool = available.has('GitStatus') ? 'GitStatus' : available.has('Bash') ? 'Bash' : null
+    if (!firstTool) return null
+    return {
+      taskKind,
+      requireToolCall: true,
+      activeToolNames: [firstTool],
+      requiredFirstTool: undefined,
+      reason: 'short commit/push request; first step must inspect git status before any commit or push'
+    }
+  }
   const preferred = TOOL_PREFERENCES[taskKind].filter((name) => available.has(name))
   const fallback = [...available].filter((name) => !META_ONLY_TOOLS.has(name))
   const activeToolNames = preferred.length > 0 ? preferred : fallback

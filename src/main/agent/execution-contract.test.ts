@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveExecutionContract } from './execution-contract'
+import { executionContractInstructions, resolveExecutionContract } from './execution-contract'
 
 const tools = ['ContextRetrieve', 'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob', 'TodoWrite', 'WebSearch', 'WebRead', 'GitStatus', 'GitDiff']
 
@@ -60,4 +60,48 @@ void test('workspace search stays on local inspection tools', () => {
   assert.equal(contract?.taskKind, 'workspace-inspection')
   assert.ok(contract?.activeToolNames.includes('Grep'))
   assert.ok(!contract?.activeToolNames.includes('WebSearch'))
+})
+
+void test('short commit/push phrases resolve to git-publish with GitStatus first', () => {
+  for (const phrase of ['commit/push', 'commit push', 'commit and push', '提交并推送']) {
+    const contract = resolve(phrase)
+    assert.equal(contract?.taskKind, 'git-publish', phrase)
+    assert.equal(contract?.requireToolCall, true, phrase)
+    assert.deepEqual(contract?.activeToolNames, ['GitStatus'], phrase)
+    assert.match(contract?.reason ?? '', /git status/i, phrase)
+  }
+})
+
+void test('git-publish falls back to Bash when GitStatus is unavailable', () => {
+  const contract = resolveExecutionContract({
+    userText: 'commit/push',
+    runMode: 'chat',
+    workspacePath: 'E:\\workspace',
+    availableToolNames: ['ContextRetrieve', 'Read', 'Bash', 'Edit']
+  })
+  assert.equal(contract?.taskKind, 'git-publish')
+  assert.deepEqual(contract?.activeToolNames, ['Bash'])
+})
+
+void test('git-publish is null without a workspace or a status tool', () => {
+  assert.equal(resolve('commit/push', null), null)
+  assert.equal(resolve('提交并推送', null), null)
+  assert.equal(resolveExecutionContract({
+    userText: 'commit and push',
+    runMode: 'chat',
+    workspacePath: 'E:\\workspace',
+    availableToolNames: ['ContextRetrieve', 'TodoWrite', 'Read']
+  }), null)
+})
+
+void test('git-publish instructions require status, protected commits, real push, and upstream check', () => {
+  const contract = resolve('commit/push')
+  assert.ok(contract)
+  const instructions = executionContractInstructions(contract)
+  assert.match(instructions, /classified as git-publish/)
+  assert.match(instructions, /git status/i)
+  assert.match(instructions, /unrelated dirty files|Protect unrelated/i)
+  assert.match(instructions, /actual number of commits/i)
+  assert.match(instructions, /real git push/i)
+  assert.match(instructions, /upstream/i)
 })
