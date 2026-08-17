@@ -31,7 +31,7 @@ import {
   steerPendingUserMessage
 } from './store/sessions'
 import { resolveProjectPath } from './store/projects'
-import { appendOperation, readInterruptedRun, type OperationJournal } from './store/operations'
+import { appendOperation, readInterruptedRun, unknownOutcomeGuard, type OperationJournal } from './store/operations'
 import { getMcpTools } from './tools/mcp-bridge'
 import { webTools } from './tools/web'
 import { imageTools } from './tools/image'
@@ -633,6 +633,7 @@ function handleSend(
   }
 
   const researchContext = runMode === 'research' ? createResearchContext() : undefined
+  const interrupted = readInterruptedRun(sessionId)
   const operationJournal: OperationJournal = {
     append: (event) => appendOperation(sessionId, event)
   }
@@ -644,7 +645,7 @@ function handleSend(
     researchContext,
     abortSignal: controller.signal,
     operationJournal,
-    guards: [generatedToolExecutionGuard(getJokerHomeDir())],
+    guards: [unknownOutcomeGuard(interrupted.missing), generatedToolExecutionGuard(getJokerHomeDir())],
     onToolCall: (info) => onEvent({
       type: 'tool-status',
       sessionId,
@@ -727,7 +728,6 @@ function handleSend(
     intent,
     generatedToolVersions
   })
-  const interrupted = readInterruptedRun(sessionId)
   if (interrupted.missing.length > 0) {
     const unknown = interrupted.missing.filter((item) => item.kind === 'TOOL_OUTCOME_UNKNOWN').map((item) => item.toolName)
     const notStarted = interrupted.missing.filter((item) => item.kind === 'TOOL_NOT_STARTED').map((item) => item.toolName)

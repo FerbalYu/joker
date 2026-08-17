@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import * as electron from 'electron'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -17,7 +18,7 @@ import { getJokerHomeDir } from './paths'
 export type OperationEvent =
   | { type: 'request-prepared'; at: number; runId: string; step?: number }
   | { type: 'request-dispatched'; at: number; runId: string; step?: number }
-  | { type: 'tool-proposed'; at: number; runId: string; toolCallId: string; toolName: string }
+  | { type: 'tool-proposed'; at: number; runId: string; toolCallId: string; toolName: string; inputFingerprint?: string }
   | { type: 'approval-asked'; at: number; runId: string; toolCallId: string }
   | { type: 'approval-decided'; at: number; runId: string; toolCallId: string; outcome: 'allow' | 'deny' }
   | { type: 'tool-started'; at: number; runId: string; toolCallId: string; toolName: string }
@@ -70,6 +71,7 @@ export function readOperations(sessionId: string): OperationEvent[] {
 export interface MissingToolOutcome {
   toolCallId: string
   toolName: string
+  inputFingerprint?: string
   kind: 'TOOL_NOT_STARTED' | 'TOOL_OUTCOME_UNKNOWN'
 }
 
@@ -81,18 +83,19 @@ export interface MissingToolOutcome {
  *   side effect may have happened and the call MUST NOT be auto-retried.
  */
 export function classifyInterruptedRun(events: OperationEvent[]): MissingToolOutcome[] {
-  const tools = new Map<string, { toolName: string; started: boolean; result: boolean }>()
+  const tools = new Map<string, { toolName: string; inputFingerprint?: string; started: boolean; result: boolean }>()
   for (const event of events) {
     if (event.type === 'tool-proposed') {
-      const entry = tools.get(event.toolCallId) ?? { toolName: event.toolName, started: false, result: false }
+      const entry = tools.get(event.toolCallId) ?? { toolName: event.toolName, inputFingerprint: event.inputFingerprint, started: false, result: false }
+      entry.inputFingerprint = event.inputFingerprint
       tools.set(event.toolCallId, entry)
     } else if (event.type === 'tool-started') {
-      const entry = tools.get(event.toolCallId) ?? { toolName: event.toolName, started: false, result: false }
+      const entry = tools.get(event.toolCallId) ?? { toolName: event.toolName, inputFingerprint: undefined, started: false, result: false }
       entry.started = true
       entry.toolName = event.toolName
       tools.set(event.toolCallId, entry)
     } else if (event.type === 'tool-result') {
-      const entry = tools.get(event.toolCallId) ?? { toolName: '', started: true, result: false }
+      const entry = tools.get(event.toolCallId) ?? { toolName: '', inputFingerprint: undefined, started: true, result: false }
       entry.result = true
       tools.set(event.toolCallId, entry)
     }
@@ -103,10 +106,36 @@ export function classifyInterruptedRun(events: OperationEvent[]): MissingToolOut
     missing.push({
       toolCallId,
       toolName: entry.toolName,
+      ...(entry.inputFingerprint ? { inputFingerprint: entry.inputFingerprint } : {}),
       kind: entry.started ? 'TOOL_OUTCOME_UNKNOWN' : 'TOOL_NOT_STARTED'
     })
   }
   return missing
+}
+
+export function toolInputFingerprint(toolName: string, input: Record<string, unknown>): string {
+  return createHash('sha256').update(`${toolName}\0${canonicalizeJson(input)}`).digest('hex')
+}
+
+function canonicalizeJson(value: unknown): string {
+  return JSON.stringify(sortJsonValue(value))
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonValue)
+  if (value !== null && typeof value === 'object') {
+    const sorted: Record<string, unknown> = {}
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) sorted[key] = sortJsonValue((value as Record<string, unknown>)[key])
+    return sorted
+  }
+  return value
+}
+
+export function unknownOutcomeGuard(missing: readonly MissingToolOutcome[]): import('../tools/registry').ToolGuard {
+  const blocked = new Set(missing.filter((item) => item.kind === 'TOOL_OUTCOME_UNKNOWN' && item.inputFingerprint).map((item) => item.inputFingerprint))
+  return ({ toolName, input }) => blocked.has(toolInputFingerprint(toolName, input))
+    ? 'an interrupted previous run started this identical tool call but did not durably record its outcome; verify current state or ask the user before retrying'
+    : undefined
 }
 
 export interface InterruptedRunView {

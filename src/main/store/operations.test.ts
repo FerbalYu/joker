@@ -9,6 +9,8 @@ import {
   operationsPath,
   readInterruptedRun,
   readOperations,
+  toolInputFingerprint,
+  unknownOutcomeGuard,
   setOperationsDirForTests,
   type OperationEvent
 } from './operations'
@@ -109,6 +111,23 @@ void test('readInterruptedRun returns no missing tools for a cleanly terminated 
 
     assert.deepEqual(readInterruptedRun('session-c'), { runId: undefined, missing: [] })
   })
+})
+
+void test('unknown outcome guard blocks only the identical canonical tool call', () => {
+  const fingerprint = toolInputFingerprint('Write', { filePath: 'a.txt', content: 'x' })
+  const guard = unknownOutcomeGuard([{ toolCallId: 'call-1', toolName: 'Write', inputFingerprint: fingerprint, kind: 'TOOL_OUTCOME_UNKNOWN' }])
+  const base = { definition: {} as never, context: {} as never }
+  assert.match(guard({ ...base, toolName: 'Write', input: { content: 'x', filePath: 'a.txt' } }) ?? '', /interrupted previous run/)
+  assert.equal(guard({ ...base, toolName: 'Write', input: { filePath: 'b.txt', content: 'x' } }), undefined)
+  assert.equal(guard({ ...base, toolName: 'Read', input: { filePath: 'a.txt', content: 'x' } }), undefined)
+})
+
+void test('unknown outcome guard does not block not-started or legacy calls without fingerprints', () => {
+  const guard = unknownOutcomeGuard([
+    { toolCallId: 'call-1', toolName: 'Write', inputFingerprint: toolInputFingerprint('Write', { filePath: 'a.txt' }), kind: 'TOOL_NOT_STARTED' },
+    { toolCallId: 'call-2', toolName: 'Write', kind: 'TOOL_OUTCOME_UNKNOWN' }
+  ])
+  assert.equal(guard({ toolName: 'Write', input: { filePath: 'a.txt' }, definition: {} as never, context: {} as never }), undefined)
 })
 
 void test('readOperations tolerates a torn tail line from a crash mid-write', () => {
