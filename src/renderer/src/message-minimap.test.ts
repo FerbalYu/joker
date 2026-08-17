@@ -4,14 +4,16 @@ import type { ChatMessage } from '@shared/types'
 import {
   buildMinimapEntries,
   calculateViewportIndicator,
+  formatEntryDuration,
   minimapClickToScrollTop,
   truncatePreview
 } from './message-minimap'
 
-const message = (id: string, role: ChatMessage['role'], content = ''): ChatMessage => ({
+const message = (id: string, role: ChatMessage['role'], content = '', durationMs?: number): ChatMessage => ({
   id,
   role,
   content,
+  ...(durationMs !== undefined ? { durationMs } : {}),
   createdAt: 1
 })
 
@@ -65,4 +67,54 @@ void test('viewport indicator maps top, bottom, and non-scrollable documents', (
 void test('minimap clicks map to legal scroll positions', () => {
   assert.equal(minimapClickToScrollTop(0, 400, 100, 1000, 250), 0)
   assert.equal(minimapClickToScrollTop(400, 400, 100, 1000, 250), 750)
+})
+
+void test('recorded durations size timeline blocks proportionally and sum to the track', () => {
+  const entries = buildMinimapEntries([
+    message('u1', 'user', '慢问题'),
+    message('a1', 'assistant', '慢答复', 9_000),
+    message('u2', 'user', '快问题'),
+    message('a2', 'assistant', '快答复', 1_000)
+  ], '', false, 408)
+
+  assert.equal(entries.length, 2)
+  assert.equal(entries[0].durationMs, 9_000)
+  assert.equal(entries[1].durationMs, 1_000)
+  assert.ok(entries[0].height > entries[1].height * 3.5, `slow turn block is visibly larger (${entries[0].height} vs ${entries[1].height})`)
+  const total = entries[entries.length - 1].top + entries[entries.length - 1].height
+  assert.ok(total <= 409, `timeline stays inside the track (got ${total})`)
+})
+
+void test('unknown durations fall back to equal-height lines', () => {
+  const entries = buildMinimapEntries([
+    message('u1', 'user', '问题'),
+    message('a1', 'assistant', '答复'),
+    message('u2', 'user', '问题二'),
+    message('a2', 'assistant', '答复二')
+  ], '', false, 408)
+
+  assert.equal(entries[0].height, entries[1].height)
+  assert.equal(entries[0].durationMs, 0)
+})
+
+void test('tool calls are counted per turn and durations format compactly', () => {
+  const entries = buildMinimapEntries([
+    message('u1', 'user', '查一下'),
+    {
+      ...message('a1', 'assistant', '结果', 95_000),
+      toolCalls: [
+        { toolCallId: 't1', toolName: 'WebSearch', input: {}, status: 'done' as const, startedAt: 1 },
+        { toolCallId: 't2', toolName: 'TodoWrite', input: {}, status: 'done' as const, startedAt: 2 },
+        { toolCallId: 't3', toolName: 'ToolForgeStart', input: {}, status: 'done' as const, startedAt: 3 }
+      ]
+    }
+  ], '', false, 408)
+
+  assert.equal(entries[0].toolCount, 1, 'detail-only and internal tool calls are excluded')
+  assert.equal(formatEntryDuration(950), '0.9s')
+  assert.equal(formatEntryDuration(9_400), '9.4s')
+  assert.equal(formatEntryDuration(10_400), '10s')
+  assert.equal(formatEntryDuration(95_000), '1m 35s')
+  assert.equal(formatEntryDuration(60_000), '1m')
+  assert.equal(formatEntryDuration(0), '—')
 })

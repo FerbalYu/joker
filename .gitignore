@@ -29,3 +29,28 @@ npm-debug.log*
 # Config (local API keys)
 .env
 .env.local
+
+# ---- JOKER runtime data & credentials (never commit) ----
+# config.json / image-provider.json / sessions / audit logs contain API keys + chat history
+/.joker/
+/.joker-runtime/
+
+# ---- Agent workspace / scratch dirs ----
+/.project-memory/
+/.run-code/
+/.spec-workflow/
+/.qa/
+/.zcode/
+/.playwright-cli/
+
+# ---- Build/QA artifacts at repo root ----
+/dist-*/                    # e.g. dist-v011/ packaged output
+/release/
+minimap-qa-1.png
+.review-focused.diff
+
+# ---- Stray Electron smoke markers ----
+/crash-after-ready
+/descendant
+/hang-initialize
+/healthy

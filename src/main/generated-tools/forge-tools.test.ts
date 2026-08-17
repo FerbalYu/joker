@@ -93,12 +93,3 @@ void test('Forge tools confine writes to the job workspace and enforce extension
     assert.equal((await read.execute({ path: 'source/tool.js' }, context)).output, 'tool.output("ok")\n')
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
-
-void test('ForgeSubmitCandidate requires a host-owned passing check', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'joker-forge-tools-'))
-  try {
-    setup(home)
-    const submit = definition(home, 'ForgeSubmitCandidate')
-    await assert.rejects(submit.execute({ expectedRevision: 2 }, context), /requires a passing host-owned structure check/)
-  } finally { rmSync(home, { recursive: true, force: true }) }
-})

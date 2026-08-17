@@ -34,6 +34,7 @@ function execution(messageId = 'message-1'): AgentRunResult {
     segments: [{ type: 'text', text: 'Implemented and verified the requested change.' }],
     toolCalls: [],
     usage: { totalTokens: 10 },
+    durationMs: 1_200,
     steps: { count: 1, limit: 50, finishReason: 'stop' },
     finishReason: 'stop'
   }
@@ -125,7 +126,7 @@ void test('persists execution assistant before independent validation', async ()
 })
 
 void test('repetition output is committed before the Goal pauses without validation', async () => {
-  const message = '继续。\n下一步。\n\n> ⚠️ JOKER 已自动停止：检测到模型输出陷入重复循环。请重试，或切换模型后继续。'
+  const message = '继续。\n下一步。\n\n> 检测到重复输出，已自动停止。'
   const testHarness = harness([], () => ({
     status: 'repetition',
     messageId: 'message-repetition',
@@ -133,6 +134,7 @@ void test('repetition output is committed before the Goal pauses without validat
     segments: [{ type: 'text', text: message }],
     toolCalls: [],
     usage: { totalTokens: 12 },
+    durationMs: 800,
     steps: { count: 1, limit: 50 },
     error: 'Model output was stopped because it entered a repetition loop'
   }))
@@ -182,7 +184,7 @@ void test('stop aborts execution and durably pauses the latest Goal', async () =
     execute: async ({ signal }) => {
       release?.()
       await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
-      return { status: 'aborted', text: '', segments: [], toolCalls: [], steps: { count: 0, limit: 50 } }
+      return { status: 'aborted', text: '', segments: [], toolCalls: [], durationMs: 0, steps: { count: 0, limit: 50 } }
     },
     evaluate: async () => ({ success: false, error: 'model-error', message: 'unused', usage: {} }),
     uuid: () => 'invocation-1'
@@ -214,7 +216,7 @@ void test('stale aborted execution cannot pause a replacement Goal', async () =>
     execute: async ({ signal }) => {
       release?.()
       await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
-      return { status: 'aborted', text: '', segments: [], toolCalls: [], steps: { count: 0, limit: 50 } }
+      return { status: 'aborted', text: '', segments: [], toolCalls: [], durationMs: 0, steps: { count: 0, limit: 50 } }
     },
     evaluate: async () => ({ success: false, error: 'model-error', message: 'unused', usage: {} }),
     uuid: () => 'old-invocation'

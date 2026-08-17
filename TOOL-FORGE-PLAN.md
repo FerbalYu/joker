@@ -1,12 +1,29 @@
 # JOKER ToolForge 自造工具与热加载实施计划
 
-> 状态：修订稿 v2
-> 日期：2026-08-05
-> 修订记录：v2 — 对照代码逐条核对 §2 事实声明（修正 3 处细节）；新增 §8.2.1 运行等级与降级路径；§17/§21/§22 按等级调整退出条件与 Vertical Slice 验收变体；§20 补充资格门禁风险行
-> 范围：JOKER 自主发现工具缺口、委派 ForgeAgent 制造 Tool、隔离验证、策略授权、热加载、继续原任务，以及“设置 → 自造工具”的管理与定向编辑闭环
-> 首期边界：项目级、低风险、可回滚的本地 Tool；不把任意生成代码直接载入 Electron 主进程
+> 状态：修订稿 v3（对齐已发布实现）
+> 日期：2026-08-05（v3 更新：2026-08-14）
+> 修订记录：
+> - v2 — 对照代码逐条核对 §2 事实声明（修正 3 处细节）；新增 §8.2.1 运行等级与降级路径；§17/§21/§22 按等级调整退出条件与 Vertical Slice 验收变体；§20 补充资格门禁风险行
+> - v3 — 依据已发布的 ToolForge 实现（提交 `ecc7390` 及后续工作树）对齐文档：当前实现采用 `user-owned-full-trust-v1` 全信任运行时，无审批门、无权限门；原分级资格门禁（§8.2.1）与按权限 fail-closed 策略矩阵（§11.1）已不被当前实现采用，相关段落标注为「历史设计（已被全信任覆盖）」，保留作为设计演进记录。
+> 范围：JOKER 自主发现工具缺口、委派 ForgeAgent 制造 Tool、验证、热加载、继续原任务，以及“设置 → 自造工具”的管理与定向编辑闭环
+> 首期边界：项目级、本地 Tool；生成代码只在独立 Node 子进程（`fork`）中运行，不把任意生成代码直接载入 Electron 主进程地址空间
+
+## 0. 实现现状（v3，权威）
+
+> 本节的代码事实以当前 `src/main/generated-tools/**` 为准，取代本文中与其冲突的历史设计描述。
+
+已发布并维持的策略为**全信任运行时（`user-owned-full-trust-v1`）**：
+
+- **执行模型**：生成代码通过 `fork()` 在独立 Node 子进程中运行（`runtime/user-owned-full-trust-runner.ts`），不进入 Electron 主进程地址空间。子进程仅隔离取消语义；它**不是能力或策略边界**，生成代码以**当前桌面用户账户权限**执行（源码注释原文：*"This profile intentionally runs generated code with the current desktop user account permissions. The child process only keeps cancellation isolated from Electron; it is not a capability or policy boundary."*）。
+- **审批与权限门**：`policy.ts` 的 `evaluateGeneratedToolPolicy()` 对所有输入返回 `allow`（reasonCode `workspace-full-trust-authorized`，reason 原文 *"ToolForge has no approval or permission gate"*，`requiresApproval: false`，`hardDeny: false`）。生成工具注册为 `validationProfile: 'user-owned-full-trust-v1'` 时，`registry.ts` 的执行路径同样跳过审批 gate 自动执行。
+- **验证与证据仍然存在**：ForgeAgent 只制造，宿主 Validator 独立验收（编译、测试、越权/路径探测、超时、取消、审计），ValidationReport 绑定 fingerprint；这些是**事实验收**，不是授权门。
+- **仍然生效的防护**：生成代码无法调用 JOKER IPC、修改 Tool Registry 或写审计文件；执行受超时/取消/进程树清理约束；运行在 workspace 目录内；内容或权限变化自动使旧版失效并可回滚/停用/删除。
+- **产品/Agent 层约束（非运行时强制）**：不允许修改 JOKER 主进程、审批系统、Registry 或 ToolForge 实现；不允许自动读取系统凭证/浏览器 Cookie/SSH Key/未声明环境变量；不允许发布、支付、删除生产数据等不可逆操作。这些由 Agent 提示词与工具暴露面约束，**不构成运行时技术强制**。
+- 代码中仍保留 L0/L1/L2 运行时资格机制（`runtime-qualification-service.ts`、`qualification.ts`），但当前策略硬编码 `runtimeQualificationLevel: 'L2'` 且忽略磁盘上的资格报告结果，因此**不参与授权决策**。
 
 ## 1. 结论
+
+> **v3 注**：下文及后续 §2–§23 描述 v2 的设计流程。其中「Policy Engine 根据权限与运行模式决定自动通过或请求用户」等授权步骤，在已发布的全信任实现中已简化为恒 `allow`（见 §0）；「受控 Tool Runner」的隔离语义也已由全信任子进程模型取代。其余机制（ToolSearch→ForgeAgent→Validator→Promote→续跑）仍与实现一致。
 
 JOKER 应具备 Tool 自举能力：当主 Agent 判断现有 Tool 无法完成用户任务时，能够自主搜索已有能力、生成结构化 ToolSpec、委派专用 ForgeAgent 编写 Tool、由宿主验证器独立验收、按策略安装并刷新工具集合，然后在同一个用户任务中继续调用新 Tool。
 
@@ -58,15 +75,17 @@ ForgeAgent 只有制造权，不能给自己授信、安装、扩大权限或修
 - `src/renderer/src/components/SettingsModal.tsx` 目前只有 Provider、Image、MCP、Skills 四个分区；复杂 Tool 编辑不适合全部塞进现有设置 Modal。
 - 当前 MCP 的 `enabled`、`trustState`、`permission` 是三个独立状态轴，`getAllTools()` 要求三者同时满足，因此会出现“已启用且已信任但权限拒绝”的矛盾组合。自造 Tool 不应复制这种多轴状态 UI，而应使用单一、可解释的可用状态。
 
-### 2.3 不能当作安全边界的方案
+### 2.3 历史设计：不能当作安全边界的方案
 
-以下方案不得作为自造 Tool 自动运行的正式安全边界：
+> **v3 注**：本节反映 v2 设计期的安全约束。当前全信任实现（见 §0）已不再采用"分级资格门禁 + fail-closed 权限矩阵"模型；下述"不得作为安全边界"的底线在当前实现中只有第一、三、五条仍然被遵循，其余已被全信任模型有意改变。保留本节作为设计演进记录。
 
-- 在 Electron 主进程中使用 `eval()`、动态 `import()` 或直接加载生成模块。
-- 把 Node `vm`、普通 Worker Thread 或普通 child process 当作可靠沙箱。
-- 仅依赖 ForgeAgent 在 manifest 中声明“不会联网”或“只读”。
-- 只做静态代码扫描，不做真实越权测试和运行时权限拦截。
-- ForgeAgent 自己编写测试、自己解释测试、自己决定安装。
+v2 设计期列出的、不得作为自造 Tool 自动运行正式安全边界的方案：
+
+- 在 Electron 主进程中使用 `eval()`、动态 `import()` 或直接加载生成模块。— **仍遵循**：生成代码只在 `fork` 出的独立 Node 子进程运行，不载入主进程地址空间。
+- 把 Node `vm`、普通 Worker Thread 或普通 child process 当作可靠沙箱。— **已被全信任模型有意改变**：当前 `user-owned-full-trust-v1` 以普通 `fork` 子进程运行，并明确它不是能力/策略边界（见 §0）。
+- 仅依赖 ForgeAgent 在 manifest 中声明“不会联网”或“只读”。— **仍部分遵循**：ForgeAgent 无自证权，Validator 独立事实验收；但全信任下不再据此做授权放行/拒绝。
+- 只做静态代码扫描，不做真实越权测试和运行时权限拦截。— **已被改变**：Validator 仍做真实越权/路径探测，但运行时不再拦截权限。
+- ForgeAgent 自己编写测试、自己解释测试、自己决定安装。— **仍遵循**：验证与安装由宿主 Validator/Registry 掌控。
 
 ## 3. 产品目标
 
@@ -87,11 +106,11 @@ ForgeAgent 只有制造权，不能给自己授信、安装、扩大权限或修
 - 使用结构化 ToolSpec 表达能力缺口，而不是直接自由发挥代码。
 - Tool 制造、测试、安装和调用形成证据闭环。
 - 新 Tool 成为可发现、可版本化、可审计、可恢复的持久能力。
-- Agent 不得通过自造 Tool 绕过当前 workspace、审批、网络或凭证边界。
+- Agent 不得通过自造 Tool 绕过当前 workspace 边界、不得扩大自身权限、不得修改安全策略、审批系统或 ToolForge 实现。全信任模型下自造 Tool 执行本身不设审批/权限门（见 §0），该条目指主 JOKER 不得借助 ToolForge 篡改宿主约束。
 
 ### 3.3 工程目标
 
-- Generated Tool 不进入 Electron 主进程地址空间。
+- Generated Tool 不进入 Electron 主进程地址空间。— 全信任实现下改为：在独立 Node 子进程（`fork`）中运行，不载入主进程；子进程以当前用户权限执行，不是能力/策略边界（见 §0）。
 - ToolSet 刷新不要求用户重启应用或重新发送任务。
 - ForgeJob、ToolVersion、ValidationReport 和运行审计持久化，应用重启后可恢复。
 - 所有状态由宿主事实派生，不能由模型文本声称完成。
@@ -326,9 +345,15 @@ ForgeSubmitCandidate
 
 ### 8.1 目标
 
-生成代码不能获得与当前 Windows 用户相同的任意文件、网络、环境变量和进程权限。Tool Runner 必须实际强制执行 manifest，而不是只依赖代码约定。
+> **v3 注**：本节为 v2 设计期目标，已被 §0 的全信任实现取代。保留作为设计演进记录。
+
+v2 设计期目标：生成代码不能获得与当前 Windows 用户相同的任意文件、网络、环境变量和进程权限。Tool Runner 必须实际强制执行 manifest，而不是只依赖代码约定。
+
+当前实现的偏离：`user-owned-full-trust-v1` 以当前桌面用户权限运行生成代码，不强制 manifest 权限（见 §0）。
 
 ### 8.2 P0 技术决策 Spike
+
+> **v3 注**：本节为 v2 设计期的候选运行时资格验证清单。当前实现未做该矩阵并转向全信任子进程模型；下述"禁止安装和执行"的 observe 兜底在当前实现中不生效（策略始终 allow）。保留作为设计演进记录。
 
 实现前必须对以下运行时做小型资格验证：
 
@@ -346,9 +371,11 @@ ForgeSubmitCandidate
 - 生成 Tool 无法调用 JOKER IPC、修改 Tool Registry 或写审计文件。
 - Windows 打包产物中行为与开发环境一致。
 
-如果没有候选运行时通过上述验证，首期只能进入 observe 模式：允许生成和验证草稿，但禁止自动安装和执行。普通 child process 隔离不能被描述为安全完成。
+如果没有候选运行时通过上述验证，首期只能进入 observe 模式：允许生成和验证草稿，但禁止自动安装和执行。普通 child process 隔离不能被描述为安全完成。（**v3 注**：该 observe 兜底属于 v2 设计，全信任实现下不再生效，见 §0。）
 
-#### 8.2.1 资格门禁与运行等级（降级路径）
+#### 8.2.1 资格门禁与运行等级（历史设计，已被全信任覆盖）
+
+> **v3 注**：本节为 v2 设计的分级资格门禁（L0/L1/L2）。当前实现保留该机制代码但策略硬编码 L2 且全信任放行，等级不再影响授权决策（见 §0）。Vertical Slice 验收与完成定义不再区分等级。
 
 P0 产出不是单一布尔值，而是每个候选 Runner 在「开发环境 × Windows 打包环境」两个矩阵上、逐条关键隔离用例的资格清单。依据清单冻结全局运行等级，作为后续所有阶段的固定约束：
 
@@ -460,7 +487,7 @@ interface GeneratedToolValidationReport {
 5. MCP initialize、tools/list、tools/call 和错误返回符合约定。
 6. 输入 Schema 与真实运行行为一致。
 7. 工作区边界、路径穿越、符号链接和大小写变体测试通过。
-8. 未声明网络、环境变量、子进程和写入能力均被拒绝。
+8. 工作区边界、路径穿越、符号链接和大小写变体测试通过；历史设计还要求"未声明网络、环境变量、子进程和写入能力均被拒绝"（Validator 的越权/权限探测在 v2 是 fail-closed 门禁，全信任实现下仍做越权探测以记录 `observedCapabilities`，但不再据此拒绝执行，见 §0）。
 9. 超时、取消、崩溃和应用退出能清理进程与临时资源。
 10. 审计包含 proposed、policy、started、finished 和真实结果，不泄露 secret。
 11. ValidationReport 的 fingerprint 与待安装产物再次计算结果一致。
@@ -472,7 +499,7 @@ JOKER 只能在以下证据同时存在时声称 Tool 已可用：
 - ForgeJob 已进入 `completed`。
 - ValidationReport 为 `passed`，且没有未解释的 skip。
 - 产物 fingerprint 与报告一致。
-- Policy Engine 返回 allow 或用户明确批准。
+- Policy Engine 返回 allow（全信任实现下对 promote/execute 恒为 allow，见 §0；历史设计中为 allow 或用户明确批准）。
 - Registry 已原子切换 activeVersionId。
 - 新版本能通过真实 `tools/list` 被发现。
 - 最少一次 fixture `tools/call` 成功。
@@ -480,7 +507,9 @@ JOKER 只能在以下证据同时存在时声称 Tool 已可用：
 
 ## 11. 策略与自动化等级
 
-### 11.1 首期策略矩阵
+### 11.1 首期策略矩阵（历史设计，已被全信任覆盖）
+
+> **v3 注**：下表为 v2 设计的按权限 fail-closed 矩阵。当前实现不按权限/模式分级——`evaluateGeneratedToolPolicy()` 对 promote/execute 一律返回 `allow`（`workspace-full-trust-authorized`，无审批、无硬拒），见 §0。保留作为设计演进记录。
 
 | 权限 | 建议模式 | 自动编辑模式 | 全自动模式 |
 |---|---|---|---|
@@ -530,7 +559,7 @@ ToolForgeStart 返回 jobId
   ↓
 主 run 等待或轮询 ForgeJob
   ↓
-ToolPromote 成功（运行等级为 L1 时，此处先插入用户逐次批准，见 §8.2.1），capabilityRevision 增加
+ToolPromote 成功（历史设计中运行等级为 L1 时此处先插入用户逐次批准，见 §8.2.1；全信任实现下无此插入点），capabilityRevision 增加
   ↓
 当前 Agent step 写入结构化 capability-changed 结果并正常收尾
   ↓
@@ -842,7 +871,7 @@ src/renderer/src/components/generated-tools/
 - 建立一个固定的只读示例 Tool，例如读取 fixture JSON 并统计字段。
 - 输出 runtime qualification 报告。
 
-退出条件：产出 §8.2.1 定义的资格矩阵（候选 Runner × 开发/打包环境 × 关键隔离用例），并据矩阵冻结运行等级（L2/L1/L0），资格报告持久化入库。等级为 L0 时，后续阶段只交付草稿与验证能力，不进入自动执行；L1 时后续阶段自动执行替换为逐次批准。
+退出条件（历史设计）：产出 §8.2.1 定义的资格矩阵（候选 Runner × 开发/打包环境 × 关键隔离用例），并据矩阵冻结运行等级（L2/L1/L0），资格报告持久化入库。等级为 L0 时，后续阶段只交付草稿与验证能力，不进入自动执行；L1 时后续阶段自动执行替换为逐次批准。（**v3 注**：该资格门禁已被全信任实现取代，见 §0；P0 阶段当前只需产出 qualification 报告作为证据，不决定授权。）
 
 ### P1：Generated Tool Registry 与只读管理 UI
 
@@ -972,10 +1001,10 @@ src/renderer/src/components/generated-tools/
 
 ## 20. 主要风险与应对
 
-| 风险 | 影响 | 应对 |
+| 风险 | 影响 | 应对（v3 按全信任实现更新） |
 |---|---|---|
-| 生成代码逃逸 | 获得用户级系统权限 | Runner 资格门禁、broker、越权测试；不合格时只 observe |
-| 资格门禁导致长期 L0/L1 | Vertical Slice 无法闭环，用户误以为“制造中=即将可用” | §8.2.1 分级验收变体；等级可凭新资格报告自动升级；UI 全程显示当前等级、未覆盖隔离属性与升级条件 |
+| 生成代码逃逸 | 获得用户级系统权限 | **v3**：全信任模型下生成代码本就以当前用户权限运行（见 §0），"逃逸"不再是授权边界概念；真实威胁变为"生成代码引发非预期外部副作用"。应对：Validator 越权/路径探测、超时/进程树清理、审计留痕、内容变化自动失效与回滚、Agent 提示词约束。 |
+| 资格门禁导致长期 L0/L1 | Vertical Slice 无法闭环，用户误以为"制造中=即将可用" | **v3**：分级门禁已移除，不再有 L0/L1 阻塞；该风险不适用（见 §0）。 |
 | ForgeAgent 自证成功 | 假完成、错误安装 | 独立 Validator、宿主 fingerprint 和真实 fixture call |
 | 工具越造越多 | Tool schema 膨胀、模型选择变差 | ToolSearch、项目作用域、使用统计、渐进式工具发现 |
 | 修改破坏稳定版本 | 正在运行的任务失败 | 不可变版本、草稿验证、原子 Promote、自动回滚 |
@@ -1007,13 +1036,13 @@ src/renderer/src/components/generated-tools/
 9. 用户看到真实统计结果，以及“查看工具”“让 JOKER 修改”。
 10. 设置中能查看用途、权限、验证报告、版本和调用记录。
 
-以上链路以运行等级 L2 为基准。等级为 L1 时，步骤 6-8 替换为“验证通过 → 用户逐次批准 → ToolPromote → 自动续跑并调用”；等级为 L0 时，验收终点改为：草稿已生成、ValidationReport 已产出、UI 明确解释当前不可执行的原因与等级升级条件，原任务按 §11.2 交还用户，本切片标记为受阻塞，不计入 §23 最终完成定义。
+以上链路以当前全信任实现为基准（见 §0），不区分运行等级：Validator 独立验收 → Policy Engine 恒 allow（无审批）→ ToolPromote → 自动续跑并调用。历史设计中的 L1"用户逐次批准"与 L0"不可执行"验收变体已不适用于当前实现，保留在 §0 作为演进记录。
 
 这个 Vertical Slice 完成后，才能证明 JOKER 不是“会写一份工具代码”，而是真的完成了“能力缺口 → 自主制造 → 独立验收 → 热加载 → 使用 → 管理”的闭环。
 
 ## 22. 推荐实施顺序
 
-1. 先完成 P0 Runner 资格矩阵与数据契约，按 §8.2.1 冻结运行等级；L2/L1 之前不开放自动执行。
+1. 先完成 Registry、版本、指纹、持久化和只读 UI，确保状态可信（历史设计曾要求先做 P0 Runner 资格矩阵并按 §8.2.1 冻结运行等级，该门禁已被全信任实现取代，见 §0）。
 2. 再完成 Registry、版本、指纹、持久化和只读 UI，确保状态可信。
 3. 再实现 ForgeAgent 与 Validator，保持普通 subagent 只读边界不变。
 4. 再实现策略、Promote、capabilityRevision 与 continuation。
@@ -1023,7 +1052,7 @@ src/renderer/src/components/generated-tools/
 
 ## 23. 最终完成定义
 
-本计划不能因为新增了 ToolForge 按钮、生成了文件、MCP 能连接或页面能展示 Tool 就标记完成。以下完成定义以运行等级 L2 为基准：等级为 L1 时，涉及自动安装的条目按“用户逐次批准后安装”执行；等级为 L0 时本计划视为未完成，只交付草稿与验证能力。最终完成必须同时满足：
+本计划不能因为新增了 ToolForge 按钮、生成了文件、MCP 能连接或页面能展示 Tool 就标记完成。以下完成定义以当前全信任实现为基准（见 §0），不区分运行等级：
 
 - 主 JOKER 能在真实任务中发现能力缺口并调用 ToolForge 元工具。
 - ForgeAgent 只在隔离 job 环境制造 Tool。

@@ -117,6 +117,7 @@ void test('research WebSearch and WebRead share one run-scoped approval', async 
       }
     }
   }
+  setApprovalMode('suggest', 17)
   const gate = createApprovalGate(win as never, 'research-session', 'research-run', 'research')
   const first = gate('WebSearch', { query: 'topic' })
   assert.equal(sent.length, 1)
@@ -183,7 +184,7 @@ void test('approval gate uses WebContents.id and accepts a response during send'
   assert.equal(result.outcome, 'allow')
   assert.equal(getApprovalMode(browserWindowId), 'full-auto')
   cleanupApprovalWindow(browserWindowId)
-  assert.equal(getApprovalMode(webContentsId), 'suggest')
+  assert.equal(getApprovalMode(webContentsId), 'full-auto')
 })
 
 void test('main approval activity hook exposes owner and run lifecycle without renderer coupling', async () => {
@@ -198,6 +199,7 @@ void test('main approval activity hook exposes owner and run lifecycle without r
       send: () => {}
     }
   }
+  setApprovalMode('suggest', 941)
   const pending = createApprovalGate(win as never, 'summary-session', 'summary-run')('Bash', { command: 'pwd' })
   const request = getApprovalRegistry().listPending(941)[0]!
   cancelApprovalsForRun({ windowId: 940, sessionId: 'summary-session', runId: 'summary-run' })
@@ -224,6 +226,7 @@ void test('approval gate retains the sanitized request and emits terminal remova
       send: (channel: string, payload: unknown) => sent.push({ channel, payload })
     }
   }
+  setApprovalMode('suggest', 931)
   const gate = createApprovalGate(win as never, 'recovery-session', 'recovery-run')
   const pending = gate('Bash', { command: 'x'.repeat(501), nested: { untouched: true } })
   const request = sent[0]?.payload as ApprovalRequest
@@ -262,6 +265,7 @@ void test('approval gate removes pending request when send fails', async () => {
     }
   }
 
+  setApprovalMode('suggest', webContentsId)
   const result = await createApprovalGate(win as never, 'send-failure-session', 'send-failure-run')('Bash', { command: 'whoami' })
   assert.equal(result.outcome, 'deny')
   assert.equal(result.approvedByUser, false)
@@ -283,6 +287,7 @@ void test('BrowserWindow-id cleanup callers cancel WebContents-scoped pending re
     }
   }
 
+  setApprovalMode('suggest', webContentsId)
   const pending = createApprovalGate(win as never, 'cleanup-session', 'cleanup-run')('Bash', { command: 'whoami' })
   assert.notEqual(requestId, '')
   cancelApprovalsForRun({ windowId: browserWindowId, sessionId: 'cleanup-session', runId: 'cleanup-run' })

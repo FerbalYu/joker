@@ -7,8 +7,6 @@ import { installSummarizeTaskJsonFixture } from './fixture'
 import { readGeneratedToolRegistry } from './registry'
 import { generatedToolsRoot } from './store'
 import { mutateGeneratedToolLifecycle } from './lifecycle-service'
-import { listGeneratedToolsForManagement } from './management-read-model'
-import { GeneratedToolRevalidateService } from './revalidate-service'
 import { installRuntimeQualificationFixture } from './test-fixtures'
 
 void test('revalidate verifies the host artifact and updates descriptor availability', () => {
@@ -43,45 +41,6 @@ void test('revalidate verifies the host artifact and updates descriptor availabi
     const afterRestored = readGeneratedToolRegistry(home)
     assert.equal(afterRestored.entries[0].descriptor.availability, 'available')
     assert.equal(afterRestored.capabilityRevision.revision, afterChanged.capabilityRevision.revision + 1)
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
-void test('permission metadata tamper becomes changed and fails host revalidation', () => {
-  const home = mkdtempSync(join(tmpdir(), 'joker-lifecycle-permission-tamper-'))
-  try {
-    installRuntimeQualificationFixture(home)
-    installSummarizeTaskJsonFixture(home, 1)
-    const artifactRoot = join(generatedToolsRoot(home), 'tools', 'summarize-task-json', 'versions', 'v1')
-    const versionPath = join(artifactRoot, 'version.json')
-    const version = JSON.parse(readFileSync(versionPath, 'utf8')) as Record<string, unknown>
-    const manifest = structuredClone(version['manifest']) as Record<string, unknown>
-    manifest['permissions'] = {
-      filesystem: { read: ['fixtures/tasks.json', 'fixtures/private.json'], write: [] },
-      network: { hosts: [] },
-      process: { commands: [] },
-      environment: { keys: [] },
-      secrets: { handles: [] }
-    }
-    writeFileSync(versionPath, `${JSON.stringify({ ...version, manifest }, null, 2)}\n`, 'utf8')
-
-    const listed = listGeneratedToolsForManagement(home)
-    assert.equal(listed.success, true)
-    if (listed.success) {
-      assert.equal(listed.data.tools[0].availability, 'changed')
-      assert.equal(listed.data.tools[0].executable, false)
-    }
-
-    const registry = readGeneratedToolRegistry(home)
-    const revalidated = new GeneratedToolRevalidateService({ jokerHome: home, now: () => 2 }).revalidate({
-      toolId: 'summarize-task-json',
-      versionId: 'v1',
-      expectedRevision: registry.revision,
-      operationId: 'revalidate-permission-tamper'
-    })
-    assert.equal(revalidated.success, false)
-    assert.deepEqual(readGeneratedToolRegistry(home), registry)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

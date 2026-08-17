@@ -3,6 +3,7 @@ import type { ChatMessage } from '@shared/types'
 import {
   buildMinimapEntries,
   calculateViewportIndicator,
+  formatEntryDuration,
   minimapClickToScrollTop,
   truncatePreview,
   type ViewportIndicator
@@ -75,9 +76,10 @@ export default function MessageMinimap({ messages, streamText, streaming, scroll
       observer.disconnect()
       scrollElement.removeEventListener('scroll', update)
     }
-  }, [scrollRef])
+    // Re-bind when the track mounts after the first non-empty render.
+  }, [scrollRef, messages.length])
 
-  if (entries.length === 0) return null
+  if (messages.length === 0 && !streaming) return null
 
   const scrollFromPointer = (clientY: number): void => {
     const scrollElement = scrollRef.current
@@ -94,11 +96,11 @@ export default function MessageMinimap({ messages, streamText, streaming, scroll
   }
 
   return (
-    <aside className="sticky top-0 h-full w-[52px] shrink-0 self-start border-r border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-5">
+    <aside data-message-minimap className="sticky top-0 h-full max-h-full w-[52px] shrink-0 self-start border-r border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-5">
       <div
         ref={trackRef}
         aria-label="对话缩略导航"
-        className="relative h-full w-full"
+        className="relative h-full min-h-[120px] w-full"
         onClick={(event) => scrollFromPointer(event.clientY)}
       >
         {entries.map((entry) => {
@@ -108,18 +110,19 @@ export default function MessageMinimap({ messages, streamText, streaming, scroll
             <button
             key={entry.id}
             type="button"
-            aria-label={`我说的：${userPreview}；返回：${replyPreview || '暂无返回'}`}
+            aria-label={`我说的：${userPreview}；返回：${replyPreview || '暂无返回'}；耗时 ${formatEntryDuration(entry.durationMs)}`}
             onClick={(event) => {
               event.stopPropagation()
               scrollFromPointer(event.clientY)
             }}
-            className="group absolute left-0 z-10 h-10 w-10 -translate-y-1/2 text-left focus:outline-none"
-            style={{ top: `${entry.top + entry.height / 2}px` }}
+            className="group absolute left-0 z-10 w-10 -translate-y-1/2 text-left focus:outline-none"
+            style={{ top: `${entry.top + entry.height / 2}px`, height: `${Math.max(entry.height, 10)}px` }}
           >
-            <span className="absolute left-0 top-1/2 block h-px w-2.5 -translate-y-1/2 bg-[var(--color-text-muted)]/75 transition-[width,background-color] duration-150 group-hover:w-7 group-hover:bg-white group-focus-visible:w-7 group-focus-visible:bg-white" />
+            <span className={`absolute left-0 top-1/2 block -translate-y-1/2 rounded-sm transition-[width,background-color] duration-150 group-hover:w-7 group-hover:bg-white group-focus-visible:w-7 group-focus-visible:bg-white ${entry.durationMs > 0 ? 'w-2 bg-[var(--color-text-secondary)]/70' : 'h-px w-2.5 bg-[var(--color-text-muted)]/75'}`} style={entry.durationMs > 0 ? { height: `${Math.max(entry.height, 2)}px` } : undefined} />
             <span className="pointer-events-none absolute left-9 top-1/2 z-30 hidden w-64 -translate-y-1/2 rounded-lg border border-[var(--color-border-light)] bg-[var(--color-surface)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)] shadow-2xl group-hover:block group-focus-visible:block">
               <span className="block break-words"><span className="text-[var(--color-text-primary)]">我说的：</span>{userPreview || '（空）'}</span>
               <span className="block break-words"><span className="text-[var(--color-text-primary)]">返回：</span>{replyPreview || '暂无返回'}</span>
+              <span className="block"><span className="text-[var(--color-text-primary)]">耗时：</span>{formatEntryDuration(entry.durationMs)}{entry.toolCount > 0 ? ` · ${entry.toolCount} 次工具调用` : ''}</span>
             </span>
             </button>
           )

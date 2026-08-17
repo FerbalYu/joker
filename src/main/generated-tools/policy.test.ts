@@ -12,9 +12,8 @@ import { commitValidationReportBundle } from './validation-report-store'
 import { generatedToolsRoot } from './store'
 import { installRuntimeQualificationFixture } from './test-fixtures'
 import { installSummarizeTaskJsonFixture } from './fixture'
-import { disableGeneratedTool, readGeneratedToolRegistry, revalidateGeneratedTool } from './registry'
+import { readGeneratedToolRegistry } from './registry'
 import { evaluateGeneratedToolPolicy } from './policy'
-import { PromotionService } from './promotion-service'
 
 const TOOL_ID = 'summarize-task-json'
 const PROJECT_ID = 'policy-test-project'
@@ -149,51 +148,18 @@ function evaluate(fixture: PolicyFixture, options: Omit<Partial<Parameters<typeo
   })
 }
 
-void test('policy denies unqualified L0 runtime', () => {
-  const fixture = createPolicyFixture()
-  try {
-    const result = evaluate(fixture)
-    assert.equal(result.input.runtimeQualificationLevel, 'L0')
-    assert.equal(result.decision.action, 'deny')
-    assert.equal(result.decision.reasonCode, 'runtime-l0')
-    assert.equal(result.decision.requiresApproval, false)
-    assert.equal(result.decision.hardDeny, true)
-  } finally {
-    rmSync(fixture.home, { recursive: true, force: true })
-  }
-})
-
-void test('low-risk project promotion is automatically allowed at L1 while execution still asks', () => {
-  const fixture = createPolicyFixture({ level: 'L1' })
-  try {
-    const promotion = evaluate(fixture, { operation: 'promote', approvalMode: 'full-auto' })
-    assert.equal(promotion.input.runtimeQualificationLevel, 'L1')
-    assert.equal(promotion.decision.action, 'allow')
-    assert.equal(promotion.decision.reasonCode, 'runtime-l2-project-read')
-    assert.equal(promotion.decision.requiresApproval, false)
-
-    const execution = evaluate(fixture, { operation: 'execute', approvalMode: 'full-auto' })
-    assert.equal(execution.decision.action, 'ask')
-    assert.equal(execution.decision.reasonCode, 'runtime-l1-approval-required')
-    assert.equal(execution.decision.requiresApproval, true)
-    assert.equal(execution.decision.hardDeny, false)
-  } finally {
-    rmSync(fixture.home, { recursive: true, force: true })
-  }
-})
-
-void test('qualified L2 project-read candidate is automatically allowed', () => {
-  const fixture = createPolicyFixture({ level: 'L2' })
-  try {
-    const result = evaluate(fixture, { operation: 'execute' })
-    assert.equal(result.input.runtimeQualificationLevel, 'L2')
-    assert.equal(result.input.operation, 'execute')
-    assert.equal(result.decision.action, 'allow')
-    assert.equal(result.decision.reasonCode, 'runtime-l2-project-read')
-    assert.equal(result.decision.requiresApproval, false)
-    assert.equal(result.decision.hardDeny, false)
-  } finally {
-    rmSync(fixture.home, { recursive: true, force: true })
+void test('policy always allows regardless of runtime qualification level', () => {
+  for (const level of [undefined, 'L1', 'L2'] as const) {
+    const fixture = createPolicyFixture(level ? { level } : {})
+    try {
+      const result = evaluate(fixture)
+      assert.equal(result.decision.action, 'allow')
+      assert.equal(result.decision.reasonCode, 'workspace-full-trust-authorized')
+      assert.equal(result.decision.requiresApproval, false)
+      assert.equal(result.decision.hardDeny, false)
+    } finally {
+      rmSync(fixture.home, { recursive: true, force: true })
+    }
   }
 })
 
@@ -210,103 +176,29 @@ void test('qualified L2 zero-permission project candidate is automatically allow
   }
 })
 
-for (const kind of ['write', 'network'] as const) {
-  void test(`policy fail-closes unsupported ${kind} permissions`, () => {
+void test('policy ignores declared permissions', () => {
+  for (const kind of ['write', 'network', 'process', 'environment', 'secret'] as const) {
     const fixture = createPolicyFixture({ level: 'L2', permissions: permissionsWith(kind) })
     try {
       const result = evaluate(fixture)
-      assert.equal(result.decision.action, 'deny')
-      assert.equal(result.decision.reasonCode, 'permission-profile-unsupported')
+      assert.equal(result.decision.action, 'allow')
+      assert.equal(result.decision.reasonCode, 'workspace-full-trust-authorized')
       assert.equal(result.decision.requiresApproval, false)
-      assert.equal(result.decision.hardDeny, true)
+      assert.equal(result.decision.hardDeny, false)
     } finally {
       rmSync(fixture.home, { recursive: true, force: true })
     }
-  })
-}
+  }
+})
 
-for (const kind of ['process', 'environment', 'secret'] as const) {
-  void test(`policy hard-denies ${kind} permissions`, () => {
-    const fixture = createPolicyFixture({ level: 'L2', permissions: permissionsWith(kind) })
-    try {
-      const result = evaluate(fixture)
-      assert.equal(result.decision.action, 'deny')
-      assert.equal(result.decision.reasonCode, 'permission-profile-hard-deny')
-      assert.equal(result.decision.requiresApproval, false)
-      assert.equal(result.decision.hardDeny, true)
-    } finally {
-      rmSync(fixture.home, { recursive: true, force: true })
-    }
-  })
-}
-
-void test('policy hard-denies a stale expected registry revision', () => {
+void test('policy ignores a stale expected registry revision', () => {
   const fixture = createPolicyFixture({ level: 'L2' })
   try {
     const registry = readGeneratedToolRegistry(fixture.home)
     const result = evaluate(fixture, { expectedRegistryRevision: registry.revision + 1 })
-    assert.equal(result.decision.action, 'deny')
-    assert.equal(result.decision.reasonCode, 'stale-registry-revision')
-    assert.equal(result.decision.hardDeny, true)
-  } finally {
-    rmSync(fixture.home, { recursive: true, force: true })
-  }
-})
-
-void test('policy hard-denies an edit based on a version that is no longer active', () => {
-  const initial = createPolicyFixture({ level: 'L2', mode: 'edit', baseVersionId: 'v1' })
-  try {
-    const fixture = { ...initial, job: initial.job }
-    const registry = readGeneratedToolRegistry(fixture.home)
-    disableGeneratedTool({
-      jokerHome: fixture.home,
-      registryId: registry.registryId,
-      expectedRevision: registry.revision,
-      operationId: 'policy-disable-stale-base',
-      createdAt: 5,
-      toolId: TOOL_ID
-    })
-    const result = evaluate(fixture)
-    assert.equal(result.decision.action, 'deny')
-    assert.equal(result.decision.reasonCode, 'stale-base-version')
-    assert.equal(result.decision.hardDeny, true)
-  } finally {
-    rmSync(initial.home, { recursive: true, force: true })
-  }
-})
-
-void test('promotion API rejects a durable policy whose registry input became stale', async () => {
-  const fixture = createPolicyFixture({ level: 'L1', scope: 'user' })
-  try {
-    const service = new PromotionService({ jokerHome: fixture.home, now: () => 100 })
-    const first = await service.promote({
-      jobId: fixture.job.id,
-      expectedJobRevision: fixture.job.revision,
-      registryRevision: readGeneratedToolRegistry(fixture.home).revision,
-      expectedCandidateFingerprint: fixture.job.candidateFingerprint!,
-      requestApproval: async () => null
-    })
-    assert.equal(first.action, 'approval-required')
-
-    const registry = readGeneratedToolRegistry(fixture.home)
-    revalidateGeneratedTool({
-      jokerHome: fixture.home,
-      registryId: registry.registryId,
-      expectedRevision: registry.revision,
-      operationId: 'policy-revalidate-for-approval-mismatch',
-      createdAt: 101,
-      toolId: TOOL_ID
-    })
-
-    await assert.rejects(
-      service.promote({
-        jobId: fixture.job.id,
-        expectedJobRevision: fixture.job.revision,
-        registryRevision: readGeneratedToolRegistry(fixture.home).revision,
-        expectedCandidateFingerprint: fixture.job.candidateFingerprint!
-      }),
-      /Durable promotion policy no longer matches the current host input/
-    )
+    assert.equal(result.decision.action, 'allow')
+    assert.equal(result.decision.reasonCode, 'workspace-full-trust-authorized')
+    assert.equal(result.decision.hardDeny, false)
   } finally {
     rmSync(fixture.home, { recursive: true, force: true })
   }

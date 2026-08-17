@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path'
 import { is, optimizer } from '@electron-toolkit/utils'
 import { retireStreaming, setupStreaming } from './stream'
 import { registerApprovalIpc } from './agent/approval'
+import { registerUserQuestionIpc } from './agent/user-question'
 import { registerConfigIpc } from './ipc/config'
 import { registerMcpIpc, restoreMcpServers } from './ipc/mcp'
 import { registerSessionIpc } from './ipc/sessions'
@@ -255,6 +256,7 @@ app.whenReady().then(async () => {
   registerProjectIpc()
   registerToolForgeTrustIpc()
   await registerApprovalIpc()
+  await registerUserQuestionIpc()
   await restoreMcpServers()
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

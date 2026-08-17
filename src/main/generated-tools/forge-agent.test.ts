@@ -125,7 +125,7 @@ void test('dedicated ForgeAgent receives the sealed full-trust runtime instructi
       toolContext: { workspacePath: null, sessionId: 'session-1', runId: 'run-1', approvalGate: async () => ({ outcome: 'allow', risk: 'write_local', reason: 'test' }) }
     })
     assert.match(systemText, /node-child-process Generated Tool \(runtime version 1\)/)
-    assert.match(systemText, /provided tool capability SDK rather than direct host APIs/)
-    assert.doesNotMatch(systemText, /only an ES2020 quickjs-wasm/)
+    assert.match(systemText, /desktop user account permissions/)
+    assert.doesNotMatch(systemText, /provided tool capability SDK rather than direct host APIs/)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })

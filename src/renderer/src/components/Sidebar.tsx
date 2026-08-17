@@ -1,15 +1,20 @@
 import type { SessionSummary } from '@shared/types'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
+  ChevronDown,
+  ChevronRight,
   CircleCheck,
   CircleX,
+  FolderOpen,
   Loader2,
   MessageSquare,
   MessageSquareWarning,
   Plus,
+  Search,
   Settings,
   ShieldAlert,
-  Trash2
+  Trash2,
+  X
 } from 'lucide-react'
 import logoUrl from '../../../image/logo.png'
 import SettingsModal from './SettingsModal'
@@ -60,9 +65,38 @@ export default function Sidebar({ onCreate, onCreateInConversation, onSelect, on
   const [generatedToolRequestedFrom, setGeneratedToolRequestedFrom] = useState<'settings' | 'conversation'>('settings')
   const language = useStore((s) => s.language)
   const sessions = useStore((s) => s.sessions)
+  const projects = useStore((s) => s.projects)
   const activeSessionId = useStore((s) => s.activeSessionId)
   const sessionLoading = useStore((s) => s.sessionLoading)
   const sessionError = useStore((s) => s.sessionError)
+  const [search, setSearch] = useState('')
+
+  const grouped = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase()
+    const matched = query
+      ? (sessions as SessionSummary[]).filter((session) => session.title.toLocaleLowerCase().includes(query))
+      : sessions as SessionSummary[]
+    const byProject = new Map<string, SessionSummary[]>()
+    for (const session of matched) {
+      const key = session.projectId ?? '__none__'
+      const list = byProject.get(key)
+      if (list) list.push(session)
+      else byProject.set(key, [session])
+    }
+    const groups = [...byProject.entries()].map(([key, list]) => ({
+      key,
+      projectId: key === '__none__' ? undefined : key,
+      label: key === '__none__'
+        ? null
+        : projects.find((project) => project.id === key)?.name ?? key,
+      sessions: list
+    }))
+    const namedFirst = groups.filter((group) => group.projectId !== undefined)
+    const ungrouped = groups.find((group) => group.projectId === undefined)
+    return ungrouped ? [...namedFirst, ungrouped] : namedFirst
+  }, [sessions, projects, search])
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
+  const collapsed = (key: string): boolean => collapsedGroups[key] ?? false
 
   const handleRename = (sessionId: string, title: string): void => {
     const nextTitle = window.prompt(t(language, 'sidebar.renameConversation'), title)
@@ -100,47 +134,83 @@ export default function Sidebar({ onCreate, onCreateInConversation, onSelect, on
             {t(language, 'sidebar.newChat')}
           </button>
         </div>
-        <div className="mt-4 flex-1 overflow-y-auto px-3">
-          <p className="px-2 pb-1 text-xs font-medium uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'sidebar.today')}</p>
+        <div className="mt-3 px-3">
+          <div className="relative">
+            <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)]" />
+            <input
+              type="search"
+              data-session-search
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder={t(language, 'sidebar.searchConversations')}
+              aria-label={t(language, 'sidebar.searchConversations')}
+              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] py-1.5 pl-8 pr-7 text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-border-light)] focus:outline-none"
+            />
+            {search && (
+              <button type="button" onClick={() => setSearch('')} aria-label={t(language, 'sidebar.clearSearch')} className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">
+                <X size={12} />
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="mt-2 flex-1 overflow-y-auto px-3">
           {sessionError && <p className="px-2 py-2 text-xs text-red-400">{sessionError}</p>}
           {!sessionLoading && sessions.length === 0 && <p className="px-2 py-2 text-xs text-[var(--color-text-muted)]">{t(language, 'sidebar.newConversation')}</p>}
+          {search.trim() && grouped.length === 0 && <p className="px-2 py-2 text-xs text-[var(--color-text-muted)]">{t(language, 'sidebar.searchNoResults')}</p>}
           <div className="space-y-1">
-            {(sessions as SessionSummary[]).map((session) => {
-              const status = getSidebarSessionStatus(session.activity)
-              const statusLabel = t(language, status.labelKey, status.labelParams)
-              const isActive = session.id === activeSessionId
+            {grouped.map((group) => (
+              <div key={group.key} data-session-group={group.key}>
+                {group.projectId !== undefined && (
+                  <button
+                    type="button"
+                    onClick={() => setCollapsedGroups((current) => ({ ...current, [group.key]: !collapsed(group.key) }))}
+                    aria-expanded={!collapsed(group.key)}
+                    className="mt-2 flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[10px] font-medium uppercase tracking-wide text-[var(--color-text-muted)] transition hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-secondary)]"
+                  >
+                    {collapsed(group.key) ? <ChevronRight size={12} className="shrink-0" /> : <ChevronDown size={12} className="shrink-0" />}
+                    <FolderOpen size={12} className="shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{group.label}</span>
+                    <span className="shrink-0 tabular-nums">{group.sessions.length}</span>
+                  </button>
+                )}
+                {!collapsed(group.key) && group.sessions.map((session) => {
+                  const status = getSidebarSessionStatus(session.activity)
+                  const statusLabel = t(language, status.labelKey, status.labelParams)
+                  const isActive = session.id === activeSessionId
 
-              return (
-                <div
-                  key={session.id}
-                  data-session-id={session.id}
-                  data-session-status={status.dataStatus}
-                  className={`group flex min-h-9 items-center gap-1 rounded-md px-2 text-sm ${isActive ? 'bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'}`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => onSelect(session.id)}
-                    onDoubleClick={() => handleRename(session.id, session.title)}
-                    aria-current={isActive ? 'page' : undefined}
-                    aria-label={`${session.title} — ${statusLabel}`}
-                    title={statusLabel}
-                    className="flex min-h-9 min-w-0 flex-1 items-center gap-2 truncate text-left"
-                  >
-                    <SessionStatusIcon status={status} />
-                    <span className={`truncate ${session.activity.unread ? 'font-medium text-[var(--color-text-primary)]' : ''}`}>{session.title}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onDelete(session.id)}
-                    aria-label={t(language, 'sidebar.deleteConversation')}
-                    title={t(language, 'sidebar.deleteConversation')}
-                    className="pointer-events-none flex h-9 w-9 shrink-0 items-center justify-center rounded text-[var(--color-text-muted)] opacity-0 transition-opacity hover:bg-red-500/10 hover:text-red-400 focus:pointer-events-auto focus:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--color-accent)] group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              )
-            })}
+                  return (
+                    <div
+                      key={session.id}
+                      data-session-id={session.id}
+                      data-session-status={status.dataStatus}
+                      className={`group flex min-h-9 items-center gap-1 rounded-md px-2 text-sm ${isActive ? 'bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'}`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => onSelect(session.id)}
+                        onDoubleClick={() => handleRename(session.id, session.title)}
+                        aria-current={isActive ? 'page' : undefined}
+                        aria-label={`${session.title} — ${statusLabel}`}
+                        title={statusLabel}
+                        className="flex min-h-9 min-w-0 flex-1 items-center gap-2 truncate text-left"
+                      >
+                        <SessionStatusIcon status={status} />
+                        <span className={`truncate ${session.activity.unread ? 'font-medium text-[var(--color-text-primary)]' : ''}`}>{session.title}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDelete(session.id)}
+                        aria-label={t(language, 'sidebar.deleteConversation')}
+                        title={t(language, 'sidebar.deleteConversation')}
+                        className="pointer-events-none flex h-9 w-9 shrink-0 items-center justify-center rounded text-[var(--color-text-muted)] opacity-0 transition-opacity hover:bg-red-500/10 hover:text-red-400 focus:pointer-events-auto focus:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--color-accent)] group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            ))}
           </div>
         </div>
         <div className="border-t border-[var(--color-border)] px-4 py-3">

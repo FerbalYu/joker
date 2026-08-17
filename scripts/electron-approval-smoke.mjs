@@ -198,6 +198,13 @@ try {
   await screenshot(pageA, 'window-a-before-approval')
   await screenshot(pageB, 'window-b-before-approval')
 
+  const fullAccessButtonA = pageA.getByRole('button', { name: /完全访问|Full access/ })
+  const fullAccessButtonB = pageB.getByRole('button', { name: /完全访问|Full access/ })
+  check('window A defaults to full access', await fullAccessButtonA.getAttribute('aria-pressed') === 'true')
+  check('window B defaults to full access', await fullAccessButtonB.getAttribute('aria-pressed') === 'true')
+  await fullAccessButtonA.click()
+  await pageA.getByRole('button', { name: /建议模式|Suggest mode/ }).click()
+  await pageB.getByRole('button', { name: /建议模式|Suggest mode/ }).click()
   const approvalA = await sendWritePrompt(pageA)
   const approvalB = await sendWritePrompt(pageB)
   check('window A produces a real approval request', approvalA?.toolName === 'Write', approvalA)

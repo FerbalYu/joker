@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AppConfig, AssistantSegment, ChatMessage, ContextUsage, StreamFlowState, StreamUsage, ToolCallInfo, ApprovalRequest, SessionSummary, ReasoningLevel, ProjectEntry, RunMode, PendingUserMessage, SubagentActivity } from '@shared/types'
+import type { AppConfig, AssistantSegment, ChatMessage, ContextUsage, StreamFlowState, StreamUsage, ToolCallInfo, ApprovalRequest, SessionSummary, ReasoningLevel, ProjectEntry, RunMode, PendingUserMessage, SubagentActivity, UserQuestionRequest } from '@shared/types'
 import { getInitialLanguage, persistLanguage, type Language } from './i18n'
 import { initialRunActivityState, runActivityReducer, type RunActivityAction, type RunActivityState } from './run-activity'
 import {
@@ -37,6 +37,8 @@ interface AppState extends SessionRuntimeState {
 
   approvalQueue: ApprovalRequest[]
   selectedApproval: ApprovalRequest | null
+
+  userQuestions: UserQuestionRequest[]
 
   sessions: SessionSummary[]
   activeSessionId: string | null
@@ -83,6 +85,8 @@ interface AppState extends SessionRuntimeState {
   removeApproval: (requestId: string) => void
   removeApprovalsForSession: (sessionId: string) => void
   selectApproval: (req: ApprovalRequest | null) => void
+  addUserQuestion: (request: UserQuestionRequest) => void
+  removeUserQuestion: (requestId: string) => void
   setSessions: (sessions: SessionSummary[]) => void
   upsertSessionSummary: (summary: SessionSummary) => void
   removeSessionSummary: (sessionId: string) => void
@@ -144,6 +148,7 @@ export const useStore = create<AppState>((set, get) => ({
   sessionRuntimes: {},
   approvalQueue: [],
   selectedApproval: null,
+  userQuestions: [],
   sessions: [],
   activeSessionId: null,
   sessionLoading: false,
@@ -423,6 +428,14 @@ export const useStore = create<AppState>((set, get) => ({
     }
   }),
   selectApproval: (req) => set({ selectedApproval: req }),
+  addUserQuestion: (request) => set((state) => ({
+    userQuestions: state.userQuestions.some((item) => item.requestId === request.requestId)
+      ? state.userQuestions
+      : [...state.userQuestions, request]
+  })),
+  removeUserQuestion: (requestId) => set((state) => ({
+    userQuestions: state.userQuestions.filter((question) => question.requestId !== requestId)
+  })),
 
   setSessions: (sessions) => set({ sessions }),
   upsertSessionSummary: (summary) => set((state) => {

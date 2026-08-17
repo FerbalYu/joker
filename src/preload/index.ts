@@ -28,6 +28,8 @@ import type {
   GeneratedImageReadResult,
   ProjectState,
   GitStatus,
+  UserQuestionRequest,
+  UserQuestionAnswerPayload,
   GoalCas,
   GoalCreateInput,
   GoalTransitionResult,
@@ -97,6 +99,17 @@ const api = {
     setMode: (mode: 'suggest' | 'auto-edit' | 'full-auto'): void => {
       ipcRenderer.invoke('approval:set-mode', mode)
     }
+  },
+  userQuestion: {
+    onRequest: (callback: (request: UserQuestionRequest) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, request: UserQuestionRequest) => callback(request)
+      ipcRenderer.on('user-question:request', listener)
+      return () => ipcRenderer.removeListener('user-question:request', listener)
+    },
+    answer: (payload: UserQuestionAnswerPayload): Promise<boolean> =>
+      ipcRenderer.invoke('user-question:answer', payload),
+    listPending: (sessionId?: string): Promise<UserQuestionRequest[]> =>
+      ipcRenderer.invoke('user-question:list-pending', sessionId)
   },
   config: {
     get: (): Promise<AppConfig> => ipcRenderer.invoke('config:get'),

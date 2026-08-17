@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import type { GeneratedToolSpec } from '../../shared/generated-tools'
-import { compileGeneratedToolValidationPlan, SUMMARIZE_TASK_JSON_VALIDATION_SUITE } from './validation-suite'
+import { compileGeneratedToolValidationPlan } from './validation-suite'
 
 function spec(validationCases?: GeneratedToolSpec['validationCases']): GeneratedToolSpec {
   return {
@@ -22,35 +22,28 @@ function spec(validationCases?: GeneratedToolSpec['validationCases']): Generated
   }
 }
 
-void test('generic validation plans require independently observable success and failure cases', () => {
-  assert.throws(
-    () => compileGeneratedToolValidationPlan(spec([
-      { id: 'success', input: {}, workspaceFiles: {}, expected: { outcome: 'succeeded', output: 'ok' } }
-    ])),
-    /explicit expected-failure/
-  )
+void test('generic validation plans require at least one expected-success case', () => {
   assert.throws(
     () => compileGeneratedToolValidationPlan(spec([
       { id: 'failure', input: {}, workspaceFiles: {}, expected: { outcome: 'tool-failed', error: { message: 'expected' } } }
     ])),
     /expected-success/
   )
+})
 
+void test('generic validation plans accept success-only cases', () => {
   const plan = compileGeneratedToolValidationPlan(spec([
-    { id: 'success', input: {}, workspaceFiles: {}, expected: { outcome: 'succeeded', output: 'ok' } },
-    { id: 'failure', input: { fail: true }, workspaceFiles: {}, expected: { outcome: 'tool-failed', error: { message: 'expected' } } }
-  ]))
-  assert.deepEqual(plan.cases.map((item) => item.id), ['success', 'failure'])
-})
-
-void test('registered tool IDs cannot replace host cases with success-only validation', () => {
-  const registered = spec([
     { id: 'success', input: {}, workspaceFiles: {}, expected: { outcome: 'succeeded', output: 'ok' } }
-  ])
-  registered.id = SUMMARIZE_TASK_JSON_VALIDATION_SUITE.toolId
-  assert.throws(() => compileGeneratedToolValidationPlan(registered), /explicit expected-failure/)
+  ]))
+  assert.deepEqual(plan.cases.map((item) => item.id), ['success'])
 })
 
-void test('unregistered legacy examples cannot silently become an auto-promotion plan', () => {
-  assert.throws(() => compileGeneratedToolValidationPlan(spec()), /explicit expected-failure/)
+void test('validation plan case ids must be unique', () => {
+  assert.throws(
+    () => compileGeneratedToolValidationPlan(spec([
+      { id: 'dup', input: {}, workspaceFiles: {}, expected: { outcome: 'succeeded', output: 'ok' } },
+      { id: 'dup', input: {}, workspaceFiles: {}, expected: { outcome: 'succeeded', output: 'ok' } }
+    ])),
+    /unique/
+  )
 })

@@ -14,8 +14,6 @@ import { ContinuationScheduler } from './continuation-scheduler'
 import { setDefaultContinuationScheduler } from './continuation-scheduler-runtime'
 import { readPromotionJournal, updatePromotionJournal } from './promotion-journal-store'
 import { readGeneratedToolRegistry } from './registry'
-import { readPromotionApprovalReceipt, writePromotionApprovalReceipt } from './promotion-approval-store'
-import { evaluateGeneratedToolPolicy } from './policy'
 import { readContinuationV2 } from './continuation-v2'
 import {
   registerGeneratedToolValidationSuite,
@@ -127,139 +125,21 @@ async function setup(options: { scope?: 'project' | 'user' } = {}) {
   return { home, job: awaiting! }
 }
 
-void test('PromotionService advance derives authoritative CAS inputs and binds explicit approval to GeneratedToolEnable', async () => {
+void test('PromotionService advance promotes without requesting approval', async () => {
   const { home, job } = await setup({ scope: 'user' })
   try {
-    installRuntimeQualificationFixture(home, 'L1')
     const scheduler = new ContinuationScheduler({ jokerHome: home, now: () => 10, createId: () => 'advance-dispatch' })
     setDefaultContinuationScheduler(scheduler)
     const service = new PromotionService({ jokerHome: home, now: () => 10 })
-    let request: { toolName: string } | undefined
     const result = await service.advance(job.id, {
-      requestApproval: async (approvalRequest) => {
-        request = approvalRequest
-        return {
-          requestId: 'advance-request',
-          webContentsId: 17,
-          sessionId: 'session-1',
-          runId: 'run-1',
-          toolName: 'GeneratedToolEnable',
-          requestHash: 'e'.repeat(64),
-          approvedAt: 11
-        }
+      requestApproval: async () => {
+        throw new Error('approval must not be requested under the ungated policy')
       }
     })
-    assert.equal(request?.toolName, 'GeneratedToolEnable')
     assert.equal(result.action, 'promoted')
     assert.equal(result.job.status, 'completed')
   } finally {
     setDefaultContinuationScheduler(null)
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
-void test('PromotionService deny writes no receipt and remains retryable', async () => {
-  const { home, job } = await setup({ scope: 'user' })
-  try {
-    installRuntimeQualificationFixture(home, 'L1')
-    const scheduler = new ContinuationScheduler({ jokerHome: home, now: () => 10, createId: () => 'retry-dispatch' })
-    setDefaultContinuationScheduler(scheduler)
-    const service = new PromotionService({ jokerHome: home, now: () => 10 })
-    let approvals = 0
-    const denied = await service.promote({
-      jobId: job.id,
-      expectedJobRevision: job.revision,
-      registryRevision: readGeneratedToolRegistry(home).revision,
-      expectedCandidateFingerprint: job.candidateFingerprint!,
-      requestApproval: async () => {
-        approvals += 1
-        return null
-      }
-    })
-    assert.equal(denied.action, 'approval-required')
-    assert.equal(readPromotionApprovalReceipt(home, denied.journal.id), null)
-    assert.equal(readForgeJob(home, job.id)?.status, 'awaiting-policy')
-
-    const retried = await service.promote({
-      jobId: job.id,
-      expectedJobRevision: job.revision,
-      registryRevision: readGeneratedToolRegistry(home).revision,
-      expectedCandidateFingerprint: job.candidateFingerprint!,
-      promotionId: denied.journal.id,
-      requestApproval: async () => ({
-        requestId: 'retry-request',
-        webContentsId: 17,
-        sessionId: 'session-1',
-        runId: 'run-1',
-        toolName: 'GeneratedToolEnable',
-        requestHash: 'd'.repeat(64),
-        approvedAt: 11
-      })
-    })
-    assert.equal(approvals, 1)
-    assert.equal(retried.action, 'promoted')
-    assert.equal(readPromotionApprovalReceipt(home, denied.journal.id)?.schemaVersion, 2)
-  } finally {
-    setDefaultContinuationScheduler(null)
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
-void test('PromotionService reads v1 receipt for recovery but requires a fresh v2 grant before pointer switch', async () => {
-  const { home, job } = await setup({ scope: 'user' })
-  try {
-    installRuntimeQualificationFixture(home, 'L1')
-    const scheduler = new ContinuationScheduler({ jokerHome: home, now: () => 10, createId: () => 'v1-dispatch' })
-    setDefaultContinuationScheduler(scheduler)
-    const service = new PromotionService({ jokerHome: home, now: () => 10 })
-    const promotionId = `promotion-${job.id}-${job.candidateId}`
-    const evaluation = evaluateGeneratedToolPolicy({ jokerHome: home, jobId: job.id, operation: 'promote', approvalMode: 'suggest', evaluatedAt: 10 })
-    writePromotionApprovalReceipt(home, {
-      schemaVersion: 1,
-      id: `approval-${promotionId}`,
-      promotionId,
-      jobId: job.id,
-      toolId: job.toolId,
-      candidateId: evaluation.candidate.id,
-      candidateFingerprint: evaluation.candidate.artifactFingerprint,
-      validationReportId: evaluation.report.id,
-      policyInputHash: evaluation.decision.inputHash,
-      windowId: 17,
-      sessionId: 'session-1',
-      runId: 'run-1',
-      approved: true,
-      approvalMode: 'full-auto',
-      approvedAt: 9,
-      revision: 0
-    })
-    const result = await service.promote({
-      jobId: job.id,
-      expectedJobRevision: job.revision,
-      registryRevision: readGeneratedToolRegistry(home).revision,
-      expectedCandidateFingerprint: job.candidateFingerprint!,
-      requestApproval: async () => null
-    })
-    assert.equal(result.action, 'approval-required')
-    assert.equal(readGeneratedToolRegistry(home).activePointers.length, 0)
-  } finally {
-    setDefaultContinuationScheduler(null)
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
-void test('PromotionService rejects stale registry revision independently from job revision', async () => {
-  const { home, job } = await setup()
-  try {
-    const result = await new PromotionService({ jokerHome: home, now: () => 10 }).promote({
-      jobId: job.id,
-      expectedJobRevision: job.revision,
-      registryRevision: readGeneratedToolRegistry(home).revision + 1,
-      expectedCandidateFingerprint: job.candidateFingerprint!
-    })
-    assert.equal(result.action, 'denied')
-    assert.equal(result.journal.policy.reasonCode, 'stale-registry-revision')
-    assert.equal(result.job.status, 'failed')
-  } finally {
     rmSync(home, { recursive: true, force: true })
   }
 })

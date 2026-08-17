@@ -139,7 +139,13 @@ function assertSnapshotStillExecutable(
     || entry.descriptor.activeVersionId !== binding.versionId) {
     throw new Error('Generated Tool is no longer active')
   }
+  if (registry.capabilityRevision.revision !== binding.capabilityRevision) {
+    throw new Error('Generated Tool capability revision changed since the ToolSet was built')
+  }
   const version = readGeneratedToolVersion(jokerHome, binding.toolId, binding.versionId)
+  if (version.fingerprint !== binding.fingerprint) {
+    throw new Error('Generated Tool fingerprint changed since the ToolSet was built')
+  }
   return version
 }
 

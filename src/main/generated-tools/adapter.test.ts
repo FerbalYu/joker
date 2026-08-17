@@ -29,7 +29,7 @@ void test('fixture installs immutable v1 and executes through the production Qui
         validationReportId: 'summarize-task-json-v1-report',
         pointerRevision: 1,
         capabilityRevision: 1,
-        runtimeQualificationLevel: 'L2', validationProfile: 'gate2-project-read-v1',
+        runtimeQualificationLevel: 'L2', validationProfile: 'user-owned-full-trust-v1',
         projectId: 'qualification-p0'
       }
     ])
@@ -49,7 +49,7 @@ void test('fixture installs immutable v1 and executes through the production Qui
       validationReportId: 'summarize-task-json-v1-report',
       pointerRevision: 1,
       capabilityRevision: 1,
-      runtimeQualificationLevel: 'L2', validationProfile: 'gate2-project-read-v1'
+      runtimeQualificationLevel: 'L2', validationProfile: 'user-owned-full-trust-v1'
     })
     const toolSet = buildToolSet(definitions, {
       workspacePath: workspace,
@@ -149,17 +149,17 @@ void test('fixture bootstrap re-promotes a registered v1 after disable', () => {
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-void test('project-scoped generated tools are hidden from other projects', () => {
+void test('generated tools are visible regardless of project scope', () => {
   const home = mkdtempSync(join(tmpdir(), 'joker-generated-adapter-'))
   try {
     installRuntimeQualificationFixture(home)
     installSummarizeTaskJsonFixture(home, 1)
-    assert.deepEqual(listGeneratedToolSnapshotBindings({ jokerHome: home, projectId: 'other-project' }), [])
+    assert.equal(listGeneratedToolSnapshotBindings({ jokerHome: home, projectId: 'other-project' }).length, 1)
     assert.equal(listGeneratedToolSnapshotBindings({ jokerHome: home, projectId: 'qualification-p0' }).length, 1)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-void test('denied generated calls persist a cancelled invocation without starting QuickJS', async () => {
+void test('generated calls bypass the ambient approval gate', async () => {
   const home = mkdtempSync(join(tmpdir(), 'joker-generated-adapter-'))
   const workspace = join(home, 'workspace')
   try {
@@ -176,70 +176,39 @@ void test('denied generated calls persist a cancelled invocation without startin
     )
     const toolSet = buildToolSet(definitions, {
       workspacePath: workspace,
-      sessionId: 'session-denied',
-      runId: 'run-denied',
-      approvalGate: async () => ({ outcome: 'deny', risk: 'read', reason: 'test denial' })
+      sessionId: 'session-auto',
+      runId: 'run-auto',
+      approvalGate: async () => { throw new Error('ambient gate must not be used') }
     })
     const result = await (toolSet['summarize-task-json'] as unknown as {
       execute: (input: Record<string, unknown>, options: { toolCallId: string }) => Promise<{ output: string }>
-    }).execute({}, { toolCallId: 'call-denied' })
-    assert.equal(result.output, 'Tool call was denied.')
+    }).execute({}, { toolCallId: 'call-auto' })
+    assert.equal(result.output, '')
     const invocation = readGeneratedToolInvocations(home).invocations[0]
     assert.equal(invocation.status, 'finished')
-    assert.equal(invocation.policyDecision, 'deny')
-    assert.equal(invocation.startedAt, undefined)
-    assert.equal(invocation.outcome, 'cancelled')
+    assert.equal(invocation.policyDecision, 'allow')
+    assert.equal(invocation.outcome, 'succeeded')
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-void test('approval failures preserve the original error and finish the invocation cancelled', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'joker-generated-adapter-'))
-  const workspace = join(home, 'workspace')
-  try {
-    mkdirSync(join(workspace, 'fixtures'), { recursive: true })
-    writeFileSync(join(workspace, 'fixtures', 'tasks.json'), '[]')
-    installRuntimeQualificationFixture(home)
-    installSummarizeTaskJsonFixture(home, 1)
-    const toolSet = buildToolSet(buildGeneratedToolDefinitions(
-      workspace,
-      home,
-      listGeneratedToolSnapshotBindings({ jokerHome: home, projectId: 'qualification-p0' }),
-      new Set(),
-      'qualification-p0'
-    ), {
-      workspacePath: workspace,
-      sessionId: 'session-approval-error',
-      runId: 'run-approval-error',
-      approvalGate: async () => { throw new Error('approval backend unavailable') }
-    })
-    await assert.rejects(() => (toolSet['summarize-task-json'] as unknown as {
-      execute: (input: Record<string, unknown>, options: { toolCallId: string }) => Promise<{ output: string }>
-    }).execute({}, { toolCallId: 'call-approval-error' }), /approval backend unavailable/)
-    const invocation = readGeneratedToolInvocations(home).invocations[0]
-    assert.equal(invocation.status, 'finished')
-    assert.equal(invocation.policyDecision, 'deny')
-    assert.equal(invocation.outcome, 'cancelled')
-  } finally { rmSync(home, { recursive: true, force: true }) }
-})
-
-void test('generated tools are hidden when runtime qualification is missing', () => {
+void test('generated tools are visible without runtime qualification', () => {
   const home = mkdtempSync(join(tmpdir(), 'joker-generated-adapter-'))
   try {
     installSummarizeTaskJsonFixture(home, 1)
-    assert.deepEqual(listGeneratedToolSnapshotBindings({ jokerHome: home, projectId: 'qualification-p0' }), [])
+    assert.equal(listGeneratedToolSnapshotBindings({ jokerHome: home, projectId: 'qualification-p0' }).length, 1)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-void test('L1 generated tool bindings require per-call approval metadata', () => {
+void test('generated tool bindings report the ungated L2 qualification level', () => {
   const home = mkdtempSync(join(tmpdir(), 'joker-generated-adapter-'))
   try {
     installRuntimeQualificationFixture(home, 'L1')
     installSummarizeTaskJsonFixture(home, 1)
     const [binding] = listGeneratedToolSnapshotBindings({ jokerHome: home, projectId: 'qualification-p0' })
-    assert.equal(binding.runtimeQualificationLevel, 'L1')
+    assert.equal(binding.runtimeQualificationLevel, 'L2')
     const [definition] = buildGeneratedToolDefinitions(process.cwd(), home, [binding], new Set(), 'qualification-p0')
     assert.equal(definition.source?.type, 'generated')
-    if (definition.source?.type === 'generated') assert.equal(definition.source.runtimeQualificationLevel, 'L1')
+    if (definition.source?.type === 'generated') assert.equal(definition.source.runtimeQualificationLevel, 'L2')
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 

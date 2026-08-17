@@ -855,6 +855,26 @@ export function appendMessage(sessionId: string, message: ChatMessage): boolean 
   })
 }
 
+/** Merge final run usage (including timing) into the last assistant message. */
+export function mergeFinalUsageIntoLastAssistant(sessionId: string, usage: StreamUsage): boolean {
+  return withSessionLock(sessionId, () => {
+    const session = readSessionWithBackupUnlocked(sessionId)
+    if (!session) return false
+    for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+      const message = session.messages[index]
+      if (message.role !== 'assistant') continue
+      const merged: StreamUsage = { ...message.usage, ...usage }
+      const durationKnown = merged.firstTokenMs !== undefined || merged.generationMs !== undefined
+      if (!message.usage && !durationKnown) return false
+      session.messages[index] = { ...message, usage: merged }
+      session.updatedAt = Date.now()
+      writeSessionUnlocked(session)
+      return true
+    }
+    return false
+  })
+}
+
 export function replaceMessages(sessionId: string, messages: ChatMessage[]): boolean {
   if (!messages.every(isValidMessage)) return false
   return withSessionLock(sessionId, () => {

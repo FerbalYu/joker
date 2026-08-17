@@ -5,9 +5,11 @@ import type { ResearchContext } from '../research/context'
 import type { SubagentActivity } from '../../shared/types'
 import { writeToolAudit, type ToolAuditWriter } from './audit'
 import { classifyToolRisk, type ToolRisk } from './risk'
+import type { OperationJournal } from '../store/operations'
 
 const DEFAULT_TOOL_TIMEOUT_MS = 3 * 60_000
 const DEFAULT_TOOL_HEARTBEAT_MS = 2_000
+const DEFAULT_QUIESCENCE_GRACE_MS = 5_000
 const LIFECYCLE_CALLBACK_TIMEOUT_MS = 5_000
 
 class ToolDeadlineError extends Error {
@@ -76,6 +78,14 @@ export interface ToolDefinition {
   timeoutMs?: number
   /** Frequency for observable wrapper heartbeats while execute() is pending. */
   heartbeatMs?: number
+  /**
+   * Upper bound for waiting on a cooperative tool to settle after the host
+   * deadline or cancellation fires. Defaults to 5000ms. The wrapper aborts the
+   * tool signal, waits for execute() to actually settle, then reports the
+   * terminal state; when this grace expires first, the terminal state is
+   * reported while the tool may still be winding down.
+   */
+  quiescenceGraceMs?: number
   execute: (input: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>
 }
 
@@ -109,6 +119,10 @@ export interface ToolContext {
   onToolCall?: (info: ToolCallInfo) => void | Promise<void>
   onSubagentActivity?: (activity: SubagentActivity) => void | Promise<void>
   auditWriter?: ToolAuditWriter
+  /** Causal sidecar journal; tool intent is recorded before the side effect starts. */
+  operationJournal?: OperationJournal
+  /** Monotonic guards evaluated at the final execution boundary (deny-only). */
+  guards?: readonly ToolGuard[]
 }
 
 export interface ApprovalDecision {
@@ -118,6 +132,22 @@ export interface ApprovalDecision {
   approvedByUser?: boolean
   hostGrant?: HostApprovalGrant
 }
+
+export interface ToolGuardContext {
+  toolName: string
+  input: Record<string, unknown>
+  definition: ToolDefinition
+  context: ToolContext
+}
+
+/**
+ * Monotonic execution guard evaluated at the final execution boundary, after
+ * approval resolves. A guard may deny by returning a reason string or abstain
+ * by returning undefined; it can never re-allow a call that approval or an
+ * earlier guard already denied. Use it for policies that must hold at the
+ * moment of execution, not merely at ToolSet construction time.
+ */
+export type ToolGuard = (exec: ToolGuardContext) => string | undefined
 
 export interface ApprovalGate {
   (
@@ -164,7 +194,10 @@ export async function executeToolDefinition(
     .slice(0, 32)
   const parentSignal = abortSignal ?? context.abortSignal
   const executionController = new AbortController()
-  const forwardAbort = (): void => executionController.abort(parentSignal?.reason)
+  const forwardAbort = (): void => {
+    if (executionController.signal.aborted) return
+    executionController.abort(parentSignal?.reason)
+  }
   if (parentSignal?.aborted) forwardAbort()
   else parentSignal?.addEventListener('abort', forwardAbort, { once: true })
   const lifecycleContext = { ...context, abortSignal: executionController.signal, toolCallId: resolvedToolCallId }
@@ -200,8 +233,12 @@ export async function executeToolDefinition(
       ? await boundedLifecycle('proposed', () => definition.lifecycle!.proposed(lifecycleEvent(Date.now())))
       : undefined
     safeAudit(audit, { ...auditBase, stage: 'proposed', status: 'pending', arguments: input })
+    context.operationJournal?.append({ type: 'tool-proposed', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId, toolName: definition.name })
     let decision: ApprovalDecision
     try {
+      if (generatedSource?.validationProfile !== 'user-owned-full-trust-v1') {
+        context.operationJournal?.append({ type: 'approval-asked', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId })
+      }
       decision = generatedSource?.validationProfile === 'user-owned-full-trust-v1'
         ? { outcome: 'allow', risk, reason: 'Generated Tool automatic execution' }
         : await context.approvalGate(definition.name, input, definition)
@@ -222,8 +259,21 @@ export async function executeToolDefinition(
           denied: true
         })
       }
+      context.operationJournal?.append({ type: 'approval-decided', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId, outcome: 'deny' })
       throw error
     }
+    // Monotonic guards run at the final execution boundary: they can only
+    // tighten an allow into a deny, never the other way around.
+    if (decision.outcome === 'allow' && context.guards) {
+      for (const guard of context.guards) {
+        const reason = guard({ toolName: definition.name, input, definition, context: lifecycleContext })
+        if (reason) {
+          decision = { outcome: 'deny', risk, reason: `Host guard rejected the call: ${reason}` }
+          break
+        }
+      }
+    }
+    context.operationJournal?.append({ type: 'approval-decided', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId, outcome: decision.outcome })
     lifecycleState = definition.lifecycle
       ? await boundedLifecycle('policyResolved', () => definition.lifecycle!.policyResolved(lifecycleState, {
           ...lifecycleEvent(Date.now()),
@@ -249,6 +299,7 @@ export async function executeToolDefinition(
         })
       }
       safeAudit(audit, { ...auditBase, stage: 'finished', status: 'denied', reason: decision.reason })
+      context.operationJournal?.append({ type: 'tool-result', at: now, runId: context.runId ?? '', toolCallId: resolvedToolCallId, status: 'denied' })
       safeNotify(context.onToolCall, {
         toolCallId: resolvedToolCallId,
         toolName: definition.name,
@@ -265,6 +316,7 @@ export async function executeToolDefinition(
     const timeoutMs = resolveToolTimeoutMs(definition, input)
     const deadlineAt = startedAt + timeoutMs
     const heartbeatMs = Math.max(250, definition.heartbeatMs ?? DEFAULT_TOOL_HEARTBEAT_MS)
+    context.operationJournal?.append({ type: 'tool-started', at: startedAt, runId: context.runId ?? '', toolCallId: resolvedToolCallId, toolName: definition.name })
     lifecycleState = definition.lifecycle
       ? await boundedLifecycle('started', () => definition.lifecycle!.started(lifecycleState, lifecycleEvent(startedAt)))
       : lifecycleState
@@ -282,6 +334,7 @@ export async function executeToolDefinition(
 
     let heartbeat: NodeJS.Timeout | undefined
     let deadline: NodeJS.Timeout | undefined
+    let quiescenceGrace: NodeJS.Timeout | undefined
     let abortListener: (() => void) | undefined
     try {
       heartbeat = setInterval(() => {
@@ -300,20 +353,59 @@ export async function executeToolDefinition(
       heartbeat.unref?.()
 
       const executionPromise = Promise.resolve().then(() => definition.execute(input, lifecycleContext))
-      const timeoutPromise = new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => {
-          const error = new ToolDeadlineError(timeoutMs)
-          reject(error)
-          executionController.abort(error)
-        }, timeoutMs)
-        deadline.unref?.()
-      })
-      const cancellationPromise = new Promise<never>((_resolve, reject) => {
-        abortListener = () => reject(new ToolCancelledError(executionController.signal.reason))
-        if (executionController.signal.aborted) abortListener()
-        else executionController.signal.addEventListener('abort', abortListener, { once: true })
-      })
-      const result = await Promise.race([executionPromise, timeoutPromise, cancellationPromise])
+      const graceMs = definition.quiescenceGraceMs ?? DEFAULT_QUIESCENCE_GRACE_MS
+      let terminal: 'timeout' | 'cancelled' | undefined
+      let settleTerminal: (() => void) | undefined
+      const terminalPromise = new Promise<void>((resolve) => { settleTerminal = resolve })
+      deadline = setTimeout(() => {
+        if (terminal) return
+        terminal = 'timeout'
+        executionController.abort(new ToolDeadlineError(timeoutMs))
+        settleTerminal?.()
+      }, timeoutMs)
+      deadline.unref?.()
+
+      abortListener = () => {
+        if (terminal) return
+        terminal = 'cancelled'
+        settleTerminal?.()
+      }
+      if (executionController.signal.aborted) abortListener()
+      else executionController.signal.addEventListener('abort', abortListener, { once: true })
+
+      // First outcome wins: the tool settles on its own, or a terminal state fires.
+      const outcome = await Promise.race([
+        executionPromise.then((value) => ({ kind: 'settled' as const, value })),
+        terminalPromise.then(() => ({ kind: 'terminal' as const }))
+      ])
+
+      let result: ToolResult
+      if (outcome.kind === 'terminal') {
+        // Quiescence: the deadline or cancellation aborts the tool signal but
+        // does not abandon the execution promise. Wait for the tool to actually
+        // settle within the grace bound, then report the terminal state instead
+        // of whatever the tool returned. When the grace expires first, the
+        // terminal state is reported while the tool may still be winding down.
+        try {
+          await Promise.race([
+            executionPromise,
+            new Promise<never>((_resolve, reject) => {
+              quiescenceGrace = setTimeout(() => {
+                reject(terminal === 'timeout'
+                  ? new ToolDeadlineError(timeoutMs)
+                  : new ToolCancelledError(new Error('Tool execution cancelled before the tool settled within the grace period')))
+              }, graceMs)
+              quiescenceGrace.unref?.()
+            })
+          ])
+        } catch (error) {
+          if (error instanceof ToolDeadlineError || error instanceof ToolCancelledError) throw error
+          // The tool settled with its own error; the terminal reason wins.
+        }
+        if (terminal === 'timeout') throw new ToolDeadlineError(timeoutMs)
+        throw new ToolCancelledError(executionController.signal.reason)
+      }
+      result = outcome.value
       const completedAt = Date.now()
       const durationMs = completedAt - startedAt
       if (definition.lifecycle) {
@@ -329,6 +421,7 @@ export async function executeToolDefinition(
         durationMs,
         resultPreview: result.output
       })
+      context.operationJournal?.append({ type: 'tool-result', at: completedAt, runId: context.runId ?? '', toolCallId: resolvedToolCallId, status: 'done' })
       safeNotify(context.onToolCall, {
         toolCallId: resolvedToolCallId,
         toolName: definition.name,
@@ -351,6 +444,7 @@ export async function executeToolDefinition(
           ? 'cancelled'
           : 'error'
       const message = error instanceof Error ? error.message : String(error)
+      context.operationJournal?.append({ type: 'tool-result', at: completedAt, runId: context.runId ?? '', toolCallId: resolvedToolCallId, status })
       if (definition.lifecycle) {
         await finishLifecycleBounded(definition.lifecycle, lifecycleState, {
           ...lifecycleEvent(completedAt),
@@ -380,6 +474,7 @@ export async function executeToolDefinition(
     } finally {
       if (heartbeat) clearInterval(heartbeat)
       if (deadline) clearTimeout(deadline)
+      if (quiescenceGrace) clearTimeout(quiescenceGrace)
       if (abortListener) executionController.signal.removeEventListener('abort', abortListener)
     }
   } finally {

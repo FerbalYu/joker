@@ -1,12 +1,14 @@
 import { BrowserWindow, MessageChannelMain } from 'electron'
 import { runAgent } from './agent/loop'
 import { createApprovalGate, cancelApprovalsForRun, cleanupApprovalWindow } from './agent/approval'
+import { userQuestionRegistry } from './agent/user-question'
 import { buildToolSet, type ToolDefinition, type ToolContext } from './tools/registry'
 import { fsTools } from './tools/fs'
 import { bashTools } from './tools/bash'
 import { searchTools } from './tools/grep'
 import { buildToolForgeMetaTools } from './tools/tool-forge'
 import { todoTools } from './tools/todo'
+import { buildAskUserTools } from './tools/ask-user'
 import { subagentTools } from './tools/subagent'
 import {
   appendMessage,
@@ -21,6 +23,7 @@ import {
   enqueuePendingUserMessage,
   getSession,
   listPendingUserMessages,
+  mergeFinalUsageIntoLastAssistant,
   pauseGoal,
   restorePendingUserMessageClaim,
   startSessionRunActivity,
@@ -28,12 +31,15 @@ import {
   steerPendingUserMessage
 } from './store/sessions'
 import { resolveProjectPath } from './store/projects'
+import { appendOperation, readInterruptedRun, type OperationJournal } from './store/operations'
 import { getMcpTools } from './tools/mcp-bridge'
 import { webTools } from './tools/web'
 import { imageTools } from './tools/image'
 import { gitTools } from './tools/git'
 import { buildCapabilitySnapshot } from './agent/capabilities'
 import { buildGeneratedToolDefinitions, listGeneratedToolSnapshotBindings, type GeneratedToolSnapshotBinding } from './generated-tools/adapter'
+import { generatedToolExecutionGuard } from './generated-tools/execution-guard'
+import { getJokerHomeDir } from './store/paths'
 import { researchReportTools } from './tools/research-report'
 import { contextTools } from './tools/context-retrieve'
 import { createResearchContext } from './research/context'
@@ -78,12 +84,13 @@ function normalizeRunMode(value: unknown): RunMode {
 }
 
 function buildAllTools(
+  win: BrowserWindow,
   workspacePath: string | null,
   allowedMcpTools?: readonly string[],
   generatedToolVersions: GeneratedToolSnapshotBinding[] = [],
   projectId?: string
 ): ToolDefinition[] {
-  const base = [...contextTools, ...fsTools, ...bashTools, ...searchTools, ...todoTools, ...subagentTools, ...webTools, ...imageTools, ...gitTools, ...getMcpTools(allowedMcpTools)]
+  const base = [...contextTools, ...fsTools, ...bashTools, ...searchTools, ...todoTools, ...subagentTools, ...webTools, ...imageTools, ...gitTools, ...buildAskUserTools(win), ...getMcpTools(allowedMcpTools)]
   const existing = [...base, ...buildToolForgeMetaTools({ builtinTools: base })]
   return [
     ...existing,
@@ -295,6 +302,7 @@ function createWindowGoalCoordinator(win: BrowserWindow): GoalCoordinator {
         ? projection.messages
         : [{ role: 'user' as const, content: `Execute the active Goal objective for round ${goal.currentRound}.` }]
       const definitions = buildAllTools(
+        win,
         workspacePath,
         capabilities.allowedMcpTools,
         capabilities.generatedToolVersions,
@@ -316,6 +324,7 @@ function createWindowGoalCoordinator(win: BrowserWindow): GoalCoordinator {
         })
       } finally {
         cancelApprovalsForRun({ windowId: win.id, sessionId, runId: invocationId })
+        userQuestionRegistry.cancelRun(sessionId, invocationId)
       }
     }
   })
@@ -624,6 +633,9 @@ function handleSend(
   }
 
   const researchContext = runMode === 'research' ? createResearchContext() : undefined
+  const operationJournal: OperationJournal = {
+    append: (event) => appendOperation(sessionId, event)
+  }
   const toolContext: ToolContext = {
     workspacePath,
     sessionId,
@@ -631,6 +643,8 @@ function handleSend(
     approvalGate: createApprovalGate(win, sessionId, runId, runMode),
     researchContext,
     abortSignal: controller.signal,
+    operationJournal,
+    guards: [generatedToolExecutionGuard(getJokerHomeDir())],
     onToolCall: (info) => onEvent({
       type: 'tool-status',
       sessionId,
@@ -713,12 +727,28 @@ function handleSend(
     intent,
     generatedToolVersions
   })
+  const interrupted = readInterruptedRun(sessionId)
+  if (interrupted.missing.length > 0) {
+    const unknown = interrupted.missing.filter((item) => item.kind === 'TOOL_OUTCOME_UNKNOWN').map((item) => item.toolName)
+    const notStarted = interrupted.missing.filter((item) => item.kind === 'TOOL_NOT_STARTED').map((item) => item.toolName)
+    const notes: string[] = []
+    if (unknown.length > 0) {
+      notes.push(`the previous run was interrupted before these tool calls recorded a result and their side effects may already have happened: ${unknown.join(', ')}. Do not re-run them blindly; check the current state first or ask the user.`)
+    }
+    if (notStarted.length > 0) {
+      notes.push(`these tool calls were durably recorded but never started, so re-issuing them is safe: ${notStarted.join(', ')}.`)
+    }
+    if (notes.length > 0) {
+      capabilities.systemPrompt = `${capabilities.systemPrompt ?? ''}\n\nCrash recovery (session operation journal): ${notes.join(' ')}`
+    }
+  }
   const projection = projectSessionModelMessages(session.messages, session.contextCheckpoint)
   const definitions = runMode === 'research'
     ? buildResearchTools()
     : intent === 'plan'
       ? buildPlanTools()
       : buildAllTools(
+          win,
           workspacePath,
           capabilities.allowedMcpTools,
           capabilities.generatedToolVersions,
@@ -759,6 +789,7 @@ function handleSend(
     reasoningLevel,
     runMode,
     capabilities,
+    operationJournal,
     executionContract: executionContract ?? undefined,
     checkpointUsed: projection.checkpointUsed,
     takeSteerMessages: async (stepNumber) => {
@@ -776,9 +807,10 @@ function handleSend(
       if (applied.length > 0) emitQueueUpdated(transport, sessionId, runId)
       return applied
     },
-    onStepCommitted: async (message) => {
+    onStepCommitted: async (message, stepNumber) => {
       if (!ownsRun(activeRun)) return
       if (!appendMessage(sessionId, message)) throw new Error('Failed to persist assistant step')
+      operationJournal.append({ type: 'step-committed', at: Date.now(), runId, step: stepNumber })
       activeRun.stepCommitted = true
       for (const pending of getSession(sessionId)?.pendingUserMessages ?? []) {
         if (pending.status === 'claimed' && pending.claimedByRunId === runId && pending.mode === 'steer') {
@@ -805,6 +837,7 @@ function handleSend(
       }
       await emitQueueUpdated(transport, sessionId, runId)
       if (terminalDone && (result.status === 'completed' || result.status === 'step-limit' || result.status === 'repetition')) {
+        mergeFinalUsageIntoLastAssistant(sessionId, result.usage)
         await transport.send({ type: 'message-end', sessionId, runId, messageId: result.messageId, usage: result.usage }).catch(() => undefined)
       }
       if (result.status === 'completed' || result.status === 'step-limit') {
@@ -853,6 +886,7 @@ function handleSend(
     })
     .finally(async () => {
       if (!ownsRun(activeRun)) return
+      operationJournal.append({ type: 'run-terminal', at: Date.now(), runId, status: activeRun.terminalReason ?? 'completed' })
       if (!activeRun.activityFinished) finishRunActivity(activeRun, controller.signal.aborted ? 'cancelled' : 'failed', controller.signal.aborted ? undefined : 'Agent run ended without a terminal result')
       cancelApprovalsForRun({ windowId: win.id, sessionId, runId })
       sendTerminalBestEffort(transport, { type: 'done', sessionId, runId })
@@ -943,6 +977,7 @@ function assistantMessageFromResult(
     toolCalls: result.toolCalls.length > 0 ? result.toolCalls : undefined,
     segments: result.segments.length > 0 ? result.segments : undefined,
     usage: result.usage,
+    durationMs: result.durationMs,
     runMode,
     createdAt: Date.now()
   }
@@ -961,6 +996,7 @@ export function abort(windowId: number, runId?: string, options: { drain?: boole
     active.controller.abort()
     active.transport.cancelRun(active.runId, { drain: options.drain })
     cancelApprovalsForRun({ windowId, sessionId: active.sessionId, runId: active.runId })
+    userQuestionRegistry.cancelRun(active.sessionId, active.runId)
   }
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { PanelRightClose, PanelRightOpen, ShieldAlert, Circle, CircleCheck, CircleDot } from 'lucide-react'
 import { useStore } from '../store'
 import { t } from '../i18n'
@@ -50,6 +50,21 @@ export default function DetailPanel({ onGoalAction }: Props): React.JSX.Element 
   const elapsedDuration = streaming && activityStartedAt !== undefined
     ? formatElapsedDuration(elapsedNow - activityStartedAt)
     : null
+  const { sessionUsage, assistantUsageCount } = useMemo(() => {
+    const cumulative: StreamUsage = {}
+    let count = 0
+    for (const message of messages) {
+      if (message.role !== 'assistant' || !message.usage) continue
+      count += 1
+      for (const key of ['inputTokens', 'outputTokens', 'totalTokens', 'noCacheTokens', 'cacheReadTokens', 'cacheWriteTokens', 'stepCount'] as const) {
+        const value = message.usage[key]
+        if (value !== undefined) cumulative[key] = (cumulative[key] ?? 0) + value
+      }
+      if (message.usage.firstTokenMs !== undefined) cumulative.firstTokenMs = Math.min(cumulative.firstTokenMs ?? Number.MAX_SAFE_INTEGER, message.usage.firstTokenMs)
+      if (message.usage.generationMs !== undefined) cumulative.generationMs = (cumulative.generationMs ?? 0) + message.usage.generationMs
+    }
+    return { sessionUsage: cumulative, assistantUsageCount: count }
+  }, [messages])
 
   useEffect(() => {
     if (!streaming || activityStartedAt === undefined) return
@@ -148,16 +163,24 @@ export default function DetailPanel({ onGoalAction }: Props): React.JSX.Element 
             </div>}
           </section>}
 
-          {latestUsage && <section>
-            <p className="mb-2 text-xs uppercase tracking-widest text-[var(--color-text-muted)]">{t(language, 'detail.usage')}</p>
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
-              <UsageRow label={t(language, 'detail.inputTokens')} value={latestUsage.inputTokens} />
-              <UsageRow label={t(language, 'detail.outputTokens')} value={latestUsage.outputTokens} />
-              <UsageRow label={t(language, 'detail.totalTokens')} value={latestUsage.totalTokens} />
-              <UsageRow label={t(language, 'detail.noCacheTokens')} value={latestUsage.noCacheTokens} />
-              <UsageRow label={t(language, 'detail.cacheReadTokens')} value={latestUsage.cacheReadTokens} />
-              <UsageRow label={t(language, 'detail.cacheWriteTokens')} value={latestUsage.cacheWriteTokens} />
-              <UsageRow label={t(language, 'detail.modelSteps')} value={latestUsage.stepCount} />
+          {latestUsage && <section data-token-ledger>
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-xs uppercase tracking-widest text-[var(--color-text-muted)]">{t(language, 'detail.usage')}</p>
+              <span className="font-mono text-[10px] tabular-nums text-[var(--color-text-secondary)]">{t(language, 'detail.usageRuns', { count: assistantUsageCount })}</span>
+            </div>
+            <div className="grid grid-cols-[1fr_auto_auto] gap-x-3 gap-y-1.5 text-xs">
+              <span />
+              <span className="text-center text-[10px] font-medium text-[var(--color-text-secondary)]">{t(language, 'detail.usageLastRun')}</span>
+              <span className="text-center text-[10px] font-medium text-[var(--color-text-secondary)]">{t(language, 'detail.usageSessionTotal')}</span>
+              <UsageRow label={t(language, 'detail.inputTokens')} value={latestUsage.inputTokens} total={sessionUsage.inputTokens} />
+              <UsageRow label={t(language, 'tokens.cache')} value={latestUsage.cacheReadTokens} total={sessionUsage.cacheReadTokens} indent />
+              <UsageRow label={t(language, 'tokens.cacheWrite')} value={latestUsage.cacheWriteTokens} total={sessionUsage.cacheWriteTokens} indent />
+              <UsageRow label={t(language, 'detail.noCacheTokens')} value={latestUsage.noCacheTokens} total={sessionUsage.noCacheTokens} indent />
+              <UsageRow label={t(language, 'detail.outputTokens')} value={latestUsage.outputTokens} total={sessionUsage.outputTokens} />
+              <UsageRow label={t(language, 'detail.totalTokens')} value={latestUsage.totalTokens} total={sessionUsage.totalTokens} strong />
+              <UsageRow label={t(language, 'detail.modelSteps')} value={latestUsage.stepCount} total={sessionUsage.stepCount} />
+              <UsageRow label={t(language, 'detail.ttft')} value={latestUsage.firstTokenMs === undefined ? undefined : formatMs(latestUsage.firstTokenMs)} total={sessionUsage.firstTokenMs === undefined ? undefined : formatMs(sessionUsage.firstTokenMs)} />
+              <UsageRow label={t(language, 'detail.throughput')} value={formatTokPerSec(latestUsage)} total={sessionUsage.outputTokens !== undefined && sessionUsage.generationMs !== undefined && sessionUsage.generationMs > 0 ? `${(sessionUsage.outputTokens / (sessionUsage.generationMs / 1000)).toFixed(1)} tok/s` : undefined} />
             </div>
           </section>}
 
@@ -255,11 +278,21 @@ function formatStatusAge(durationMs: number): string {
   return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`
 }
 
-function UsageRow({ label, value }: { label: string; value: number | undefined }): React.JSX.Element {
+function UsageRow({ label, value, total, indent = false, strong = false }: { label: string; value: number | string | undefined; total?: number | string; indent?: boolean; strong?: boolean }): React.JSX.Element {
   return (
-    <div className="contents">
-      <span className="text-[var(--color-text-muted)]">{label}</span>
-      <span className="text-right font-mono tabular-nums text-[var(--color-text-primary)]">{value === undefined ? '—' : value.toLocaleString()}</span>
-    </div>
+    <>
+      <span className={`text-[var(--color-text-muted)] ${indent ? 'pl-3 text-[10px]' : ''} ${strong ? 'font-medium text-[var(--color-text-secondary)]' : ''}`}>{label}</span>
+      <span className={`text-right font-mono tabular-nums ${strong ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)]'} ${indent ? 'text-[10px]' : ''}`}>{value === undefined ? '—' : typeof value === 'number' ? value.toLocaleString() : value}</span>
+      <span className={`text-right font-mono tabular-nums ${strong ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)]'} ${indent ? 'text-[10px]' : ''}`}>{total === undefined ? '—' : typeof total === 'number' ? total.toLocaleString() : total}</span>
+    </>
   )
+}
+
+function formatMs(value: number): string {
+  return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${Math.round(value)}ms`
+}
+
+function formatTokPerSec(usage: StreamUsage): string | undefined {
+  if (usage.outputTokens === undefined || usage.generationMs === undefined || usage.generationMs <= 0) return undefined
+  return `${(usage.outputTokens / (usage.generationMs / 1000)).toFixed(1)} tok/s`
 }

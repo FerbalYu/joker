@@ -1,9 +1,9 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Copy, Loader2, Pencil, Send, X } from 'lucide-react'
+import { Copy, FolderOpen, Loader2, Pencil, Send, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Components } from 'react-markdown'
-import type { AssistantSegment, ChatMessage, RunMode } from '@shared/types'
+import type { AssistantSegment, ChatMessage, RunMode, ToolCallInfo } from '@shared/types'
 import { useStore } from '../store'
 import { t, type Language } from '../i18n'
 import ImagePreview from './ImagePreview'
@@ -11,6 +11,7 @@ import LinkPreview from './LinkPreview'
 import FileLink from './FileLink'
 import ToolCallList from './ToolCallList'
 import MessageMinimap from './MessageMinimap'
+import ProducedFiles from './ProducedFiles'
 import { mergeAdjacentSegments, segmentsFromLegacyMessage } from '../assistant-segments'
 import { splitUrls, classifyLink } from '../url-preview'
 import { extractResearchReports, visibleChatTools } from '../tool-visibility'
@@ -155,11 +156,9 @@ export default function MessageStream({
         streaming={streaming}
         scrollRef={scrollRef}
       />
-      <div data-message-stream-content className="mx-auto min-w-0 flex-1 px-[35px] pt-6">
+      <div data-message-stream-content className="mx-auto min-w-0 w-full max-w-3xl flex-1 px-6 pt-6">
         {messages.length === 0 && !streaming && (
-          <div className="flex h-full min-h-[40vh] flex-col items-center justify-center text-center">
-            <p className="text-sm text-[var(--color-text-muted)]">{t(language, 'message.welcome')}</p>
-          </div>
+          <WelcomeState />
         )}
 
         {hiddenMessageCount > 0 && (
@@ -175,12 +174,13 @@ export default function MessageStream({
           </div>
         )}
 
-        {visibleMessages.map((message) => (
+        {visibleMessages.map((message, index) => (
           <MessageRow
             key={message.id}
             message={message}
             language={language}
             streaming={streaming}
+            turnToolCalls={turnToolCallsAt(visibleMessages, index)}
             onCopyLink={onCopyLink}
             onCopyMessage={onCopyMessage}
             onEditMessage={onEditMessage}
@@ -199,6 +199,47 @@ export default function MessageStream({
 
         <div className="h-[35px] shrink-0" ref={bottomRef} />
       </div>
+    </div>
+  )
+}
+
+function WelcomeState(): React.JSX.Element {
+  const language = useStore((s) => s.language)
+  const config = useStore((s) => s.config)
+  const activeProjectId = useStore((s) => s.activeProjectId)
+  const providerName = config?.providers.find((provider) => provider.id === config.activeProviderId)?.name
+    ?? config?.providers.find((provider) => provider.enabled)?.name
+  const samples = ['welcome.sample.explain', 'welcome.sample.fix', 'welcome.sample.build'] as const
+  return (
+    <div data-welcome-state className="flex h-full min-h-[55vh] flex-col items-center justify-center gap-5 text-center">
+      <img src={logoUrl} alt="" className="h-10 w-10 rounded-lg" />
+      <div>
+        <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">{t(language, 'message.welcome')}</h1>
+        {providerName && <p className="mt-1 text-xs text-[var(--color-text-muted)]">{providerName}</p>}
+      </div>
+      {!activeProjectId && (
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new CustomEvent('joker:welcome-pick-folder'))}
+          className="flex items-center gap-2 rounded-md border border-[var(--color-accent)]/60 bg-[var(--color-accent)]/10 px-4 py-2 text-sm text-[var(--color-accent)] transition hover:bg-[var(--color-accent)]/20"
+        >
+          <FolderOpen size={15} />
+          {t(language, 'welcome.pickFolder')}
+        </button>
+      )}
+      <div className="flex max-w-lg flex-wrap items-center justify-center gap-2">
+        {samples.map((key) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('joker:welcome-insert', { detail: { text: t(language, key) } }))}
+            className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-light)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+          >
+            {t(language, key)}
+          </button>
+        ))}
+      </div>
+      <p className="text-[11px] text-[var(--color-text-muted)]">{t(language, 'welcome.commandsHint')}</p>
     </div>
   )
 }
@@ -319,6 +360,22 @@ function isStepMessage(message: ChatMessage): boolean {
   return /-step-\d+$/.test(message.id)
 }
 
+/**
+ * Tool calls of the assistant turn a message belongs to: every assistant
+ * message from the last user boundary up to and including this one.
+ */
+function turnToolCallsAt(messages: ChatMessage[], index: number): ToolCallInfo[] {
+  let start = index
+  while (start > 0 && messages[start - 1].role === 'assistant') start -= 1
+  const toolCalls: ToolCallInfo[] = []
+  for (const message of messages.slice(start, index + 1)) {
+    if (message.role !== 'assistant') continue
+    const fromSegments = (message.segments ?? []).flatMap((segment) => (segment.type === 'tools' ? segment.tools : []))
+    for (const toolCall of message.toolCalls ?? fromSegments) toolCalls.push(toolCall)
+  }
+  return toolCalls
+}
+
 const MarkdownContent = memo(function MarkdownContent({ content, onCopyLink }: { content: string; onCopyLink?: (url: string) => void }): React.JSX.Element {
   const components = useMemo(() => markdownComponents(onCopyLink), [onCopyLink])
   return (
@@ -369,7 +426,7 @@ function UrlAwareText({ text, onCopyLink }: { text: string; onCopyLink?: (url: s
     </div>
   )
 }
-const MessageRow = memo(function MessageRow({ message, language, streaming, onCopyLink, onCopyMessage, onEditMessage }: { message: ChatMessage; language: Language; streaming: boolean; onCopyLink?: (url: string) => void; onCopyMessage?: (text: string) => void; onEditMessage?: (messageId: string, text: string) => Promise<boolean> }): React.JSX.Element {
+const MessageRow = memo(function MessageRow({ message, language, streaming, turnToolCalls = [], onCopyLink, onCopyMessage, onEditMessage }: { message: ChatMessage; language: Language; streaming: boolean; turnToolCalls?: ToolCallInfo[]; onCopyLink?: (url: string) => void; onCopyMessage?: (text: string) => void; onEditMessage?: (messageId: string, text: string) => Promise<boolean> }): React.JSX.Element {
   const isUser = message.role === 'user'
   const [editing, setEditing] = useState(false)
   const [editText, setEditText] = useState(message.content)
@@ -422,6 +479,7 @@ const assistantSegments = !isUser
           <div className="w-full text-sm leading-6 text-[var(--color-text-primary)]">{content}</div>
         )}
         {duration && <div className="mt-1 text-[10px] text-[var(--color-text-muted)]">{language === 'zh' ? `已处理 ${duration}` : `Processed ${duration}`}</div>}
+        {!isUser && <ProducedFiles toolCalls={turnToolCalls} />}
         <div className={`mt-1 flex w-full items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${isUser ? 'justify-end' : 'justify-start'}`}>
           {onCopyMessage && <button type="button" onClick={() => onCopyMessage(message.content)} aria-label={t(language, 'message.copy')} title={t(language, 'message.copy')} className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-active)] hover:text-[var(--color-accent)]"><Copy size={13} /></button>}
           {canEdit && <button type="button" onClick={() => { setEditText(message.content); setEditError(null); setEditing(true) }} aria-label={t(language, 'message.edit')} title={t(language, 'message.edit')} className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-active)] hover:text-[var(--color-accent)]"><Pencil size={13} /></button>}

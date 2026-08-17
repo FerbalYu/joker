@@ -158,6 +158,7 @@ export class GoalCoordinator {
         ...(execution.segments.length > 0 ? { segments: execution.segments } : {}),
         ...(execution.toolCalls.length > 0 ? { toolCalls: execution.toolCalls } : {}),
         usage: execution.usage,
+        durationMs: execution.durationMs,
         runMode: 'chat',
         createdAt: this.now()
       }

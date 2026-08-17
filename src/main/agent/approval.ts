@@ -71,7 +71,7 @@ export class ApprovalRegistry {
   }
 
   getMode(windowId: number): ApprovalMode {
-    return this.modes.get(windowId) ?? 'suggest'
+    return this.modes.get(windowId) ?? 'full-auto'
   }
 
   deleteWindow(windowId: number): void {

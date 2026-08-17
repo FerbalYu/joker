@@ -343,6 +343,10 @@ export interface StreamUsage {
   cacheReadTokens?: number
   cacheWriteTokens?: number
   stepCount?: number
+  /** Wall-clock ms from run start to first streamed token across all steps. */
+  firstTokenMs?: number
+  /** Wall-clock ms spent decoding between first token and run completion. */
+  generationMs?: number
 }
 
 export type ReasoningLevel = 'auto' | 'none' | 'low' | 'medium' | 'high'
@@ -470,6 +474,33 @@ export interface ApprovalRequest {
   sessionId: string
   toolName: string
   input: Record<string, unknown>
+}
+
+// Structured user questions raised by the model via AskUserQuestion
+export interface UserQuestionOption {
+  id: string
+  label: string
+  description?: string
+}
+
+export interface UserQuestionRequest {
+  requestId: string
+  sessionId: string
+  runId: string
+  header?: string
+  question: string
+  multiSelect: boolean
+  options: UserQuestionOption[]
+  allowFreeText: boolean
+}
+
+export interface UserQuestionAnswerPayload {
+  requestId: string
+  sessionId: string
+  runId: string
+  selectedIds: string[]
+  freeText: string | null
+  cancelled?: boolean
 }
 
 export type ProviderType = 'openai' | 'anthropic' | 'ollama' | 'openai-compatible'

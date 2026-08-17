@@ -378,14 +378,70 @@ void test('runAgent stops and preserves output when the model enters a repetitio
   })
 
   assert.equal(result.status, 'repetition')
-  assert.match(result.text, /JOKER 已自动停止：检测到模型输出陷入重复循环/)
+  assert.match(result.text, /检测到重复输出，已自动停止/)
   assert.ok(events.filter((event) => event.type === 'token').length < repeatedChunks.length + 1)
   assert.equal(events.filter((event) => event.type === 'abort').length, 0)
   assert.equal(events.filter((event) => event.type === 'error').length, 0)
   assert.equal(events.filter((event) => event.type === 'message-end').length, 1)
   assert.equal(events.filter((event) => event.type === 'done').length, 1)
   assert.equal(committed.length, 1)
-  assert.match(committed[0]?.content ?? '', /重复循环/)
+  assert.match(committed[0]?.content ?? '', /检测到重复输出/)
+})
+
+void test('runAgent converts invoke-prose into a real tool call', async () => {
+  const executed: string[] = []
+  const events: StreamEvent[] = []
+  let streamCalls = 0
+  const model = {
+    specificationVersion: 'v2', provider: 'test', modelId: 'invoke-fallback', defaultObjectGenerationMode: 'json',
+    doGenerate: async () => { throw new Error('unused') },
+    doStream: async () => {
+      streamCalls += 1
+      const streamText = streamCalls === 1 ? 'invoke TodoWrite with todos is [{"content":"写报告"}]' : 'done'
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: 'response-metadata', id: 'r', modelId: 'invoke-fallback', timestamp: new Date(0) })
+            controller.enqueue({ type: 'text-start', id: 't' })
+            controller.enqueue({ type: 'text-delta', id: 't', delta: streamText })
+            controller.enqueue({ type: 'text-end', id: 't' })
+            controller.enqueue({ type: 'finish', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } })
+            controller.close()
+          }
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} }
+      }
+    }
+  } as unknown as LanguageModel
+
+  const committedSteps: ChatMessage[] = []
+  const result = await runAgent({
+    sessionId: 'session-invoke',
+    runId: 'run-invoke',
+    messages: [{ role: 'user', content: '帮我列待办' }],
+    reasoningLevel: 'auto',
+    model,
+    tools: {
+      TodoWrite: tool({
+        description: 'Create a task list',
+        inputSchema: z.object({ todos: z.array(z.object({ content: z.string() })) }),
+        execute: async ({ todos }) => { executed.push(JSON.stringify(todos)); return { output: 'saved' } }
+      })
+    },
+    onStepCommitted: (message) => { committedSteps.push(message) },
+    onEvent: (event) => { events.push(event) }
+  })
+
+  assert.equal(streamCalls, 2)
+  assert.deepEqual(executed, ['[{"content":"写报告"}]'])
+  assert.equal(result.status, 'completed')
+  assert.match(result.text, /done/)
+  assert.ok(events.some((event) => event.type === 'tool-call' && event.toolName === 'TodoWrite'))
+  assert.ok(events.some((event) => event.type === 'tool-result' && event.toolName === 'TodoWrite'))
+  const fallbackToolMessage = committedSteps.find((message) => message.segments?.some((segment) => segment.type === 'tools'))
+  assert.ok(fallbackToolMessage, 'invoke fallback must commit a durable tool-segment message')
+  assert.equal(fallbackToolMessage.segments?.[0]?.type, 'tools')
+  assert.equal(fallbackToolMessage.segments?.[0]?.type === 'tools' ? fallbackToolMessage.segments[0].tools[0]?.status : undefined, 'done')
 })
 
 void test('execution contract requires a real first-step tool call and rejects text-only completion', async () => {
@@ -852,7 +908,9 @@ void test('multi-step usage is cumulative while current context uses the final s
   assert.ok(requests[1].some((message) => message.role === 'tool'))
   const messageEnd = events.find((event) => event.type === 'message-end')
   assert.ok(messageEnd?.type === 'message-end')
-  assert.deepEqual(messageEnd.usage, {
+  const endUsage = messageEnd.usage ?? {}
+  const { firstTokenMs, generationMs, ...reportedUsage } = endUsage
+  assert.deepEqual(reportedUsage, {
     inputTokens: 390,
     outputTokens: 38,
     totalTokens: 428,
@@ -861,6 +919,9 @@ void test('multi-step usage is cumulative while current context uses the final s
     cacheWriteTokens: 5,
     stepCount: 3
   })
+  // The fake stream emits text deltas, so timing must be recorded on the final usage.
+  assert.equal(typeof firstTokenMs, 'number')
+  assert.equal(typeof generationMs, 'number')
 
   const contextEvents = events.filter((event) => event.type === 'context-usage')
   assert.equal(contextEvents.length, 5)
@@ -870,4 +931,37 @@ void test('multi-step usage is cumulative while current context uses the final s
   assert.equal(finalContext.usage.inputTokens, 250)
   assert.equal(finalContext.usage.cacheHitRate, 50)
   assert.equal(finalContext.usage.source, 'provider')
+})
+
+void test('request reconstruction: model-visible messages are derived from logged input plus recorded tool results', async () => {
+  const requests: ModelMessage[][] = []
+  const result = await runAgent({
+    sessionId: 'session-reconstruction',
+    runId: 'run-reconstruction',
+    messages: [{ role: 'user', content: 'read then answer' }],
+    reasoningLevel: 'auto',
+    model: multiStepModel(requests),
+    tools: {
+      Read: tool({
+        description: 'Read',
+        inputSchema: z.object({}),
+        execute: async () => ({ output: 'CONTENTS' })
+      })
+    },
+    onEvent: () => undefined
+  })
+
+  // The first request carries exactly the logged user message.
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0]?.length, 1)
+  assert.equal(requests[0]?.[0]?.role, 'user')
+  assert.match(JSON.stringify(requests[0]?.[0]?.content), /read then answer/)
+  // The second request reconstructs the transcript: user -> assistant tool-call -> tool result.
+  const second = requests[1] ?? []
+  assert.equal(second[0]?.role, 'user')
+  assert.ok(second.some((message) => message.role === 'assistant'))
+  const toolResultMessage = second.find((message) => message.role === 'tool')
+  assert.ok(toolResultMessage)
+  assert.match(JSON.stringify(toolResultMessage), /CONTENTS/)
+  assert.equal(result.status, 'completed')
 })

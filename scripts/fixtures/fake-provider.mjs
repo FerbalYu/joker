@@ -28,14 +28,14 @@ function toolCall(name, args, id) {
   return [
     { id: 'chatcmpl-qa', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'gpt-4o', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id, type: 'function', function: { name, arguments: '' } }] }, finish_reason: null }] },
     { id: 'chatcmpl-qa', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'gpt-4o', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify(args) } }] }, finish_reason: null }] },
-    { id: 'chatcmpl-qa', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'gpt-4o', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }
+    { id: 'chatcmpl-qa', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'gpt-4o', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 480, completion_tokens: 22, total_tokens: 502, prompt_tokens_details: { cached_tokens: 320 } } }
   ]
 }
 
 function textResponse(text) {
   return [
     { id: 'chatcmpl-qa', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'gpt-4o', choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }] },
-    { id: 'chatcmpl-qa', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'gpt-4o', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }
+    { id: 'chatcmpl-qa', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'gpt-4o', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 520, completion_tokens: 28, total_tokens: 548, prompt_tokens_details: { cached_tokens: 300 } } }
   ]
 }
 
@@ -214,6 +214,43 @@ function toolLifecycleResponse(messages) {
 }
 
 const CONTEXT_RETRIEVE_CALL = 'call_context_retrieve_qa'
+
+const ASK_QUESTION_CALL = 'call_ask_user_qa'
+
+const PRODUCED_FILES_CALLS = { First: 'call_pf_write', Second: 'call_pf_edit' }
+
+function producedFilesResponse(messages) {
+  const history = researchToolHistory(messages)
+  if (history.calls.get(PRODUCED_FILES_CALLS.First) === 'Write' && history.results.has(PRODUCED_FILES_CALLS.First) &&
+      history.calls.get(PRODUCED_FILES_CALLS.Second) === 'Edit' && history.results.has(PRODUCED_FILES_CALLS.Second)) {
+    return textResponse('Produced-files QA completed: notes.txt was created and config.md was edited.')
+  }
+  if (!(history.calls.get(PRODUCED_FILES_CALLS.First) === 'Write' && history.results.has(PRODUCED_FILES_CALLS.First))) {
+    return toolCall('Write', { filePath: 'notes.txt', content: 'produced-files fixture line 1\nline 2\n' }, PRODUCED_FILES_CALLS.First)
+  }
+  return toolCall('Edit', { filePath: 'config.md', oldString: 'line 2', newString: 'line 2 edited' }, PRODUCED_FILES_CALLS.Second)
+}
+
+function askQuestionResponse(messages) {
+  const history = researchToolHistory(messages)
+  if (history.calls.get(ASK_QUESTION_CALL) === 'AskUserQuestion' && history.results.has(ASK_QUESTION_CALL)) {
+    const answer = String(history.results.get(ASK_QUESTION_CALL) ?? '')
+    if (answer.includes('dismissed')) return textResponse('AskUserQuestion dismissed by the user; continuing with the safest option.')
+    return textResponse(`AskUserQuestion round trip completed. The user chose: ${answer.includes('Fast') ? 'Fast mode' : 'another answer'}.`)
+  }
+  return toolCall('AskUserQuestion', {
+    questions: [{
+      question: 'ASK_QUESTION_7781: Which release strategy should the migration use?',
+      header: 'Choose mode',
+      multiSelect: false,
+      options: [
+        { label: 'Fast mode', description: 'Ship immediately with minimal validation.' },
+        { label: 'Safe mode', description: 'Run the full verification suite first.' }
+      ],
+      allowFreeText: true
+    }]
+  }, ASK_QUESTION_CALL)
+}
 
 function contextOptimizationResponse(messages, tools) {
   const history = researchToolHistory(messages)
@@ -501,13 +538,83 @@ function electronToolForgeResponse(messages, tools, systemText) {
   return textResponse('ToolForge manufacturing started; the host will verify, enable, and continue the original task.')
 }
 
+const FS_OCC_MARKER = 'zzqfsocc41x'
+const FS_OCC_CALLS = {
+  Read: 'call_fs_occ_read',
+  Write: 'call_fs_occ_write_stale',
+  ReadAgain: 'call_fs_occ_read_again',
+  Edit: 'call_fs_occ_edit'
+}
+
+function toolResultJson(content) {
+  try {
+    const parsed = JSON.parse(content)
+    if (parsed && typeof parsed === 'object' && typeof parsed.output === 'string') return parsed
+  } catch { /* not JSON */ }
+  return null
+}
+
+function fsOccResponse(messages) {
+  const history = researchToolHistory(messages)
+  const done = (id) => history.calls.get(id) !== undefined && history.results.has(id)
+  const resultOf = (id) => {
+    const raw = String(history.results.get(id) ?? '')
+    const parsed = toolResultJson(raw)
+    return parsed ? parsed.output : raw
+  }
+  const versionOf = (id) => {
+    const raw = String(history.results.get(id) ?? '')
+    const parsed = toolResultJson(raw)
+    return typeof parsed?.metadata?.version === 'string' ? parsed.metadata.version : undefined
+  }
+  if (!done(FS_OCC_CALLS.Read)) return toolCall('Read', { filePath: 'notes.txt' }, FS_OCC_CALLS.Read)
+  if (!done(FS_OCC_CALLS.Write)) {
+    const readVersion = versionOf(FS_OCC_CALLS.Read)
+    if (!readVersion) return textResponse('FS_OCC_UNEXPECTED: initial Read did not expose a version digest.')
+    return toolCall('Write', { filePath: 'notes.txt', content: 'colliding overwrite from stale snapshot', expectedVersion: readVersion.slice(0, 62) + '00' }, FS_OCC_CALLS.Write)
+  }
+  if (!resultOf(FS_OCC_CALLS.Write).includes('expectedVersion mismatch')) {
+    return textResponse('FS_OCC_UNEXPECTED: stale Write unexpectedly succeeded; optimistic concurrency boundary is broken.')
+  }
+  if (!done(FS_OCC_CALLS.ReadAgain)) return toolCall('Read', { filePath: 'notes.txt' }, FS_OCC_CALLS.ReadAgain)
+  if (!done(FS_OCC_CALLS.Edit)) {
+    const fresh = versionOf(FS_OCC_CALLS.ReadAgain)
+    if (!fresh) return textResponse('FS_OCC_UNEXPECTED: re-read tool result did not expose a version digest.')
+    return toolCall('Edit', { filePath: 'notes.txt', oldString: 'stable initial content', newString: 'stable initial content, edited with expectedVersion', expectedVersion: fresh }, FS_OCC_CALLS.Edit)
+  }
+  if (!resultOf(FS_OCC_CALLS.Edit).includes('Edited notes.txt')) {
+    return textResponse('FS_OCC_UNEXPECTED: versioned Edit did not succeed.')
+  }
+  return textResponse(`FS_OCC_OK ${FS_OCC_MARKER}`)
+}
+
+const INVOKE_FALLBACK_MARKER = 'zzqinvokefallback41x'
+
+function invokeFallbackResponse(messages) {
+  const firstTurn = [...messages].reverse().find((message) => message.role === 'user')
+  const currentTurnOnly = firstTurn ? messages.slice(messages.indexOf(firstTurn)) : messages
+  const hasTodoCard = currentTurnOnly.some((message) => message?.role === 'tool' && String(message.content ?? '').includes('Todo list updated'))
+  const readCount = currentTurnOnly.filter((message) => message?.role === 'assistant' && message.tool_calls?.some((call) => call?.function?.name === 'Read')).length
+  if (!hasTodoCard) {
+    return textResponse(`I will manage the plan first. invoke TodoWrite with todos is [{"content":"invoke fallback durable tool call","status":"completed","priority":"high"}] ${INVOKE_FALLBACK_MARKER}`)
+  }
+  if (readCount === 0) {
+    return textResponse(`invoke Read with filePath is package.json ${INVOKE_FALLBACK_MARKER}`)
+  }
+  const lastReadResult = [...currentTurnOnly].reverse().find((message) => message?.role === 'tool' && String(message.content ?? '').includes('joker-runtime-contract-fixture'))
+  if (!lastReadResult) {
+    return textResponse(`INVOKE_FALLBACK_UNEXPECTED: the fallback Read call returned no recognizable file content: ${String(currentTurnOnly.find((message) => message?.role === 'tool')?.content ?? '').slice(0, 120)}`)
+  }
+  return textResponse(`INVOKE_FALLBACK_OK ${INVOKE_FALLBACK_MARKER}`)
+}
+
 const server = http.createServer((req, res) => {
   let body = ''
   req.on('data', (chunk) => { body += chunk })
   req.on('end', async () => {
     let parsed = null
     try { parsed = body ? JSON.parse(body) : null } catch { /* handled below */ }
-    writeLog({ method: req.method, url: req.url, authorization: req.headers.authorization ?? null, body: parsed })
+    writeLog({ method: req.method, url: req.url, authorization: req.headers.authorization ?? null, stream: parsed?.stream === true, streamOptions: parsed?.stream_options ?? null, body: parsed })
 
     if (req.method === 'GET' && req.url === '/v1/models') {
       return json(res, 200, { object: 'list', data: [{ id: 'gpt-4o', object: 'model', owned_by: 'qa' }] })
@@ -536,10 +643,14 @@ const server = http.createServer((req, res) => {
     }
     if (/plan-only mode/i.test(systemText)) return respond(planResponse(messages))
     if (scenario === 'toolforge-vertical-slice') return respond(electronToolForgeResponse(messages, parsed.tools, systemText))
+    if (scenario === 'fs-optimistic-concurrency') return respond(fsOccResponse(messages))
+    if (scenario === 'invoke-fallback') return respond(invokeFallbackResponse(messages))
     if (scenario === 'toolforge-edit-success') return respond(electronToolForgeEditResponse(messages, parsed.tools, systemText, false))
     if (scenario === 'toolforge-edit-failure') return respond(electronToolForgeEditResponse(messages, parsed.tools, systemText, true))
     if (scenario === 'research') return respond(researchResponse(messages))
     if (scenario === 'context-optimization') return respond(contextOptimizationResponse(messages, parsed.tools))
+    if (scenario === 'ask-question') return respond(askQuestionResponse(messages))
+    if (scenario === 'produced-files') return respond(producedFilesResponse(messages))
     if (scenario === 'queue-steer') {
       const chunks = queueSteerResponse(messages)
       const hasToolResult = messages.some((message) => message?.role === 'tool')

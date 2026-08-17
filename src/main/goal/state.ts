@@ -50,7 +50,9 @@ const USAGE_KEYS = [
   'noCacheTokens',
   'cacheReadTokens',
   'cacheWriteTokens',
-  'stepCount'
+  'stepCount',
+  'firstTokenMs',
+  'generationMs'
 ] as const
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const SKILL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/
@@ -90,6 +92,11 @@ export function addGoalUsage(left: StreamUsage, right: StreamUsage): StreamUsage
   for (const key of USAGE_KEYS) {
     const leftValue = left[key]
     const rightValue = right[key]
+    if (key === 'firstTokenMs') {
+      if (leftValue !== undefined && rightValue !== undefined) result.firstTokenMs = Math.min(leftValue, rightValue)
+      else if (leftValue !== undefined || rightValue !== undefined) result.firstTokenMs = (leftValue ?? rightValue) as number
+      continue
+    }
     if (leftValue !== undefined || rightValue !== undefined) result[key] = (leftValue ?? 0) + (rightValue ?? 0)
   }
   const leftTotal = Math.max(left.totalTokens ?? 0, (left.inputTokens ?? 0) + (left.outputTokens ?? 0))

@@ -2,6 +2,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { buildCapabilitySnapshot, resolveAllowedMcpTools } from './capabilities'
 
+void test('capability snapshot opens with an agent identity that prefers tool use', () => {
+  const snapshot = buildCapabilitySnapshot([], 'C:/workspace', 'chat')
+  assert.match(snapshot.systemPrompt ?? '', /^You are JOKER, an AI coding agent/)
+  assert.match(snapshot.systemPrompt ?? '', /call the matching tool directly instead of merely describing what you would do/)
+})
+
 void test('Skill MCP constraints use the intersection and empty allowlists grant nothing', () => {
   assert.deepEqual(resolveAllowedMcpTools([]), undefined)
   assert.deepEqual(resolveAllowedMcpTools([{ allowedMcpTools: ['a', 'b'] }]), ['a', 'b'])

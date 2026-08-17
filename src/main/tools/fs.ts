@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { existsSync, mkdirSync } from 'node:fs'
@@ -16,6 +17,20 @@ function safePath(workspacePath: string | null, filePath: string, allowMissingTa
   return resolveWorkspacePath(root, filePath, allowMissingTarget)
 }
 
+/** Content digest used as the optimistic-concurrency version for Read/Write/Edit. */
+function contentVersion(content: string): string {
+  return createHash('sha256').update(content).digest('hex')
+}
+
+const VERSION_DESCRIPTION = 'Optional version from the latest Read of this file. When provided, the file is only modified if its current content still matches this version; a mismatch means the file changed since it was read and the call fails instead of overwriting.'
+
+function verifyVersionOrThrow(current: string, expectedVersion: string | undefined, filePath: string): void {
+  if (expectedVersion === undefined) return
+  if (contentVersion(current) !== expectedVersion) {
+    throw new Error(`File changed since it was read (expectedVersion mismatch): ${filePath}. Re-read the file and retry.`)
+  }
+}
+
 export const readTool: ToolDefinition = {
   name: 'Read',
   description:
@@ -29,27 +44,32 @@ export const readTool: ToolDefinition = {
     const content = await readFile(absPath, 'utf-8')
     const lines = content.split('\n')
     const numbered = lines.map((line, i) => `${String(i + 1).padStart(6)}\t${line}`).join('\n')
-    return { output: numbered }
+    return { output: numbered, metadata: { version: contentVersion(content) } }
   }
 }
 
 export const writeTool: ToolDefinition = {
   name: 'Write',
   description:
-    'Write content to a file. Creates parent directories if needed. Overwrites existing content.',
+    'Write content to a file. Creates parent directories if needed. Creates a new file if absent. Overwrites existing content; pass expectedVersion (from the latest Read) to fail instead when the file changed since it was read.',
   inputSchema: z.object({
     filePath: z.string().describe('Path to the file to write'),
-    content: z.string().describe('Full content to write to the file')
+    content: z.string().describe('Full content to write to the file'),
+    expectedVersion: z.string().optional().describe(VERSION_DESCRIPTION)
   }),
   execute: async (input, context: ToolContext): Promise<ToolResult> => {
-    const { filePath, content } = input as { filePath: string; content: string }
+    const { filePath, content, expectedVersion } = input as { filePath: string; content: string; expectedVersion?: string }
     const absPath = safePath(context.workspacePath, filePath, true)
     const dir = dirname(absPath)
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true })
     }
+    if (existsSync(absPath)) {
+      const current = await readFile(absPath, 'utf-8')
+      verifyVersionOrThrow(current, expectedVersion, filePath)
+    }
     await writeFile(absPath, content, 'utf-8')
-    return { output: `File written: ${filePath}` }
+    return { output: `File written: ${filePath}`, metadata: { version: contentVersion(content) } }
   }
 }
 
@@ -61,17 +81,20 @@ export const editTool: ToolDefinition = {
     filePath: z.string().describe('Path to the file to edit'),
     oldString: z.string().describe('The exact string to replace'),
     newString: z.string().describe('The replacement string'),
-    replaceAll: z.boolean().optional().describe('Replace all occurrences (default false)')
+    replaceAll: z.boolean().optional().describe('Replace all occurrences (default false)'),
+    expectedVersion: z.string().optional().describe(VERSION_DESCRIPTION)
   }),
   execute: async (input, context: ToolContext): Promise<ToolResult> => {
-    const { filePath, oldString, newString, replaceAll } = input as {
+    const { filePath, oldString, newString, replaceAll, expectedVersion } = input as {
       filePath: string
       oldString: string
       newString: string
       replaceAll?: boolean
+      expectedVersion?: string
     }
     const absPath = safePath(context.workspacePath, filePath)
     const original = await readFile(absPath, 'utf-8')
+    verifyVersionOrThrow(original, expectedVersion, filePath)
 
     const occurrences = original.split(oldString).length - 1
     if (occurrences === 0) {
@@ -102,7 +125,7 @@ export const editTool: ToolDefinition = {
 
     return {
       output: `Edited ${filePath}`,
-      metadata: { diff: diffText, occurrences, additions, deletions }
+      metadata: { diff: diffText, occurrences, additions, deletions, version: contentVersion(updated) }
     }
   }
 }

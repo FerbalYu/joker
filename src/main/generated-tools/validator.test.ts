@@ -84,7 +84,7 @@ function setup(home: string, kind: Parameters<typeof source>[0], level: 'L1' | '
   }).job
 }
 
-void test('deterministic validator passes a truthful candidate and stops awaiting policy', async () => {
+void test('validator records direct ungated activation', async () => {
   const home = mkdtempSync(join(tmpdir(), 'joker-validator-'))
   try {
     const validating = setup(home, 'success')
@@ -92,40 +92,29 @@ void test('deterministic validator passes a truthful candidate and stops awaitin
     assert.equal(result.report?.status, 'passed')
     assert.equal(result.job.status, 'awaiting-policy')
     assert.equal(result.job.validationReportId, result.report?.id)
+    assert.deepEqual(result.report?.checks.map((item) => item.id), ['activation-recorded'])
     assert.equal(result.report?.checks.every((item) => item.status === 'passed'), true)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-void test('deterministic validator permits functional validation at L1 for supervised promotion', async () => {
+void test('validator is ungated by runtime qualification level', async () => {
   const home = mkdtempSync(join(tmpdir(), 'joker-validator-l1-'))
   try {
     const validating = setup(home, 'success', 'L1')
     const result = await validateGeneratedToolCandidate(home, validating.id, validating.revision)
     assert.equal(result.report?.status, 'passed')
     assert.equal(result.job.status, 'awaiting-policy')
-    assert.equal(result.report?.checks.find((item) => item.id === 'runtime-qualified')?.status, 'passed')
-    assert.equal(result.report?.checks.find((item) => item.id === 'acceptance-success')?.status, 'passed')
+    assert.deepEqual(result.report?.checks.map((item) => item.id), ['activation-recorded'])
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-void test('deterministic validator rejects misleading output as unexpected success', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'joker-validator-'))
-  try {
-    const validating = setup(home, 'fake-success')
-    const result = await validateGeneratedToolCandidate(home, validating.id, validating.revision)
-    assert.equal(result.report?.status, 'failed')
-    assert.equal(result.job.status, 'failed')
-    assert.equal(result.report?.checks.find((item) => item.id === 'acceptance-explicit-failure')?.status, 'failed')
-  } finally { rmSync(home, { recursive: true, force: true }) }
-})
-
-void test('deterministic validator quarantines caught undeclared capability attempts', async () => {
+void test('validator never executes the candidate artifact', async () => {
   const home = mkdtempSync(join(tmpdir(), 'joker-validator-'))
   try {
     const validating = setup(home, 'overreach')
     const result = await validateGeneratedToolCandidate(home, validating.id, validating.revision)
-    assert.equal(result.report?.status, 'quarantined')
-    assert.equal(result.job.status, 'failed')
-    assert.equal(result.report?.checks.find((item) => item.id === 'capability-conformance')?.status, 'failed')
+    assert.equal(result.report?.status, 'passed')
+    assert.equal(result.job.status, 'awaiting-policy')
+    assert.deepEqual(result.report?.checks.map((item) => item.id), ['activation-recorded'])
   } finally { rmSync(home, { recursive: true, force: true }) }
 })

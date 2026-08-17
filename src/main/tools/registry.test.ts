@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { buildToolSet, executeToolDefinition, type ToolContext } from './registry'
 import { z } from 'zod'
+import type { OperationEvent } from '../store/operations'
 
 void test('buildToolSet passes sessionId through to tool execution', async () => {
   let received: string | undefined
@@ -277,6 +278,7 @@ void test('host deadline settles a tool that never returns and records timed-out
     description: 'deadline fixture',
     inputSchema: z.object({}),
     timeoutMs: 25,
+    quiescenceGraceMs: 50,
     heartbeatMs: 5,
     execute: async () => await new Promise<never>(() => undefined)
   }, {}, {
@@ -315,6 +317,7 @@ void test('external cancellation settles an uncooperative tool', async () => {
     description: 'cancel fixture',
     inputSchema: z.object({}),
     timeoutMs: 5_000,
+    quiescenceGraceMs: 50,
     execute: async () => await new Promise<never>(() => undefined)
   }, {}, {
     workspacePath: process.cwd(),
@@ -324,6 +327,59 @@ void test('external cancellation settles an uncooperative tool', async () => {
   })
   controller.abort(new Error('user cancelled'))
   await assert.rejects(promise, /cancelled/i)
+})
+
+void test('host deadline waits for a cooperative tool to settle before reporting timed-out', async () => {
+  let settled = false
+  await assert.rejects(executeToolDefinition({
+    name: 'CooperativeTimeout',
+    description: 'settles shortly after its signal aborts',
+    inputSchema: z.object({}),
+    timeoutMs: 25,
+    quiescenceGraceMs: 500,
+    execute: async (_input, context) => {
+      await new Promise<void>((resolve) => {
+        context.abortSignal?.addEventListener('abort', () => setTimeout(resolve, 20), { once: true })
+      })
+      settled = true
+      return { output: 'settled after abort' }
+    }
+  }, {}, {
+    workspacePath: process.cwd(),
+    sessionId: 'session-cooperative-timeout',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test' })
+  }), /timed out/i)
+
+  assert.equal(settled, true)
+})
+
+void test('external cancellation waits for a cooperative tool to settle before reporting cancelled', async () => {
+  const controller = new AbortController()
+  let settled = false
+  const promise = executeToolDefinition({
+    name: 'CooperativeCancel',
+    description: 'settles shortly after its signal aborts',
+    inputSchema: z.object({}),
+    timeoutMs: 5_000,
+    quiescenceGraceMs: 500,
+    execute: async (_input, context) => {
+      await new Promise<void>((resolve) => {
+        context.abortSignal?.addEventListener('abort', () => setTimeout(resolve, 20), { once: true })
+      })
+      settled = true
+      return { output: 'settled after abort' }
+    }
+  }, {}, {
+    workspacePath: process.cwd(),
+    sessionId: 'session-cooperative-cancel',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test' }),
+    abortSignal: controller.signal
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  controller.abort(new Error('user cancelled'))
+  await assert.rejects(promise, /cancelled/i)
+
+  assert.equal(settled, true)
 })
 
 void test('tool observability reports running and completion with the provider tool call id', async () => {
@@ -350,4 +406,99 @@ void test('tool observability reports running and completion with the provider t
     ['call-observed', 'done']
   ])
   assert.equal(typeof events[1]?.durationMs, 'number')
+})
+
+void test('operation journal records intent before the tool body runs', async () => {
+  const journal: OperationEvent[] = []
+  const order: string[] = []
+  await executeToolDefinition({
+    name: 'Journaled',
+    description: 'journal fixture',
+    inputSchema: z.object({}),
+    execute: async () => {
+      order.push('body')
+      return { output: 'ok' }
+    }
+  }, {}, {
+    workspacePath: process.cwd(),
+    sessionId: 'session-journal',
+    runId: 'run-journal',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test' }),
+    operationJournal: {
+      append: (event) => {
+        journal.push(event)
+        order.push(event.type)
+      }
+    }
+  })
+
+  assert.deepEqual(order, [
+    'tool-proposed',
+    'approval-asked',
+    'approval-decided',
+    'tool-started',
+    'body',
+    'tool-result'
+  ])
+  assert.equal(journal[0]?.type, 'tool-proposed')
+  assert.equal(journal.at(-1)?.type, 'tool-result')
+  assert.equal((journal.at(-1) as { status?: string } | undefined)?.status, 'done')
+})
+
+void test('host guards can only tighten an allow into a deny', async () => {
+  const bodyRan: string[] = []
+  const result = await executeToolDefinition({
+    name: 'Guarded',
+    description: 'guard fixture',
+    inputSchema: z.object({}),
+    execute: async () => {
+      bodyRan.push('body')
+      return { output: 'ran' }
+    }
+  }, {}, {
+    workspacePath: process.cwd(),
+    sessionId: 'session-guarded',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test' }),
+    guards: [() => 'fixture guard denial']
+  })
+
+  assert.equal(result.output, 'Tool call was denied.')
+  assert.deepEqual(bodyRan, [])
+})
+
+void test('abstaining guards leave an allowed call untouched', async () => {
+  const result = await executeToolDefinition({
+    name: 'Unguarded',
+    description: 'abstain fixture',
+    inputSchema: z.object({}),
+    execute: async () => ({ output: 'ran' })
+  }, {}, {
+    workspacePath: process.cwd(),
+    sessionId: 'session-unguarded',
+    approvalGate: async () => ({ outcome: 'allow', risk: 'read', reason: 'test' }),
+    guards: [() => undefined, () => undefined]
+  })
+
+  assert.equal(result.output, 'ran')
+})
+
+void test('guards cannot re-allow a call that approval denied', async () => {
+  const bodyRan: string[] = []
+  const result = await executeToolDefinition({
+    name: 'DeniedFirst',
+    description: 'denied fixture',
+    inputSchema: z.object({}),
+    execute: async () => {
+      bodyRan.push('body')
+      return { output: 'ran' }
+    }
+  }, {}, {
+    workspacePath: process.cwd(),
+    sessionId: 'session-denied-first',
+    approvalGate: async () => ({ outcome: 'deny', risk: 'read', reason: 'test deny' }),
+    guards: [() => undefined]
+  })
+
+  assert.equal(result.output, 'Tool call was denied.')
+  assert.deepEqual(bodyRan, [])
 })

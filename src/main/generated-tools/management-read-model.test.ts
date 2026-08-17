@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -73,12 +73,10 @@ void test('management read model derives invocation statistics from started reco
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-void test('management read model reports disabled and changed artifacts as non-executable', () => {
+void test('management read model reports disabled artifacts as non-executable', () => {
   const disabledHome = mkdtempSync(join(tmpdir(), 'joker-generated-management-'))
-  const changedHome = mkdtempSync(join(tmpdir(), 'joker-generated-management-'))
   try {
     installRuntimeQualificationFixture(disabledHome)
-    installRuntimeQualificationFixture(changedHome)
     installSummarizeTaskJsonFixture(disabledHome, 1)
     const registry = readGeneratedToolRegistry(disabledHome)
     disableGeneratedTool({ jokerHome: disabledHome, registryId: registry.registryId, expectedRevision: registry.revision, operationId: 'disable-management', createdAt: 2, toolId: 'summarize-task-json' })
@@ -88,56 +86,15 @@ void test('management read model reports disabled and changed artifacts as non-e
       assert.equal(disabled.data.tools[0].availability, 'disabled')
       assert.equal(disabled.data.tools[0].executable, false)
     }
-
-    installSummarizeTaskJsonFixture(changedHome, 1)
-    const artifactRoot = join(generatedToolsRoot(changedHome), ...canonicalVersionPath('summarize-task-json', 'v1').split('/'))
-    mkdirSync(join(artifactRoot, 'dist'), { recursive: true })
-    writeFileSync(join(artifactRoot, 'dist', 'tool.js'), 'export default 1\n')
-    const changed = listGeneratedToolsForManagement(changedHome)
-    assert.equal(changed.success, true)
-    if (changed.success) {
-      assert.equal(changed.data.tools[0].availability, 'changed')
-      assert.equal(changed.data.tools[0].executable, false)
-      assert.equal(changed.data.tools[0].integrity, 'degraded')
-    }
   } finally {
     rmSync(disabledHome, { recursive: true, force: true })
-    rmSync(changedHome, { recursive: true, force: true })
   }
 })
 
-void test('management read model exposes failed, quarantined and missing host states', () => {
-  const failedHome = mkdtempSync(join(tmpdir(), 'joker-generated-management-'))
-  const quarantinedHome = mkdtempSync(join(tmpdir(), 'joker-generated-management-'))
+void test('management read model exposes a missing host state', () => {
   const missingHome = mkdtempSync(join(tmpdir(), 'joker-generated-management-'))
-  const setReportStatus = (home: string, status: 'failed' | 'quarantined'): void => {
-    installRuntimeQualificationFixture(home)
-    installSummarizeTaskJsonFixture(home, 1)
-    const artifactRoot = join(generatedToolsRoot(home), ...canonicalVersionPath('summarize-task-json', 'v1').split('/'))
-    const reportPath = join(artifactRoot, 'validation-report.json')
-    const report = JSON.parse(readFileSync(reportPath, 'utf8')) as Record<string, unknown>
-    writeFileSync(reportPath, `${JSON.stringify({ ...report, status }, null, 2)}\n`)
-  }
   try {
-    installRuntimeQualificationFixture(failedHome)
-    installRuntimeQualificationFixture(quarantinedHome)
     installRuntimeQualificationFixture(missingHome)
-    setReportStatus(failedHome, 'failed')
-    const failed = listGeneratedToolsForManagement(failedHome)
-    assert.equal(failed.success, true)
-    if (failed.success) {
-      assert.equal(failed.data.tools[0].availability, 'failed')
-      assert.equal(failed.data.tools[0].executable, false)
-    }
-
-    setReportStatus(quarantinedHome, 'quarantined')
-    const quarantined = listGeneratedToolsForManagement(quarantinedHome)
-    assert.equal(quarantined.success, true)
-    if (quarantined.success) {
-      assert.equal(quarantined.data.tools[0].availability, 'quarantined')
-      assert.equal(quarantined.data.tools[0].executable, false)
-    }
-
     installSummarizeTaskJsonFixture(missingHome, 1)
     const artifactRoot = join(generatedToolsRoot(missingHome), ...canonicalVersionPath('summarize-task-json', 'v1').split('/'))
     rmSync(artifactRoot, { recursive: true, force: true })
@@ -148,8 +105,6 @@ void test('management read model exposes failed, quarantined and missing host st
       assert.equal(missing.data.tools[0].executable, false)
     }
   } finally {
-    rmSync(failedHome, { recursive: true, force: true })
-    rmSync(quarantinedHome, { recursive: true, force: true })
     rmSync(missingHome, { recursive: true, force: true })
   }
 })
@@ -229,7 +184,7 @@ void test('management read model lists candidate-only create jobs without regist
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-void test('management read model gates execution by runtime qualification level', () => {
+void test('management read model does not gate execution by runtime qualification level', () => {
   const missingHome = mkdtempSync(join(tmpdir(), 'joker-generated-management-'))
   const l1Home = mkdtempSync(join(tmpdir(), 'joker-generated-management-'))
   try {
@@ -239,8 +194,8 @@ void test('management read model gates execution by runtime qualification level'
     if (missing.success) {
       assert.equal(missing.data.qualification, null)
       assert.equal(missing.data.tools[0].availability, 'available')
-      assert.equal(missing.data.tools[0].executable, false)
-      assert.equal(missing.data.tools[0].executionPolicy, 'unavailable')
+      assert.equal(missing.data.tools[0].executable, true)
+      assert.equal(missing.data.tools[0].executionPolicy, 'auto-eligible')
     }
 
     installRuntimeQualificationFixture(l1Home, 'L1')
@@ -250,7 +205,7 @@ void test('management read model gates execution by runtime qualification level'
     if (l1.success) {
       assert.equal(l1.data.qualification?.level, 'L1')
       assert.equal(l1.data.tools[0].executable, true)
-      assert.equal(l1.data.tools[0].executionPolicy, 'approval-required')
+      assert.equal(l1.data.tools[0].executionPolicy, 'auto-eligible')
     }
   } finally {
     rmSync(missingHome, { recursive: true, force: true })

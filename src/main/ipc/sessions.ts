@@ -61,8 +61,11 @@ function summaryService(): SessionSummaryService {
 export function registerSessionIpc(): void {
   summaryService()
 
-  ipcMain.handle('session:create', (_event, title?: string) => {
-    return createSession(title)
+  ipcMain.handle('session:create', (event, title?: string) => {
+    const session = createSession(title)
+    const scope = scopeForWebContents(event.sender.id)
+    if (scope) summaryService().pushSummary(scope, session.id)
+    return session
   })
 
   ipcMain.handle('session:get', (_event, id: string) => {
@@ -157,8 +160,11 @@ export function registerSessionIpc(): void {
     return compactSession(sessionId)
   })
 
-  ipcMain.handle('session:set-project', (_event, sessionId: unknown, projectId: unknown) => {
+  ipcMain.handle('session:set-project', (event, sessionId: unknown, projectId: unknown) => {
     if (typeof sessionId !== 'string' || (projectId !== null && typeof projectId !== 'string')) return false
-    return setSessionProject(sessionId, projectId as string | null)
+    const changed = setSessionProject(sessionId, projectId as string | null)
+    const scope = scopeForWebContents(event.sender.id)
+    if (changed && scope) summaryService().pushSummary(scope, sessionId)
+    return changed
   })
 }

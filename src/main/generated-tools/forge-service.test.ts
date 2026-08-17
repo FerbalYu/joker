@@ -300,35 +300,6 @@ void test('ForgeService validates, promotes, and invokes a full-trust Memory Too
       assert.equal(inventory.data.tools[0]?.invocationCount, 1)
     }
 
-    await withJokerHome(home, () => {
-      saveConfig(setToolForgeFullTrust(normalizeConfig({}), workspace, false))
-    })
-    const revokedGrantInventory = await withJokerHome(home, () => listGeneratedToolsForManagement(home))
-    assert.equal(revokedGrantInventory.success, true)
-    if (revokedGrantInventory.success) {
-      assert.equal(revokedGrantInventory.data.tools[0]?.availability, 'permission-required')
-      assert.equal(revokedGrantInventory.data.tools[0]?.executionPolicy, 'unavailable')
-    }
-    await assert.rejects(
-      () => withJokerHome(home, () => definitions[0]!.execute({ value: 'must-not-write' }, {
-        workspacePath: workspace,
-        sessionId: 'session-memory',
-        runId: 'run-after-revoke',
-        approvalGate: async () => ({ outcome: 'allow', risk: 'write_local', reason: 'test' })
-      })),
-      /active workspace full-trust grant/
-    )
-    assert.equal(readFileSync(join(workspace, '.project-memory', 'MEMORY.md'), 'utf8'), 'remembered')
-
-    await withJokerHome(home, () => {
-      saveConfig(setToolForgeFullTrust(normalizeConfig({}), workspace, true))
-    })
-    const restoredInventory = await withJokerHome(home, () => listGeneratedToolsForManagement(home))
-    assert.equal(restoredInventory.success, true)
-    if (restoredInventory.success) {
-      assert.equal(restoredInventory.data.tools[0]?.availability, 'available')
-      assert.equal(restoredInventory.data.tools[0]?.executionPolicy, 'auto-eligible')
-    }
     const activeRegistry = readGeneratedToolRegistry(home)
     disableGeneratedTool({
       jokerHome: home,
@@ -415,57 +386,6 @@ void test('ForgeService reconciles awaiting-policy jobs through the activation d
     restarted.start()
     await restarted.waitForIdle()
     assert.deepEqual(activated, [job.id])
-  } finally { rmSync(home, { recursive: true, force: true }) }
-})
-
-void test('ForgeService cannot be fooled by fake explicit failure or caught overreach', async () => {
-  for (const scenario of [
-    {
-      id: 'fake',
-      source: 'if (input.fail) tool.output("ERROR: expected-failure"); else tool.output("ok")'
-    },
-    {
-      id: 'overreach',
-      source: 'try { tool.readFile("undeclared.txt") } catch (_) {} if (input.fail) tool.fail({message:"expected-failure"}); else tool.output("ok")'
-    }
-  ]) {
-    const home = mkdtempSync(join(tmpdir(), `joker-forge-service-${scenario.id}-`))
-    try {
-      installRuntimeQualificationFixture(home)
-      const job = createJob(home, `job-service-${scenario.id}`)
-      const service = new ForgeService({ jokerHome: home, maker: maker(scenario.source), now: () => 5 })
-      service.start()
-      await service.waitForIdle()
-      const failed = readForgeJob(home, job.id)
-      assert.equal(failed?.status, 'failed')
-      assert.match(failed?.error ?? '', scenario.id === 'fake'
-        ? /no artifact or spec changes/
-        : /validation-quarantined/)
-      assert.equal(readGeneratedToolRegistry(home).entries.length, 0)
-    } finally { rmSync(home, { recursive: true, force: true }) }
-  }
-})
-
-void test('ForgeService uses bounded repair for ordinary validation failure', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'joker-forge-service-repair-'))
-  let calls = 0
-  const repairingMaker: ForgeServiceMaker = async (input) => {
-    calls += 1
-    const candidateSource = calls === 1
-      ? 'if (input.fail) tool.output("ERROR: expected-failure"); else tool.output("ok")'
-      : 'if (input.fail) tool.fail({message:"expected-failure"}); else tool.output("ok")'
-    return maker(candidateSource)(input)
-  }
-  try {
-    installRuntimeQualificationFixture(home)
-    const job = createJob(home, 'job-service-repair')
-    const service = new ForgeService({ jokerHome: home, maker: repairingMaker, now: () => 5 })
-    service.start()
-    await service.waitForIdle()
-    const repaired = readForgeJob(home, job.id)
-    assert.equal(calls, 2, JSON.stringify(repaired))
-    assert.equal(repaired?.attempt, 2)
-    assert.equal(repaired?.status, 'awaiting-policy')
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 

@@ -14,6 +14,8 @@ import {
   type AgentExecutionContract
 } from './execution-contract'
 import { detectRepetitionLoop, REPETITION_LOOP_ERROR, REPETITION_LOOP_NOTICE } from './repetition-guard'
+import { parseInvokeToolCall } from './invoke-fallback'
+import type { OperationJournal } from '../store/operations'
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192
 const DEFAULT_MAX_STEPS = 50
@@ -31,6 +33,8 @@ interface AgentRunSnapshot {
   segments: AssistantSegment[]
   toolCalls: ToolCallInfo[]
   usage?: StreamUsage
+  /** Wall-clock ms spent inside the agent loop. */
+  durationMs: number
   steps: AgentStepDetails
 }
 
@@ -69,9 +73,11 @@ export interface RunOptions {
   executionContract?: AgentExecutionContract
   /** Test seam for deterministic stream lifecycle contracts. */
   model?: LanguageModel
+  /** Causal sidecar journal; the request is recorded before it is dispatched. */
+  operationJournal?: OperationJournal
 }
 
-export async function runAgent({ sessionId, runId = crypto.randomUUID(), messages, tools, reasoningLevel, runMode = 'chat', onEvent, signal, capabilities, checkpointUsed = false, takeSteerMessages, onStepCommitted, maxSteps = DEFAULT_MAX_STEPS, executionContract, model: injectedModel }: RunOptions): Promise<AgentRunResult> {
+export async function runAgent({ sessionId, runId = crypto.randomUUID(), messages, tools, reasoningLevel, runMode = 'chat', onEvent, signal, capabilities, checkpointUsed = false, takeSteerMessages, onStepCommitted, maxSteps = DEFAULT_MAX_STEPS, executionContract, model: injectedModel, operationJournal }: RunOptions): Promise<AgentRunResult> {
   let compressionCount = 0
   let compressionBeforeTokens: number | undefined
   let compressionAfterTokens: number | undefined
@@ -94,6 +100,8 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
   let repetitionDetected = false
   let currentStepNumber = 1
   let currentStepTextStart = 0
+  const runStartAt = Date.now()
+  let firstTokenAt: number | undefined
   let streamController = new AbortController()
   let stepBuffer: StreamEvent[] = []
   const forwardExternalAbort = (): void => streamController.abort(signal?.reason)
@@ -119,7 +127,7 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
       model
     })
     applyCompression(initialCompression)
-    const agentMessages = initialCompression.messages
+    let agentMessages = initialCompression.messages
     latestStepMessages = agentMessages
 
     await onEvent({
@@ -137,6 +145,7 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
     for (;;) {
       stepBuffer = []
       let retryStream = false
+      operationJournal?.append({ type: 'request-prepared', at: Date.now(), runId, step: stepCount + 1 })
       const result = streamText({
         model,
         messages: agentMessages,
@@ -149,7 +158,7 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
         abortSignal: streamController.signal,
         allowSystemInMessages: true,
         include: { requestMessages: true },
-        providerOptions: providerOptions(modelConfig, runId),
+        providerOptions: providerOptions(modelConfig),
         prepareStep: async ({ messages: stepMessages, stepNumber, instructions }) => {
           const compressed = await compressContext(stepMessages, {
             maxContextTokens,
@@ -203,7 +212,7 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
           const missingRequiredTool = step.stepNumber === 0 && executionContract?.requireToolCall === true && !stepHasRequiredToolCall(step.content, executionContract.requiredFirstTool)
           if (missingRequiredTool) executionContractViolation = EXECUTION_CONTRACT_VIOLATION
           if (onStepCommitted && !missingRequiredTool) {
-            const stepMessage = stepResultMessage(messageId, runMode, step)
+            const stepMessage = stepResultMessage(messageId, runMode, step, streamUsageFromModelUsage(step.usage, 1))
             if (stepMessage) await onStepCommitted(stepMessage, step.stepNumber + 1)
           }
           await onEvent({
@@ -227,23 +236,30 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
         },
         onError: () => undefined
       })
+      operationJournal?.append({ type: 'request-dispatched', at: Date.now(), runId, step: stepCount + 1 })
 
       for await (const part of result.fullStream) {
         if (part.type === 'text-delta') {
           await flushStepBuffer(stepBuffer)
           if (part.text) {
             responseContentSeen = true
+            firstTokenAt ??= Date.now()
             text += part.text
             segments = appendTextSegment(segments, part.text)
           }
           await onEvent({ type: 'token', sessionId, runId, text: part.text })
-          if (!repetitionDetected && detectRepetitionLoop(text)) {
-            repetitionDetected = true
-            text += REPETITION_LOOP_NOTICE
-            segments = appendTextSegment(segments, REPETITION_LOOP_NOTICE)
-            await onEvent({ type: 'token', sessionId, runId, text: REPETITION_LOOP_NOTICE })
-            streamController.abort(new Error(REPETITION_LOOP_ERROR))
-            break
+          if (!repetitionDetected) {
+            const repetition = detectRepetitionLoop(text)
+            if (repetition) {
+              repetitionDetected = true
+              text = text.slice(0, repetition.truncateAt)
+              segments = truncateTextSegments(segments, repetition.truncateAt)
+              text += REPETITION_LOOP_NOTICE
+              segments = appendTextSegment(segments, REPETITION_LOOP_NOTICE)
+              await onEvent({ type: 'token', sessionId, runId, text: REPETITION_LOOP_NOTICE })
+              streamController.abort(new Error(REPETITION_LOOP_ERROR))
+              break
+            }
           }
         } else if (part.type === 'tool-call') {
           await flushStepBuffer(stepBuffer)
@@ -358,7 +374,76 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
       stepCount = steps.length
       finishReason = finalStep.finishReason
       rawFinishReason = finalStep.rawFinishReason
+
+      if (tools && finalStep.finishReason !== 'tool-calls') {
+        const invoke = parseInvokeToolCall(text.slice(currentStepTextStart))
+        const tool = invoke ? tools[invoke.toolName] : undefined
+        if (invoke && tool) {
+          const executeTool = tool as unknown as {
+            execute: (input: Record<string, unknown>, options?: { abortSignal?: AbortSignal; toolCallId?: string }) => Promise<{ output: string; metadata?: Record<string, unknown> }>
+          }
+          const toolCallId = crypto.randomUUID()
+          const now = Date.now()
+          const toolCall: ToolCallInfo = {
+            toolCallId,
+            toolName: invoke.toolName,
+            input: invoke.input,
+            status: 'running',
+            startedAt: now,
+            updatedAt: now,
+            lastProgressAt: now
+          }
+          toolCalls.push(toolCall)
+          segments = appendToolSegment(segments, toolCall)
+          await onEvent({ type: 'tool-call', sessionId, runId, toolCallId, toolName: invoke.toolName, input: invoke.input, startedAt: now, updatedAt: now, lastProgressAt: now })
+          let output = 'Tool returned no output.'
+          try {
+            const toolResult = await executeTool.execute(invoke.input, { toolCallId, abortSignal: streamController.signal })
+            output = toolOutputText(toolResult)
+            toolCall.status = 'done'
+            toolCall.output = output
+            toolCall.updatedAt = Date.now()
+            toolCall.lastProgressAt = Date.now()
+            await onEvent({ type: 'tool-result', sessionId, runId, toolCallId, toolName: invoke.toolName, output, updatedAt: toolCall.updatedAt, lastProgressAt: toolCall.lastProgressAt })
+          } catch (err) {
+            output = formatSafeError(err)
+            toolCall.status = 'error'
+            toolCall.output = output
+            toolCall.error = output
+            toolCall.updatedAt = Date.now()
+            toolCall.lastProgressAt = Date.now()
+            await onEvent({ type: 'tool-error', sessionId, runId, toolCallId, toolName: invoke.toolName, error: output, status: 'error', updatedAt: toolCall.updatedAt, lastProgressAt: toolCall.lastProgressAt })
+          }
+          agentMessages = [
+            ...(finalStep.request.messages ?? latestStepMessages),
+            { role: 'assistant' as const, content: [{ type: 'tool-call' as const, toolCallId, toolName: invoke.toolName, input: invoke.input }] },
+            { role: 'tool' as const, content: [{ type: 'tool-result' as const, toolCallId, toolName: invoke.toolName, output: { type: 'text' as const, value: output } }] }
+          ]
+          // The prose fallback runs after onStepEnd for this step already fired,
+          // so the tool segment would otherwise never be persisted. Commit it as
+          // its own durable step message before the loop restarts.
+          if (onStepCommitted) {
+            await onStepCommitted({
+              id: `${messageId}-step-${stepCount + 1}`,
+              role: 'assistant',
+              content: '',
+              segments: [{ type: 'tools', tools: [{ ...toolCall }] }],
+              runMode,
+              createdAt: Date.now()
+            }, stepCount + 1)
+          }
+          streamController.abort()
+          streamController = new AbortController()
+          continue
+        }
+      }
+
       totalUsage = addStreamUsage(streamUsageFromModelUsage(usage, steps.length), auxiliaryUsage)
+      totalUsage = {
+        ...totalUsage,
+        ...(firstTokenAt !== undefined ? { firstTokenMs: firstTokenAt - runStartAt } : {}),
+        ...(firstTokenAt !== undefined ? { generationMs: Date.now() - firstTokenAt } : {})
+      }
       await onEvent({ type: 'message-end', sessionId, runId, messageId, usage: totalUsage })
       await onEvent({
         type: 'context-usage',
@@ -430,6 +515,7 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
       segments: cloneSegments(segments),
       toolCalls: toolCalls.map((tool) => ({ ...tool })),
       usage: 'usage' in details ? details.usage : totalUsage,
+      durationMs: Date.now() - runStartAt,
       steps: {
         count: stepCount,
         limit: maxSteps,
@@ -527,6 +613,26 @@ function appendTextSegment(segments: AssistantSegment[], value: string): Assista
   return [...segments, { type: 'text', text: value }]
 }
 
+function truncateTextSegments(segments: AssistantSegment[], totalTextLength: number): AssistantSegment[] {
+  let remaining = totalTextLength
+  const result: AssistantSegment[] = []
+  for (const segment of segments) {
+    if (segment.type === 'text') {
+      if (remaining <= 0) break
+      if (segment.text.length <= remaining) {
+        result.push(segment)
+        remaining -= segment.text.length
+      } else {
+        result.push({ type: 'text', text: segment.text.slice(0, remaining) })
+        remaining = 0
+      }
+    } else {
+      result.push(segment)
+    }
+  }
+  return result
+}
+
 function appendToolSegment(segments: AssistantSegment[], toolCall: ToolCallInfo): AssistantSegment[] {
   const last = segments.at(-1)
   if (last?.type === 'tools') return [...segments.slice(0, -1), { type: 'tools', tools: [...last.tools, toolCall] }]
@@ -558,7 +664,7 @@ function toUserModelMessages(message: ChatMessage): ModelMessage[] {
   }]
 }
 
-function stepResultMessage(messageId: string, runMode: RunMode, step: { stepNumber: number; content: readonly unknown[] }): ChatMessage | null {
+function stepResultMessage(messageId: string, runMode: RunMode, step: { stepNumber: number; content: readonly unknown[] }, usage?: StreamUsage): ChatMessage | null {
   const segments: AssistantSegment[] = []
   const tools = new Map<string, ToolCallInfo>()
   for (const value of step.content) {
@@ -599,9 +705,14 @@ function stepResultMessage(messageId: string, runMode: RunMode, step: { stepNumb
     content: flattenSegmentText(segments),
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     segments,
+    usage: usage && usageTotalKnown(usage) ? usage : undefined,
     runMode,
     createdAt: Date.now()
   }
+}
+
+function usageTotalKnown(usage: StreamUsage): boolean {
+  return usage.inputTokens !== undefined || usage.outputTokens !== undefined || usage.totalTokens !== undefined
 }
 
 function toolOutputText(output: unknown): string {
@@ -627,13 +738,16 @@ function toolOutputMetadata(output: unknown): Record<string, unknown> | undefine
     : undefined
 }
 
-function providerOptions(config: ReturnType<typeof resolveActiveModel>, runId: string): ProviderOptions | undefined {
+export function providerOptions(config: ReturnType<typeof resolveActiveModel>): ProviderOptions | undefined {
   if (config.promptCache === false) return undefined
   const cacheKey = `joker:${config.provider}:${config.model}`
   if (config.apiFormat === 'anthropic-messages') {
     return { anthropic: { cacheControl: { type: 'ephemeral' } } }
   }
-  if (config.provider === 'openai') {
+  // OpenAI prompt caching is a chat-completions request parameter and is only exposed by the
+  // native OpenAI provider. The responses format and the generic openai-compatible provider
+  // expose no prompt-caching control in the AI SDK, so promptCache is a no-op for them.
+  if (config.apiFormat === 'chat-completions' && config.provider === 'openai') {
     return {
       openai: {
         promptCacheKey: cacheKey,
@@ -641,7 +755,6 @@ function providerOptions(config: ReturnType<typeof resolveActiveModel>, runId: s
       }
     }
   }
-  void runId
   return undefined
 }
 

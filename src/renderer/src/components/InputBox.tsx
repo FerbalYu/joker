@@ -37,6 +37,7 @@ export interface InputBoxHandle {
   focus: () => void
   insertLink: (url: string) => void
   insertText: (value: string) => void
+  ingestFiles: (files: File[]) => Promise<boolean>
 }
 
 type InputLink = {
@@ -75,7 +76,7 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   const [text, setText] = useState('')
   const [images, setImages] = useState<ChatImagePart[]>([])
   const [imageError, setImageError] = useState<string | null>(null)
-  const [mode, setMode] = useState<ApprovalMode>('suggest')
+  const [mode, setMode] = useState<ApprovalMode>('full-auto')
   const [skills, setSkills] = useState<SkillDescriptor[]>([])
   const [selectedSkills, setSelectedSkills] = useState<SkillDescriptor[]>([])
   const [selectedCommand, setSelectedCommand] = useState<NativeSlashCommandId | null>(null)
@@ -123,6 +124,7 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
 
   useEffect(() => {
     void refreshSlashSources()
+    window.joker.approval.setMode('full-auto')
   }, [])
 
   useEffect(() => {
@@ -232,6 +234,8 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
     return true
   }
 
+  const ingestRef = useRef<(files: File[]) => Promise<boolean>>(async () => false)
+
   useImperativeHandle(ref, () => ({
     focus: (): void => {
       requestAnimationFrame(() => textareaRef.current?.focus())
@@ -255,7 +259,8 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
         current.style.height = 'auto'
         current.style.height = `${Math.min(current.scrollHeight, 200)}px`
       })
-    }
+    },
+    ingestFiles: (files: File[]): Promise<boolean> => ingestRef.current(files)
   }), [links, text])
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -468,31 +473,17 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
       .finally(() => setSubmitting(false))
   }
 
-  const handlePaste = async (event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> => {
-    const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'))
-    if (imageFiles.length > 0 && runMode === 'research') {
-      event.preventDefault()
+  const ingestImageFiles = async (imageFiles: File[]): Promise<boolean> => {
+    if (imageFiles.length === 0) return false
+    if (runMode === 'research') {
       setImageError(t(language, 'research.mode.imagesDisabled'))
-      return
+      return false
     }
-    if (imageFiles.length === 0) {
-      const pasted = event.clipboardData.getData('text/plain')
-      const tokens = splitUrls(pasted)
-      const pastedLinks = tokens.filter((token) => token.type === 'url' && (classifyLink(token.value).kind === 'web' || classifyLink(token.value).kind === 'file'))
-      if (pastedLinks.length > 0) {
-        event.preventDefault()
-        for (const token of pastedLinks) addLink(token.value)
-        const plainText = tokens.filter((token) => token.type === 'text').map((token) => token.value).join('')
-        if (plainText) setText((current) => current + plainText)
-      }
-      return
-    }
-    event.preventDefault()
     setImageError(null)
     const available = MAX_IMAGES_PER_MESSAGE - images.length
     if (available <= 0) {
       setImageError(t(language, 'input.imageTooMany'))
-      return
+      return false
     }
     const next: ChatImagePart[] = []
     let totalBytes = images.reduce((total, image) => total + (image.sizeBytes ?? 0), 0)
@@ -554,7 +545,35 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
         setImageError(t(language, 'input.imageProcessingFailed'))
       }
     }
-    if (next.length > 0) setImages((current) => [...current, ...next])
+    if (next.length > 0) {
+      setImages((current) => [...current, ...next])
+      return true
+    }
+    return false
+  }
+  ingestRef.current = ingestImageFiles
+
+  const handlePaste = async (event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> => {
+    const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'))
+    if (imageFiles.length > 0 && runMode === 'research') {
+      event.preventDefault()
+      setImageError(t(language, 'research.mode.imagesDisabled'))
+      return
+    }
+    if (imageFiles.length === 0) {
+      const pasted = event.clipboardData.getData('text/plain')
+      const tokens = splitUrls(pasted)
+      const pastedLinks = tokens.filter((token) => token.type === 'url' && (classifyLink(token.value).kind === 'web' || classifyLink(token.value).kind === 'file'))
+      if (pastedLinks.length > 0) {
+        event.preventDefault()
+        for (const token of pastedLinks) addLink(token.value)
+        const plainText = tokens.filter((token) => token.type === 'text').map((token) => token.value).join('')
+        if (plainText) setText((current) => current + plainText)
+      }
+      return
+    }
+    event.preventDefault()
+    await ingestImageFiles(imageFiles)
   }
 
   const handleInput = (): void => {
@@ -593,43 +612,8 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
   const hasQueueableDraft = Boolean(text.trim()) || images.length > 0 || links.length > 0
 
   return (
-    <div className="border-t border-[var(--color-border)] bg-[var(--color-surface)] px-[35px] py-3 shrink-0">
-      <div className="relative w-full">
-        <div className="relative mb-2 flex items-center justify-end px-1" ref={projectMenuRef}>
-          <div className="flex min-w-0 items-center gap-2">
-            {runMode === 'research' ? (
-              <span className="max-w-80 text-right text-[10px] leading-4 text-[var(--color-text-muted)]">{t(language, 'research.mode.publicWebOnly')}</span>
-            ) : (
-              <>
-                <span className="text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'project.current')}</span>
-                <button type="button" disabled={streaming || projectLoading} onClick={() => setProjectMenuOpen((open) => !open)} title={projects.find((project) => project.id === activeProjectId)?.path} className="flex min-h-9 max-w-64 items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:opacity-50">
-                  <FolderOpen size={13} className="shrink-0 text-[var(--color-accent)]" />
-                  <span className="max-w-44 truncate">{projects.find((project) => project.id === activeProjectId)?.name ?? t(language, 'project.none')}</span>
-                  <ChevronDown size={13} className={`shrink-0 transition-transform ${projectMenuOpen ? 'rotate-180' : ''}`} />
-                </button>
-                <GitStatusBadge status={gitStatus} loading={gitStatusLoading} language={language} />
-              </>
-            )}
-            {projectMenuOpen && runMode === 'chat' && (
-              <div className="absolute bottom-full right-0 z-50 mb-2 w-72 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-2xl">
-                <div className="border-b border-[var(--color-border)] px-3 py-2 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'project.workFolder')}</div>
-                {activeProjectId && <button type="button" onClick={() => void onProjectClear().then((saved) => { if (saved) setProjectMenuOpen(false) })} className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-[var(--color-text-secondary)] transition hover:bg-[var(--color-surface-hover)]"><X size={13} className="shrink-0" />{t(language, 'project.clear')}</button>}
-                {projects.map((project) => (
-                  <button key={project.id} type="button" onClick={() => void onProjectChange(project.id).then((saved) => { if (saved) setProjectMenuOpen(false) })} className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-[var(--color-text-primary)] transition hover:bg-[var(--color-surface-hover)]">
-                    <FolderOpen size={13} className="shrink-0 text-[var(--color-text-muted)]" />
-                    <span className="min-w-0 flex-1 truncate" title={project.path}>{project.name}</span>
-                    {project.id === activeProjectId && <Check size={14} className="shrink-0 text-[var(--color-accent)]" />}
-                  </button>
-                ))}
-                <button type="button" onClick={() => void onProjectPick().then((saved) => { if (saved) setProjectMenuOpen(false) })} className="flex w-full items-center gap-2 border-t border-[var(--color-border)] px-3 py-2 text-left text-xs text-[var(--color-accent)] transition hover:bg-[var(--color-surface-hover)]">
-                  <FolderOpen size={13} />
-                  {t(language, 'project.openFolder')}
-                </button>
-                {projectError && <p className="px-3 py-2 text-[10px] text-red-400">{projectError}</p>}
-              </div>
-            )}
-          </div>
-        </div>
+    <div className="border-t border-[var(--color-border)] bg-[var(--color-surface)] px-6 py-3 shrink-0">
+      <div className="relative mx-auto w-full max-w-3xl">
         {pendingUserMessages.length > 0 && (
           <div data-pending-message-list className="mb-2 space-y-1.5 px-1">
             {pendingUserMessages.map((pending, index) => (
@@ -653,6 +637,36 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
           </div>
         )}
         <div data-input-composer className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2">
+          {runMode === 'research' ? (
+            <p className="mb-1.5 text-[10px] leading-4 text-[var(--color-text-muted)]">{t(language, 'research.mode.publicWebOnly')}</p>
+          ) : (
+            <div ref={projectMenuRef} className="relative mb-1.5 flex min-h-6 items-center gap-1.5 text-[11px]">
+              <button type="button" disabled={streaming || projectLoading} onClick={() => setProjectMenuOpen((open) => !open)} title={projects.find((project) => project.id === activeProjectId)?.path} className="flex min-w-0 items-center gap-1 rounded px-1.5 py-0.5 text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:opacity-50">
+                <FolderOpen size={12} className="shrink-0 text-[var(--color-accent)]" />
+                <span className="max-w-56 truncate">{projects.find((project) => project.id === activeProjectId)?.name ?? t(language, 'project.none')}</span>
+                <ChevronDown size={12} className={`shrink-0 text-[var(--color-text-muted)] transition-transform ${projectMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+              <GitStatusBadge status={gitStatus} loading={gitStatusLoading} language={language} />
+              {projectMenuOpen && (
+                <div className="absolute bottom-full left-0 z-50 mb-1 w-72 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-2xl">
+                  <div className="border-b border-[var(--color-border)] px-3 py-2 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'project.workFolder')}</div>
+                  {activeProjectId && <button type="button" onClick={() => void onProjectClear().then((saved) => { if (saved) setProjectMenuOpen(false) })} className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-[var(--color-text-secondary)] transition hover:bg-[var(--color-surface-hover)]"><X size={13} className="shrink-0" />{t(language, 'project.clear')}</button>}
+                  {projects.map((project) => (
+                    <button key={project.id} type="button" onClick={() => void onProjectChange(project.id).then((saved) => { if (saved) setProjectMenuOpen(false) })} className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-[var(--color-text-primary)] transition hover:bg-[var(--color-surface-hover)]">
+                      <FolderOpen size={13} className="shrink-0 text-[var(--color-text-muted)]" />
+                      <span className="min-w-0 flex-1 truncate" title={project.path}>{project.name}</span>
+                      {project.id === activeProjectId && <Check size={14} className="shrink-0 text-[var(--color-accent)]" />}
+                    </button>
+                  ))}
+                  <button type="button" onClick={() => void onProjectPick().then((saved) => { if (saved) setProjectMenuOpen(false) })} className="flex w-full items-center gap-2 border-t border-[var(--color-border)] px-3 py-2 text-left text-xs text-[var(--color-accent)] transition hover:bg-[var(--color-surface-hover)]">
+                    <FolderOpen size={13} />
+                    {t(language, 'project.openFolder')}
+                  </button>
+                  {projectError && <p className="px-3 py-2 text-[10px] text-red-400">{projectError}</p>}
+                </div>
+              )}
+            </div>
+          )}
           {(images.length > 0 || selectedSkills.length > 0 || selectedCommand || links.length > 0) && (
             <div data-input-attachments className="mb-2 flex min-h-6 flex-wrap gap-2">
               {selectedCommand && (
@@ -796,7 +810,7 @@ const InputBox = forwardRef<InputBoxHandle, Props>(function InputBox({ onSend, o
 
         <div className="mt-2 flex flex-wrap items-center justify-between gap-3 px-1 text-xs text-[var(--color-text-muted)]">
           <div className="flex min-w-0 items-center gap-2">
-            <div className="flex gap-1 rounded-md bg-[var(--color-bg)] p-0.5">
+            <div role="radiogroup" aria-label={t(language, 'approval.mode.label')} className="flex gap-1 rounded-md bg-[var(--color-bg)] p-0.5">
               <IconModeButton active={mode === 'suggest'} label={t(language, 'approval.mode.suggest')} onClick={() => handleModeChange('suggest')}><ShieldAlert size={15} /></IconModeButton>
               <IconModeButton active={mode === 'auto-edit'} label={t(language, 'approval.mode.autoEdit')} onClick={() => handleModeChange('auto-edit')}><PencilLine size={15} /></IconModeButton>
               <IconModeButton active={mode === 'full-auto'} label={t(language, 'approval.mode.fullAuto')} onClick={() => handleModeChange('full-auto')}><ShieldCheck size={15} /></IconModeButton>
@@ -1006,7 +1020,7 @@ function RunModeIconButton({ selected, label, onClick, disabled, children }: { s
 }
 
 function IconModeButton({ active, label, onClick, children }: { active: boolean; label: string; onClick: () => void; children: React.ReactNode }): React.JSX.Element {
-  return <button type="button" aria-label={label} title={label} onClick={onClick} className={`flex h-7 w-7 items-center justify-center rounded transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] ${active ? 'bg-[var(--color-accent)] text-[var(--color-bg)]' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'}`}>{children}</button>
+  return <button type="button" aria-pressed={active} aria-label={label} title={label} onClick={onClick} className={`flex h-7 w-7 items-center justify-center rounded transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] ${active ? 'bg-[var(--color-accent)] text-[var(--color-bg)]' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'}`}>{children}</button>
 }
 
 

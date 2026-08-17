@@ -4,6 +4,8 @@ import ConversationPane from './components/ConversationPane'
 import DetailPanel from './components/DetailPanel'
 import InputBox, { type InputBoxHandle } from './components/InputBox'
 import ApprovalPanel from './components/ApprovalPanel'
+import UserQuestionPanel from './components/UserQuestionPanel'
+import DropOverlay from './components/DropOverlay'
 import { isSessionRuntimeBusy, useStore } from './store'
 import { t, localizeError } from './i18n'
 import { acceptsRunEvent, activeRunForSession, adoptQueuedRunOnEvent, clearActiveRun, completeRunOnEvent, requestRunAbort, setActiveRun, type ActiveRendererRuns } from './run-lifecycle'
@@ -67,6 +69,7 @@ export default function App(): React.JSX.Element {
   const addApproval = useStore((s) => s.addApproval)
   const setApprovals = useStore((s) => s.setApprovals)
   const removeApproval = useStore((s) => s.removeApproval)
+  const addUserQuestion = useStore((s) => s.addUserQuestion)
   const setSessions = useStore((s) => s.setSessions)
   const upsertSessionSummary = useStore((s) => s.upsertSessionSummary)
   const removeSessionSummary = useStore((s) => s.removeSessionSummary)
@@ -83,6 +86,9 @@ export default function App(): React.JSX.Element {
   const [gitStatusLoading, setGitStatusLoading] = useState(false)
   const gitStatusRequestRef = useRef(0)
   const pendingWindowApproval = approvalQueue[0] ?? null
+  const userQuestions = useStore((s) => s.userQuestions)
+  const activeSessionIdForQuestion = useStore((s) => s.activeSessionId)
+  const pendingUserQuestion = userQuestions.find((question) => question.sessionId === activeSessionIdForQuestion) ?? userQuestions[0] ?? null
 
   const beginSelectedSessionGeneration = useCallback((sessionId: string): SelectedSessionGeneration => {
     const token = { sessionId, generation: ++selectedSessionGenerationRef.current }
@@ -205,6 +211,14 @@ export default function App(): React.JSX.Element {
     setProjectLoading(false)
     return true
   }, [language, refreshGitStatus, setActiveProjectId, setProjectError, setProjectLoading, setProjects])
+
+  useEffect(() => {
+    const pickFolder = (): void => {
+      void pickProject()
+    }
+    window.addEventListener('joker:welcome-pick-folder', pickFolder)
+    return () => window.removeEventListener('joker:welcome-pick-folder', pickFolder)
+  }, [pickProject])
 
   const clearProject = useCallback(async (): Promise<boolean> => {
     const sessionId = sessionRef.current
@@ -353,6 +367,7 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     let removeApprovalListener: (() => void) | undefined
     let removeApprovalResolvedListener: (() => void) | undefined
+    let removeUserQuestionListener: (() => void) | undefined
     let removePortListener: (() => void) | undefined
     let removeEventListener: (() => void) | undefined
     let removeFlowListener: (() => void) | undefined
@@ -500,15 +515,22 @@ export default function App(): React.JSX.Element {
       addApproval(req)
     })
     removeApprovalResolvedListener = window.joker.approval.onResolved((event) => removeApproval(event.requestId))
+    void window.joker.userQuestion.listPending().then((requests) => {
+      for (const request of requests) addUserQuestion(request)
+    }).catch(() => undefined)
+    removeUserQuestionListener = window.joker.userQuestion.onRequest((request) => {
+      addUserQuestion(request)
+    })
     return () => {
       flushTokenBuffer()
       removeApprovalListener?.()
       removeApprovalResolvedListener?.()
+      removeUserQuestionListener?.()
       removeEventListener?.()
       removeFlowListener?.()
       removePortListener?.()
     }
-  }, [addApproval, dispatchRunActivity, failRunningToolCalls, failToolCall, flushTokenBuffer, language, queueToken, refreshSessions, removeApproval, resetTransientState, resolveToolCall, setApprovals, setContextUsage, setMessages, setPendingUserMessages, setSessionError, setSessionGoal, setStreamFlow, setStreamModel, setStreamRunMode, setStreaming, startStream, updateSubagentActivity, updateToolStatus])
+  }, [addApproval, addUserQuestion, dispatchRunActivity, failRunningToolCalls, failToolCall, flushTokenBuffer, language, queueToken, refreshSessions, removeApproval, resetTransientState, resolveToolCall, setApprovals, setContextUsage, setMessages, setPendingUserMessages, setSessionError, setSessionGoal, setStreamFlow, setStreamModel, setStreamRunMode, setStreaming, startStream, updateSubagentActivity, updateToolStatus])
 
   const handleGoal = useCallback(async (command: GoalCommandMatch, draft: { skillIds?: string[] }): Promise<boolean> => {
     const sessionId = sessionRef.current
@@ -709,6 +731,15 @@ export default function App(): React.JSX.Element {
     inputBoxRef.current?.insertText(text)
   }, [])
 
+  useEffect(() => {
+    const insertDraft = (event: Event): void => {
+      const text = (event as CustomEvent<{ text?: unknown }>).detail?.text
+      if (typeof text === 'string' && text) inputBoxRef.current?.insertText(text)
+    }
+    window.addEventListener('joker:welcome-insert', insertDraft)
+    return () => window.removeEventListener('joker:welcome-insert', insertDraft)
+  }, [])
+
   const handleCopyLink = useCallback((url: string): void => {
     inputBoxRef.current?.insertLink(url)
   }, [])
@@ -802,6 +833,49 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', handleShortcut)
   }, [reasoningLevel, setReasoningLevel])
 
+  // Whole-window image drag & drop: depth-counted enter/leave, overlay
+  // invitation, and hand-off to the composer's shared image ingest path.
+  const [dragDepth, setDragDepth] = useState(0)
+  const dragHasFilesRef = useRef(false)
+  useEffect(() => {
+    const dragHasFiles = (event: DragEvent): boolean =>
+      Array.from(event.dataTransfer?.types ?? []).includes('Files')
+    const handleDragEnter = (event: DragEvent): void => {
+      if (!dragHasFiles(event)) return
+      event.preventDefault()
+      dragHasFilesRef.current = true
+      setDragDepth((depth) => depth + 1)
+    }
+    const handleDragOver = (event: DragEvent): void => {
+      if (!dragHasFilesRef.current) return
+      event.preventDefault()
+    }
+    const handleDragLeave = (event: DragEvent): void => {
+      if (!dragHasFilesRef.current) return
+      event.preventDefault()
+      setDragDepth((depth) => Math.max(0, depth - 1))
+    }
+    const handleDrop = (event: DragEvent): void => {
+      if (!dragHasFilesRef.current) return
+      event.preventDefault()
+      dragHasFilesRef.current = false
+      setDragDepth(0)
+      const imageFiles = Array.from(event.dataTransfer?.files ?? []).filter((file) => file.type.startsWith('image/'))
+      if (imageFiles.length === 0) return
+      void inputBoxRef.current?.ingestFiles(imageFiles)
+    }
+    document.addEventListener('dragenter', handleDragEnter)
+    document.addEventListener('dragover', handleDragOver)
+    document.addEventListener('dragleave', handleDragLeave)
+    document.addEventListener('drop', handleDrop)
+    return () => {
+      document.removeEventListener('dragenter', handleDragEnter)
+      document.removeEventListener('dragover', handleDragOver)
+      document.removeEventListener('dragleave', handleDragLeave)
+      document.removeEventListener('drop', handleDrop)
+    }
+  }, [])
+
 
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--color-bg)]">
@@ -812,10 +886,18 @@ export default function App(): React.JSX.Element {
         {modelSwitchNotice && <div className="pointer-events-none absolute bottom-[76px] left-1/2 -translate-x-1/2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1 text-[11px] text-[var(--color-text-muted)] shadow-lg">模型已切换 {modelSwitchNotice.provider} / {modelSwitchNotice.model}</div>}
       </main>
       <DetailPanel onGoalAction={handleGoalAction} />
+      {dragDepth > 0 && <DropOverlay disabled={activeRunMode === 'research'} />}
       {pendingWindowApproval && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 p-4" data-testid="window-approval-overlay">
           <div role="dialog" aria-modal="true" className="max-h-[min(720px,90vh)] w-full max-w-xl overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl">
             <ApprovalPanel key={pendingWindowApproval.requestId} approval={pendingWindowApproval} />
+          </div>
+        </div>
+      )}
+      {pendingUserQuestion && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 p-4" data-testid="user-question-overlay">
+          <div role="dialog" aria-modal="true" className="max-h-[min(720px,90vh)] w-full max-w-xl overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl">
+            <UserQuestionPanel key={pendingUserQuestion.requestId} question={pendingUserQuestion} />
           </div>
         </div>
       )}

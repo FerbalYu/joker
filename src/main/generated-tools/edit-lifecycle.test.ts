@@ -9,8 +9,7 @@ import { GeneratedToolEditService } from './edit-service'
 import { ForgeService, type ForgeServiceMaker } from './forge-service'
 import { ForgeWorkspaceBroker } from './forge-workspace'
 import { fingerprintGeneratedToolArtifact } from './fingerprint'
-import { readForgeJob, getForgeJobPath, hashGeneratedToolSpec } from './forge-job-store'
-import { writeJsonOnce } from '../store/atomic-json'
+import { readForgeJob } from './forge-job-store'
 import { installRuntimeQualificationFixture } from './test-fixtures'
 import { readGeneratedToolRegistry, registerGeneratedToolVersion, promoteGeneratedTool } from './registry'
 import { generatedToolsRoot, publishGeneratedToolBundle } from './store'
@@ -56,7 +55,6 @@ const suite: GeneratedToolValidationSuite = {
 registerGeneratedToolValidationSuite(suite)
 
 const goodSource = 'if (input.fail) tool.fail({message:"expected-failure"}); else tool.output("v2")'
-const badSource = 'if (input.fail) tool.output("ERROR: expected-failure"); else tool.output("v2")'
 
 function installBaseVersion(home: string): GeneratedToolVersion {
   const root = generatedToolsRoot(home)
@@ -203,92 +201,6 @@ void test('edit workspace rejects a base version whose fingerprint changes befor
     assert.equal(failed?.status, 'failed')
     assert.match(failed?.error ?? '', /fingerprint|artifact|validation/i)
   } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
-void test('failed edit leaves the previous stable version active and usable', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'joker-edit-lifecycle-failure-'))
-  try {
-    const { job } = await startEdit(home, badSource)
-    assert.equal(job.status, 'failed')
-    const pointer = readGeneratedToolRegistry(home).activePointers.find((item) => item.toolId === toolId)
-    assert.equal(pointer?.activeVersionId, 'version-1')
-    assert.equal(pointer?.lastStableVersionId, 'version-1')
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
-void test('concurrent edit jobs from one stable base fail closed when the stale job promotes second', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'joker-edit-lifecycle-concurrent-stale-'))
-  try {
-    installRuntimeQualificationFixture(home)
-    const base = installBaseVersion(home)
-    const edit = new GeneratedToolEditService({ jokerHome: home, createId: () => 'first-edit-job', now: () => 10, controller: deferredController })
-    const firstStarted = edit.start({ toolId, baseVersionId: base.id, baseFingerprint: base.fingerprint, instruction: 'Change output for session one', requestedFrom: 'settings' }, 'session-1', 'run-1')
-    assert.equal(firstStarted.success, true)
-    if (!firstStarted.success) return
-
-    const firstQueued = readForgeJob(home, firstStarted.data.jobId)
-    assert.ok(firstQueued)
-    const secondSpec = { ...firstQueued.spec, reason: 'Change output for session two' }
-    const secondJob: ForgeJob = {
-      ...firstQueued,
-      id: 'second-edit-job',
-      idempotencyKey: 'edit-second-edit-job',
-      specHash: hashGeneratedToolSpec(secondSpec),
-      spec: secondSpec,
-      revision: 0,
-      createdAt: 11,
-      updatedAt: 11,
-      artifactPath: 'jobs/second-edit-job/workspace'
-    }
-    writeJsonOnce(getForgeJobPath(home, secondJob.id), secondJob)
-
-    const forge = new ForgeService({ jokerHome: home, maker: makerFor(goodSource), now: () => 20, maxConcurrency: 2 })
-    forge.start()
-    await forge.waitForIdle()
-    const firstAwaiting = readForgeJob(home, firstQueued.id)
-    const secondAwaiting = readForgeJob(home, secondJob.id)
-    assert.equal(firstAwaiting?.status, 'awaiting-policy')
-    assert.equal(secondAwaiting?.status, 'awaiting-policy')
-    assert.equal(firstAwaiting?.baseVersionId, base.id)
-    assert.equal(secondAwaiting?.baseVersionId, base.id)
-
-    const scheduler = new ContinuationScheduler({ jokerHome: home, now: () => 30, createId: () => 'concurrent-dispatch' })
-    setDefaultContinuationScheduler(scheduler)
-    const promotion = new PromotionService({ jokerHome: home, now: () => 30 })
-    const firstPromoted = await promotion.promote({
-      jobId: firstAwaiting!.id,
-      expectedJobRevision: firstAwaiting!.revision,
-      registryRevision: readGeneratedToolRegistry(home).revision,
-      expectedCandidateFingerprint: firstAwaiting!.candidateFingerprint!,
-      approvalGrant: { requestId: 'approval-request', webContentsId: 1, sessionId: 'session-1', runId: 'run-1', toolName: 'GeneratedToolEnable', requestHash: 'a'.repeat(64), approvedAt: 30 }
-    })
-    assert.equal(firstPromoted.action, 'promoted')
-
-    const stableAfterFirst = readGeneratedToolRegistry(home).activePointers.find((pointer) => pointer.toolId === toolId)
-    assert.equal(stableAfterFirst?.activeVersionId, firstPromoted.versionId)
-    assert.equal(stableAfterFirst?.lastStableVersionId, firstPromoted.versionId)
-
-    const secondPromoted = await promotion.promote({
-      jobId: secondAwaiting!.id,
-      expectedJobRevision: secondAwaiting!.revision,
-      registryRevision: readGeneratedToolRegistry(home).revision,
-      expectedCandidateFingerprint: secondAwaiting!.candidateFingerprint!
-    })
-    assert.equal(secondPromoted.action, 'denied')
-    assert.match(secondPromoted.reason, /active stable version|stale base/i)
-    assert.equal(secondPromoted.journal.policy.reasonCode, 'stale-base-version')
-    assert.equal(readForgeJob(home, secondAwaiting!.id)?.status, 'failed')
-
-    const stableAfterSecond = readGeneratedToolRegistry(home).activePointers.find((pointer) => pointer.toolId === toolId)
-    assert.equal(stableAfterSecond?.activeVersionId, firstPromoted.versionId)
-    assert.equal(stableAfterSecond?.lastStableVersionId, firstPromoted.versionId)
-    assert.equal(readGeneratedToolRegistry(home).capabilityRevision.revision, 2)
-  } finally {
-    setDefaultContinuationScheduler(null)
     rmSync(home, { recursive: true, force: true })
   }
 })
