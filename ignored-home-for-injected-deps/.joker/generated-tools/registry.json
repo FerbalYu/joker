@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "registryId": "9efb9940-ffd7-485e-8e5f-2956ba2140d8",
+  "revision": 0,
+  "entries": [],
+  "activePointers": [],
+  "capabilityRevision": {
+    "schemaVersion": 1,
+    "revision": 0,
+    "changedAt": 0,
+    "reason": "initial",
+    "toolIds": [],
+    "operationId": "initial"
+  },
+  "operations": []
+}
