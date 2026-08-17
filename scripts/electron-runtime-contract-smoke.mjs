@@ -13,7 +13,10 @@ import { tmpdir } from 'node:os'
 import { once } from 'node:events'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const runDir = await mkdtemp(join(tmpdir(), 'joker-electron-runtime-contract-'))
+const runDir = process.env.JOKER_RUNTIME_CONTRACT_RUN_DIR
+  ? resolve(process.env.JOKER_RUNTIME_CONTRACT_RUN_DIR)
+  : await mkdtemp(join(tmpdir(), 'joker-electron-runtime-contract-'))
+await mkdir(runDir, { recursive: true })
 const reportPath = join(runDir, 'report.json')
 const checks = []
 const screenshots = []
@@ -234,6 +237,36 @@ try {
       check('fs-occ phase leaves no renderer console errors', consoleErrors.length === 0, consoleErrors)
       check('fs-occ phase leaves no renderer page errors', pageErrors.length === 0, pageErrors)
       await screenshot('fs-occ-complete')
+    }
+  })
+
+  await runPhase({
+    scenario: 'tool-repeat-reminder',
+    seedFiles: { 'repeat.txt': 'stable repeated tool result\n' },
+    drive: async ({ page, screenshot, providerRequests, consoleErrors, pageErrors }, check) => {
+      await waitFor(async () => (await page.evaluate(() => window.joker.session.list())).length > 0, 20_000, 'initial session')
+      const sessions = await page.evaluate(() => window.joker.session.list())
+      const projectId = (await page.evaluate(() => window.joker.project.get())).state?.activeProjectId
+      const bound = await page.evaluate(({ sessionId, projectId }) => window.joker.session.setProject(sessionId, projectId), { sessionId: sessions[0]?.id, projectId })
+      check('tool-repeat session is bound to the seeded workspace', Boolean(bound))
+      const textarea = page.locator('textarea').first()
+      await textarea.fill('Read repeat.txt until the provider finishes.')
+      await textarea.press('Enter')
+      await page.waitForFunction(() => document.body.innerText.includes('TOOL_REPEAT_OK'), undefined, { timeout: 60_000 })
+
+      const requests = await providerRequests()
+      const allCalls = requests.flatMap((entry) => entry.body?.messages ?? []).filter((message) => message?.role === 'assistant' && Array.isArray(message.tool_calls)).flatMap((message) => message.tool_calls).filter((call) => call?.function?.name === 'Read')
+      const repeatCalls = [...new Map(allCalls.map((call) => [call.id, call])).values()]
+      check('provider executed three repeated Read calls', repeatCalls.length === 3 && repeatCalls.map((call) => call.id).sort().join(',') === 'call_tool_repeat_1,call_tool_repeat_2,call_tool_repeat_3', repeatCalls.map((call) => call.id))
+      const allToolResults = requests.flatMap((entry) => entry.body?.messages ?? []).filter((message) => message?.role === 'tool')
+      const resultIds = new Set(allToolResults.map((message) => message.tool_call_id))
+      check('all three repeated Read calls returned tool results', repeatCalls.every((call) => resultIds.has(call.id)), [...resultIds])
+      const lastRequestMessages = requests.at(-1)?.body?.messages ?? []
+      check('fourth provider request receives the advisory reminder', lastRequestMessages.some((message) => message?.role === 'user' && String(message.content ?? '').includes('repeating the exact same tool call with identical arguments')))
+      check('repeated Read ToolCards remain visible', await page.locator('[data-tool-call-group]').count() >= 1)
+      check('tool-repeat phase leaves no renderer console errors', consoleErrors.length === 0, consoleErrors)
+      check('tool-repeat phase leaves no renderer page errors', pageErrors.length === 0, pageErrors)
+      await screenshot('tool-repeat-complete')
     }
   })
 

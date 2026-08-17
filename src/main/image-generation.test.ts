@@ -46,9 +46,9 @@ void test('runDirectImageGeneration preserves the prompt and uses the normal app
   assert.deepEqual(call && call.type === 'tool-call' ? call.input : undefined, { prompt: '裸体人物写生，不要翻译' })
   const toolResult = events.find((event) => event.type === 'tool-result')
   assert.equal(toolResult && toolResult.type === 'tool-result' ? toolResult.output : undefined, 'Tool call was denied.')
-  assert.equal(result.status, 'completed')
-  assert.equal(result.status === 'completed' ? result.message.toolCalls?.[0]?.status : undefined, 'done')
-  assert.equal(result.status === 'completed' ? result.message.toolCalls?.[0]?.output : undefined, 'Tool call was denied.')
+  assert.equal(result.status, 'error')
+  assert.equal(result.status === 'error' ? result.message.toolCalls?.[0]?.status : undefined, 'denied')
+  assert.equal(result.status === 'error' ? result.message.toolCalls?.[0]?.output : undefined, 'Tool call was denied.')
 })
 
 void test('runDirectImageGeneration returns a persistable assistant message with generated image metadata', async () => {

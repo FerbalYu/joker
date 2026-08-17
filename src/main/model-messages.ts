@@ -50,7 +50,7 @@ function assistantModelMessages(message: Partial<ChatMessage>): ModelMessage[] {
       toolName: tool.toolName,
       output: tool.output === undefined
         ? { type: 'error-text' as const, value: terminalToolError(tool) }
-        : tool.status === 'error'
+        : tool.status === 'error' || tool.status === 'denied' || tool.status === 'cancelled' || tool.status === 'timed-out'
           ? { type: 'error-text' as const, value: tool.output }
           : { type: 'text' as const, value: tool.output }
     }))

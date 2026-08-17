@@ -47,7 +47,7 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
     )
   }
 
-  const errorCount = visibleToolCalls.filter((toolCall) => toolCall.status === 'error').length
+  const errorCount = visibleToolCalls.filter((toolCall) => toolCall.status !== 'done' && toolCall.status !== 'running').length
   const doneCount = visibleToolCalls.filter((toolCall) => toolCall.status === 'done').length
 
   return (

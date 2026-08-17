@@ -88,6 +88,7 @@ export async function runDirectImageGeneration(options: {
     const tool = options.tool ?? imageTools[0]
     if (!tool) throw new Error('GenerateImage tool is unavailable')
     const result = await executeToolDefinition(tool, input, context)
+    const denied = result.metadata?.['terminalStatus'] === 'denied'
     await onEvent({
       type: 'tool-result',
       sessionId,
@@ -98,14 +99,14 @@ export async function runDirectImageGeneration(options: {
       metadata: result.metadata
     })
     return {
-      status: 'completed',
+      status: denied ? 'error' : 'completed',
       message: directImageMessage(messageId, {
         toolCallId,
         toolName: 'GenerateImage',
         input,
         output: result.output,
         metadata: result.metadata,
-        status: 'done'
+        status: denied ? 'denied' : 'done'
       })
     }
   } catch (error) {

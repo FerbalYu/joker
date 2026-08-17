@@ -8,7 +8,10 @@ import { once } from 'node:events'
 import { createHash } from 'node:crypto'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const runDir = await mkdtemp(join(tmpdir(), 'joker-electron-approval-'))
+const runDir = process.env.JOKER_RUNTIME_CONTRACT_RUN_DIR
+  ? resolve(process.env.JOKER_RUNTIME_CONTRACT_RUN_DIR)
+  : await mkdtemp(join(tmpdir(), 'joker-electron-approval-'))
+await mkdir(runDir, { recursive: true })
 const home = join(runDir, 'home')
 const electronUserData = join(runDir, 'electron-user-data')
 const mcpFixture = join(runDir, 'mcp-stdio-fixture.mjs')
@@ -217,6 +220,17 @@ try {
   const crossWindowResponse = await pageB.evaluate((request) => window.joker.approval.respond(request.requestId, true, request.sessionId, request.runId), approvalA)
   check('window B cannot resolve window A approval', crossWindowResponse === false, { response: crossWindowResponse })
 
+  const deniedWindowResponse = await pageB.evaluate((request) => window.joker.approval.respond(request.requestId, false, request.sessionId, request.runId), approvalB)
+  check('window B can deny its own approval', deniedWindowResponse === true, { response: deniedWindowResponse })
+  await waitFor(async () => {
+    const session = await pageB.evaluate((sessionId) => window.joker.session.get(sessionId), approvalB.sessionId)
+    return session?.messages?.some((message) => message.toolCalls?.some((tool) => tool.toolName === 'Write' && tool.status === 'denied'))
+  }, 20_000, 'window B denied ToolCall persistence')
+  const deniedSession = await pageB.evaluate((sessionId) => window.joker.session.get(sessionId), approvalB.sessionId)
+  check('denied Write persists with denied status', deniedSession?.messages?.some((message) => message.toolCalls?.some((tool) => tool.toolName === 'Write' && tool.status === 'denied')))
+  check('denied Write ToolCard renders a denied terminal state', await pageB.locator('[data-tool-health="denied"]').count() >= 1)
+  await screenshot(pageB, 'window-b-denied')
+
   const ownWindowResponse = await pageA.evaluate((request) => window.joker.approval.respond(request.requestId, true, request.sessionId, request.runId), approvalA)
   check('window A resolves its own approval', ownWindowResponse === true, { response: ownWindowResponse })
   await waitFor(async () => {
@@ -225,22 +239,12 @@ try {
   }, 20_000, 'window A approval result round-trip')
   await screenshot(pageA, 'window-a-approved')
 
-  const beforeClose = await providerEntries()
-  const bToolResultCountBeforeClose = beforeClose.filter((entry) => entry.method === 'POST' && entry.url === '/v1/chat/completions' && entry.body?.messages?.some((message) => message.role === 'tool')).length
-  const pendingBeforeClose = await pageA.evaluate(() => window.joker.approval.pendingCount())
-  check('window B approval remains pending before close', pendingBeforeClose >= 1, { pendingCount: pendingBeforeClose })
+  const pendingAfterDecision = await pageA.evaluate(() => window.joker.approval.pendingCount())
+  check('no approval requests remain after allow and deny decisions', pendingAfterDecision === 0, { pendingCount: pendingAfterDecision })
   await pageB.close()
   await waitFor(() => browser.contexts()[0].pages().length === 1, 10_000, 'window B to close')
   check('closing window B leaves window A alive', browser.contexts()[0].pages().length === 1)
-  await waitFor(async () => (await pageA.evaluate(() => window.joker.approval.pendingCount())) === 0, 10_000, 'window B pending approval to be cancelled')
-  check('closing window B cancels its pending approval', await pageA.evaluate(() => window.joker.approval.pendingCount()) === 0)
-  const afterClose = await providerEntries()
-  const bToolResultCountAfterClose = afterClose.filter((entry) => entry.method === 'POST' && entry.url === '/v1/chat/completions' && entry.body?.messages?.some((message) => message.role === 'tool')).length
-  check('closing window B does not execute its denied Write tool', bToolResultCountAfterClose === bToolResultCountBeforeClose, {
-    before: bToolResultCountBeforeClose,
-    after: bToolResultCountAfterClose,
-    evidence: 'fake Provider received no tool-result turn for the closed window'
-  })
+  check('closing window B keeps approval queue empty', await pageA.evaluate(() => window.joker.approval.pendingCount()) === 0)
   await screenshot(pageA, 'window-a-after-window-b-close')
 } catch (error) {
   failure = error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { message: String(error) }

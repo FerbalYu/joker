@@ -13,7 +13,7 @@ import {
   executionContractInstructions,
   type AgentExecutionContract
 } from './execution-contract'
-import { detectRepetitionLoop, REPETITION_LOOP_ERROR, REPETITION_LOOP_NOTICE } from './repetition-guard'
+import { detectRepetitionLoop, REPETITION_LOOP_ERROR, REPETITION_LOOP_NOTICE, ToolCallRepetitionGuard } from './repetition-guard'
 import { parseInvokeToolCall } from './invoke-fallback'
 import type { OperationJournal } from '../store/operations'
 
@@ -98,6 +98,9 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
   let terminalResult: AgentRunResult | undefined
   let executionContractViolation: string | undefined
   let repetitionDetected = false
+  const toolRepetitionGuard = new ToolCallRepetitionGuard()
+  let pendingToolReminder: string | undefined
+  let preparedToolReminder: string | undefined
   let currentStepNumber = 1
   let currentStepTextStart = 0
   const runStartAt = Date.now()
@@ -169,7 +172,10 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
           applyCompression(compressed)
           const steers = await takeSteerMessages?.(stepNumber)
           const steerMessages = steers?.length ? steers.flatMap(toUserModelMessages) : []
-          const preparedMessages = steerMessages.length > 0 ? [...compressed.messages, ...steerMessages] : compressed.messages
+          preparedToolReminder = pendingToolReminder
+          const reminderMessages: ModelMessage[] = preparedToolReminder ? [{ role: 'user', content: preparedToolReminder }] : []
+          const additionalMessages = [...reminderMessages, ...steerMessages]
+          const preparedMessages = additionalMessages.length > 0 ? [...compressed.messages, ...additionalMessages] : compressed.messages
           const enforceExecution = stepNumber === 0 && executionContract?.requireToolCall === true
           if (!enforceExecution && preparedMessages === stepMessages) return undefined
           return {
@@ -182,6 +188,8 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
           }
         },
         onStepStart: async ({ messages: stepMessages, stepNumber }) => {
+          if (preparedToolReminder && pendingToolReminder === preparedToolReminder) pendingToolReminder = undefined
+          preparedToolReminder = undefined
           latestStepMessages = stepMessages
           currentStepNumber = stepNumber + 1
           currentStepTextStart = text.length
@@ -274,6 +282,8 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
             updatedAt: now,
             lastProgressAt: now
           }
+          const toolRepetition = toolRepetitionGuard.observe(part.toolName, part.input)
+          if (toolRepetition.reminder) pendingToolReminder = toolRepetition.reminder
           toolCalls.push(toolCall)
           segments = appendToolSegment(segments, toolCall)
           await onEvent({
@@ -290,13 +300,11 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
         } else if (part.type === 'tool-result') {
           await flushStepBuffer(stepBuffer)
           const output = toolOutputText(part.output)
-          const metadata =
-            typeof part.output === 'object' && part.output !== null && 'metadata' in part.output
-              ? (part.output as { metadata?: Record<string, unknown> }).metadata
-              : undefined
+          const metadata = toolOutputMetadata(part.output)
           auxiliaryUsage = addStreamUsage(auxiliaryUsage, usageFromMetadata(metadata))
           const completedAt = Date.now()
-          updateTool(part.toolCallId, { output, metadata, status: 'done', updatedAt: completedAt, lastProgressAt: completedAt })
+          const terminalStatus = metadata?.['terminalStatus'] === 'denied' ? 'denied' : 'done'
+          updateTool(part.toolCallId, { output, metadata, status: terminalStatus, updatedAt: completedAt, lastProgressAt: completedAt })
           await onEvent({
             type: 'tool-result',
             sessionId,
@@ -400,7 +408,8 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
           try {
             const toolResult = await executeTool.execute(invoke.input, { toolCallId, abortSignal: streamController.signal })
             output = toolOutputText(toolResult)
-            toolCall.status = 'done'
+            toolCall.status = toolResult.metadata?.['terminalStatus'] === 'denied' ? 'denied' : 'done'
+            toolCall.metadata = toolResult.metadata
             toolCall.output = output
             toolCall.updatedAt = Date.now()
             toolCall.lastProgressAt = Date.now()
@@ -694,7 +703,11 @@ function stepResultMessage(messageId: string, runMode: RunMode, step: { stepNumb
       if (!tool) continue
       tool.output = part.type === 'tool-error' ? formatSafeError(part.error) : toolOutputText(part.output)
       tool.metadata = part.type === 'tool-result' ? toolOutputMetadata(part.output) : undefined
-      tool.status = part.type === 'tool-error' ? 'error' : 'done'
+      tool.status = part.type === 'tool-error'
+        ? 'error'
+        : tool.metadata?.['terminalStatus'] === 'denied'
+          ? 'denied'
+          : 'done'
     }
   }
   if (segments.length === 0) return null
@@ -731,11 +744,14 @@ function toolOutputText(output: unknown): string {
 }
 
 function toolOutputMetadata(output: unknown): Record<string, unknown> | undefined {
-  if (!output || typeof output !== 'object' || !('metadata' in output)) return undefined
-  const metadata = (output as { metadata?: unknown }).metadata
-  return metadata && typeof metadata === 'object' && !Array.isArray(metadata)
-    ? metadata as Record<string, unknown>
-    : undefined
+  if (!output || typeof output !== 'object') return undefined
+  if ('metadata' in output) {
+    const metadata = (output as { metadata?: unknown }).metadata
+    if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) return metadata as Record<string, unknown>
+  }
+  if ('value' in output) return toolOutputMetadata((output as { value?: unknown }).value)
+  if ('output' in output) return toolOutputMetadata((output as { output?: unknown }).output)
+  return undefined
 }
 
 export function providerOptions(config: ReturnType<typeof resolveActiveModel>): ProviderOptions | undefined {

@@ -71,7 +71,7 @@ export default function ToolCard({ toolCall, showForgeSummary = true }: Props): 
   const hasDiff = diffText.length > 0
   const generatedImages = useMemo(() => getGeneratedImages(toolCall.metadata), [toolCall.metadata])
   const internalForgeTool = isInternalToolForgeTool(toolCall.toolName)
-  const canExpand = !internalForgeTool && (toolCall.toolName !== 'GenerateImage' || toolCall.status === 'error') && (Boolean(toolCall.output) || hasDiff)
+  const canExpand = !internalForgeTool && (toolCall.toolName !== 'GenerateImage' || !isDone) && (Boolean(toolCall.output) || hasDiff)
 
   const language = useStore((s) => s.language)
   const forgeSummary = useMemo(
@@ -176,12 +176,14 @@ function toolActivityView(toolCall: ToolCallInfo, now: number, language: import(
   if (startedAt === undefined) {
     if (toolCall.status === 'timed-out') return { level: 'timed-out', label: t(language, 'tool.status.timedOut'), title: t(language, 'tool.status.timedOut'), className: 'text-red-400' }
     if (toolCall.status === 'cancelled') return { level: 'cancelled', label: t(language, 'tool.status.cancelled'), title: t(language, 'tool.status.cancelled'), className: 'text-amber-400' }
+    if (toolCall.status === 'denied') return { level: 'denied', label: language === 'zh' ? '已拒绝' : 'Denied', title: language === 'zh' ? '工具调用已被拒绝' : 'Tool call denied', className: 'text-amber-400' }
     return null
   }
   const elapsedMs = toolCall.durationMs ?? Math.max(0, now - startedAt)
   const progressAgeMs = Math.max(0, now - (toolCall.lastProgressAt ?? startedAt))
   const deadlineRemainingMs = toolCall.deadlineAt === undefined ? undefined : toolCall.deadlineAt - now
   const elapsed = formatToolDuration(elapsedMs)
+  if (toolCall.status === 'denied') return { level: 'denied', label: `${language === 'zh' ? '已拒绝' : 'Denied'} · ${elapsed}`, title: language === 'zh' ? '工具调用已被拒绝' : 'Tool call denied', className: 'text-amber-400' }
   if (toolCall.status === 'timed-out') return { level: 'timed-out', label: `${t(language, 'tool.status.timedOut')} · ${elapsed}`, title: t(language, 'tool.status.timedOutDetail', { elapsed }), className: 'text-red-400' }
   if (toolCall.status === 'cancelled') return { level: 'cancelled', label: `${t(language, 'tool.status.cancelled')} · ${elapsed}`, title: t(language, 'tool.status.cancelled'), className: 'text-amber-400' }
   if (toolCall.status !== 'running') return { level: toolCall.status, label: elapsed, title: t(language, 'tool.status.completedDetail', { elapsed }), className: 'text-[var(--color-text-muted)]' }

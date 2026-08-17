@@ -1,4 +1,56 @@
 const MAX_TAIL_CHARS = 4096
+const TOOL_REPEAT_THRESHOLDS = new Set([3, 5])
+const TOOL_ARGUMENT_PREVIEW_CHARS = 500
+
+export const TOOL_REPEAT_GENTLE_REMINDER =
+  'You are repeating the exact same tool call with identical arguments. Carefully analyze the previous result before calling again: if the task is not complete, try a different approach or different arguments instead of repeating the call.'
+
+export interface ToolRepeatObservation {
+  count: number
+  reminder?: string
+}
+
+export class ToolCallRepetitionGuard {
+  private key: string | undefined
+  private count = 0
+
+  observe(toolName: string, input: unknown): ToolRepeatObservation {
+    const canonicalArguments = canonicalizeJson(input)
+    const nextKey = JSON.stringify([toolName, canonicalArguments])
+    this.count = this.key === nextKey ? this.count + 1 : 1
+    this.key = nextKey
+    if (!TOOL_REPEAT_THRESHOLDS.has(this.count)) return { count: this.count }
+    if (this.count === 3) return { count: this.count, reminder: TOOL_REPEAT_GENTLE_REMINDER }
+    const preview = canonicalArguments.length <= TOOL_ARGUMENT_PREVIEW_CHARS
+      ? canonicalArguments
+      : `${canonicalArguments.slice(0, TOOL_ARGUMENT_PREVIEW_CHARS)}… (+${canonicalArguments.length - TOOL_ARGUMENT_PREVIEW_CHARS} more chars)`
+    return {
+      count: this.count,
+      reminder: [
+        'Repeated tool call detected:',
+        `- tool: ${toolName}`,
+        `- consecutive_calls: ${this.count}`,
+        `- arguments: ${preview}`,
+        'The repeated calls are not making progress. Inspect the latest result and choose a different action, different arguments, or finish the task if enough evidence has been gathered.'
+      ].join('\n')
+    }
+  }
+}
+
+function canonicalizeJson(value: unknown): string {
+  return JSON.stringify(sortJsonValue(value))
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonValue)
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const sorted: Record<string, unknown> = {}
+    for (const key of Object.keys(record).sort()) sorted[key] = sortJsonValue(record[key])
+    return sorted
+  }
+  return value
+}
 const MAX_UNITS = 32
 const MAX_PATTERN_UNITS = 4
 const MIN_REPETITIONS = 3

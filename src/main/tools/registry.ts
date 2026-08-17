@@ -290,7 +290,7 @@ export async function executeToolDefinition(
     })
     if (decision.outcome === 'deny') {
       const now = Date.now()
-      const result = { output: 'Tool call was denied.' }
+      const result = { output: 'Tool call was denied.', metadata: { terminalStatus: 'denied', reason: decision.reason } }
       if (definition.lifecycle) {
         await finishLifecycleBounded(definition.lifecycle, lifecycleState, {
           ...lifecycleEvent(now),

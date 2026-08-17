@@ -108,6 +108,21 @@ void test('error tool results become error-text outputs', () => {
   assert.deepEqual(errorPart.output, { type: 'error-text', value: 'permission denied' })
 })
 
+void test('denied tool results become error-text outputs', () => {
+  const result = toModelMessages([{
+    id: 'assistant-denied',
+    role: 'assistant',
+    content: '',
+    createdAt: 1,
+    segments: [{ type: 'tools', tools: [{ toolCallId: 'call-denied', toolName: 'Write', input: {}, output: 'Tool call was denied.', status: 'denied' }] }]
+  }])
+  const toolMessage = result.find((message) => message.role === 'tool')
+  assert.ok(toolMessage?.role === 'tool')
+  const errorPart = toolMessage.content.find((part) => part.type === 'tool-result')
+  assert.ok(errorPart?.type === 'tool-result')
+  assert.deepEqual(errorPart.output, { type: 'error-text', value: 'Tool call was denied.' })
+})
+
 void test('running historical tools receive an interrupted terminal result', () => {
   const result = toModelMessages([{
     id: 'assistant-running',

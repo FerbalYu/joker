@@ -76,6 +76,7 @@ void test('buildToolSet does not execute a denied tool', async () => {
   const result = await (toolSet.Denied as unknown as { execute: (input: Record<string, unknown>) => Promise<{ output: string }> }).execute({})
   assert.equal(executed, false)
   assert.equal(result.output, 'Tool call was denied.')
+  assert.equal((result as { metadata?: Record<string, unknown> }).metadata?.terminalStatus, 'denied')
 })
 
 void test('buildToolSet audits the complete successful lifecycle', async () => {

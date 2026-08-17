@@ -589,6 +589,18 @@ function fsOccResponse(messages) {
 }
 
 const INVOKE_FALLBACK_MARKER = 'zzqinvokefallback41x'
+const TOOL_REPEAT_MARKER = 'zzqtoolrepeat41x'
+
+function toolRepeatReminderResponse(messages) {
+  const history = researchToolHistory(messages)
+  const calls = [...history.calls.entries()].filter(([id, name]) => name === 'Read' && history.results.has(id))
+  if (calls.length < 3) {
+    const id = `call_tool_repeat_${calls.length + 1}`
+    return toolCall('Read', calls.length % 2 === 0 ? { filePath: 'repeat.txt', offset: 1, limit: 20 } : { limit: 20, filePath: 'repeat.txt', offset: 1 }, id)
+  }
+  const reminderVisible = messages.some((message) => message?.role === 'user' && String(message.content ?? '').includes('repeating the exact same tool call with identical arguments'))
+  return textResponse(`${reminderVisible ? 'TOOL_REPEAT_OK' : 'TOOL_REPEAT_MISSING'} ${TOOL_REPEAT_MARKER}`)
+}
 
 function invokeFallbackResponse(messages) {
   const firstTurn = [...messages].reverse().find((message) => message.role === 'user')
@@ -645,6 +657,7 @@ const server = http.createServer((req, res) => {
     if (scenario === 'toolforge-vertical-slice') return respond(electronToolForgeResponse(messages, parsed.tools, systemText))
     if (scenario === 'fs-optimistic-concurrency') return respond(fsOccResponse(messages))
     if (scenario === 'invoke-fallback') return respond(invokeFallbackResponse(messages))
+    if (scenario === 'tool-repeat-reminder') return respond(toolRepeatReminderResponse(messages))
     if (scenario === 'toolforge-edit-success') return respond(electronToolForgeEditResponse(messages, parsed.tools, systemText, false))
     if (scenario === 'toolforge-edit-failure') return respond(electronToolForgeEditResponse(messages, parsed.tools, systemText, true))
     if (scenario === 'research') return respond(researchResponse(messages))

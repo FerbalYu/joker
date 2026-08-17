@@ -291,6 +291,44 @@ function stepLimitModel(): LanguageModel {
   } as unknown as LanguageModel
 }
 
+function repeatedToolReminderModel(prompts: unknown[]): LanguageModel {
+  let call = 0
+  return {
+    specificationVersion: 'v3',
+    provider: 'test',
+    modelId: 'repeated-tool-reminder',
+    supportedUrls: {},
+    doGenerate: async () => { throw new Error('not used') },
+    doStream: async ({ prompt }) => {
+      prompts.push(prompt)
+      const step = call++
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: 'response-metadata', id: `repeat-${step}`, modelId: 'repeated-tool-reminder', timestamp: new Date(0) })
+            if (step < 3) {
+              const toolCallId = `repeat-call-${step}`
+              const input = step % 2 === 0 ? { b: 2, nested: { y: null, x: 1 } } : { nested: { x: 1, y: null }, b: 2 }
+              controller.enqueue({ type: 'tool-input-start', id: toolCallId, toolName: 'Again' })
+              controller.enqueue({ type: 'tool-input-delta', id: toolCallId, delta: JSON.stringify(input) })
+              controller.enqueue({ type: 'tool-input-end', id: toolCallId })
+              controller.enqueue({ type: 'tool-call', toolCallId, toolName: 'Again', input: JSON.stringify(input) })
+              controller.enqueue({ type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool-calls' }, usage: v3Usage(2, 1) })
+            } else {
+              controller.enqueue({ type: 'text-start', id: 'repeat-done' })
+              controller.enqueue({ type: 'text-delta', id: 'repeat-done', delta: 'done' })
+              controller.enqueue({ type: 'text-end', id: 'repeat-done' })
+              controller.enqueue({ type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: v3Usage(2, 1) })
+            }
+            controller.close()
+          }
+        }),
+        response: { headers: {} }
+      }
+    }
+  } as unknown as LanguageModel
+}
+
 function runWith(model: LanguageModel, signal?: AbortSignal): Promise<{ events: StreamEvent[]; result: Awaited<ReturnType<typeof runAgent>> }> {
   const events: StreamEvent[] = []
   return runAgent({
@@ -303,6 +341,68 @@ function runWith(model: LanguageModel, signal?: AbortSignal): Promise<{ events: 
     onEvent: (event) => { events.push(event) }
   }).then((result) => ({ events, result }))
 }
+
+void test('runAgent injects an advisory reminder after three canonical identical tool calls', async () => {
+  const prompts: unknown[] = []
+  const tools = {
+    Again: tool({
+      description: 'repeat fixture',
+      inputSchema: z.object({ b: z.number(), nested: z.object({ x: z.number(), y: z.null() }) }),
+      execute: async () => 'same-result'
+    })
+  }
+  const result = await runAgent({
+    sessionId: 'session-tool-repeat-reminder',
+    runId: 'run-tool-repeat-reminder',
+    messages: [{ role: 'user', content: 'repeat fixture' }],
+    tools,
+    reasoningLevel: 'auto',
+    model: repeatedToolReminderModel(prompts),
+    onEvent: () => undefined
+  })
+  assert.equal(result.status, 'completed')
+  assert.equal(prompts.length, 4)
+  assert.match(JSON.stringify(prompts[3]), /repeating the exact same tool call with identical arguments/i)
+  assert.doesNotMatch(JSON.stringify(prompts[2]), /repeating the exact same tool call with identical arguments/i)
+})
+
+void test('runAgent preserves denied status from the AI SDK json output envelope', async () => {
+  const events: StreamEvent[] = []
+  const tools = {
+    Denied: tool({
+      description: 'denied fixture',
+      inputSchema: z.object({}),
+      execute: async () => ({ output: 'Tool call was denied.', metadata: { terminalStatus: 'denied' } })
+    })
+  }
+  let step = 0
+  const model = {
+    specificationVersion: 'v3', provider: 'test', modelId: 'denied-envelope', supportedUrls: {},
+    doGenerate: async () => { throw new Error('not used') },
+    doStream: async () => ({
+      stream: new ReadableStream({ start(controller) {
+        controller.enqueue({ type: 'response-metadata', id: `denied-${step}`, modelId: 'denied-envelope', timestamp: new Date(0) })
+        if (step++ === 0) {
+          controller.enqueue({ type: 'tool-input-start', id: 'denied-call', toolName: 'Denied' })
+          controller.enqueue({ type: 'tool-input-delta', id: 'denied-call', delta: '{}' })
+          controller.enqueue({ type: 'tool-input-end', id: 'denied-call' })
+          controller.enqueue({ type: 'tool-call', toolCallId: 'denied-call', toolName: 'Denied', input: '{}' })
+          controller.enqueue({ type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool-calls' }, usage: v3Usage(2, 1) })
+        } else {
+          controller.enqueue({ type: 'text-start', id: 'denied-done' })
+          controller.enqueue({ type: 'text-delta', id: 'denied-done', delta: 'denied handled' })
+          controller.enqueue({ type: 'text-end', id: 'denied-done' })
+          controller.enqueue({ type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: v3Usage(2, 1) })
+        }
+        controller.close()
+      } }), response: { headers: {} }
+    })
+  } as unknown as LanguageModel
+  const result = await runAgent({ sessionId: 'denied-session', runId: 'denied-run', messages: [{ role: 'user', content: 'deny' }], tools, reasoningLevel: 'auto', model, onEvent: (event) => { events.push(event) } })
+  assert.equal(result.status, 'completed')
+  assert.equal(result.toolCalls[0]?.status, 'denied')
+  assert.equal(events.find((event) => event.type === 'tool-result')?.type, 'tool-result')
+})
 
 void test('runAgent preserves long stream order and emits measured context updates', async () => {
   const { events, result } = await runWith(fakeModel('normal', Array.from({ length: 256 }, (_, index) => `chunk-${index};`)))
