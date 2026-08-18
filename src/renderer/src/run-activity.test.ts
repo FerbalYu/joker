@@ -61,21 +61,45 @@ void test('send acceptance, message start, step start and tokens advance model a
 })
 
 void test('tool completion keeps running-tools while another tool is active', () => {
-  const first = runActivityReducer(started(), streamEvent({
+  const firstProposed = runActivityReducer(started(), streamEvent({
     type: 'tool-call',
     sessionId: 'session-a',
     runId: 'run-a',
     toolCallId: 'tool-a',
     toolName: 'Read',
-    input: { path: 'a.txt' }
+    input: { path: 'a.txt' },
+    proposedAt: 10,
+    updatedAt: 10
   }))
-  const second = runActivityReducer(first, streamEvent({
+  const first = runActivityReducer(firstProposed, streamEvent({
+    type: 'tool-status',
+    sessionId: 'session-a',
+    runId: 'run-a',
+    toolCallId: 'tool-a',
+    toolName: 'Read',
+    status: 'running',
+    startedAt: 20,
+    updatedAt: 20
+  }))
+  const secondProposed = runActivityReducer(first, streamEvent({
     type: 'tool-call',
     sessionId: 'session-a',
     runId: 'run-a',
     toolCallId: 'tool-b',
     toolName: 'Search',
-    input: { query: 'status' }
+    input: { query: 'status' },
+    proposedAt: 30,
+    updatedAt: 30
+  }))
+  const second = runActivityReducer(secondProposed, streamEvent({
+    type: 'tool-status',
+    sessionId: 'session-a',
+    runId: 'run-a',
+    toolCallId: 'tool-b',
+    toolName: 'Search',
+    status: 'running',
+    startedAt: 40,
+    updatedAt: 40
   }))
   const oneDone = runActivityReducer(second, streamEvent({
     type: 'tool-result',
@@ -115,16 +139,54 @@ void test('approval, message end and goal updates retain useful run context', ()
     windowId: 1,
     runId: 'run-a',
     sessionId: 'session-a',
+    toolCallId: 'tool-approval',
     toolName: 'Bash',
     input: { command: 'npm test' }
   }
-  const awaiting = runActivityReducer(withGoal, { type: 'approval', request: approval })
+  const proposed = runActivityReducer(withGoal, streamEvent({
+    type: 'tool-call',
+    sessionId: 'session-a',
+    runId: 'run-a',
+    toolCallId: 'tool-approval',
+    toolName: 'Bash',
+    input: approval.input,
+    proposedAt: 10,
+    updatedAt: 10
+  }))
+  const awaiting = runActivityReducer(proposed, { type: 'approval', request: approval })
   assert.equal(awaiting.phase, 'awaiting-approval')
   assert.equal(awaiting.approval, approval)
+  assert.equal(awaiting.toolCalls[0]?.status, 'awaiting-approval')
+  assert.equal(awaiting.toolCalls[0]?.startedAt, undefined)
 
-  const resolved = runActivityReducer(awaiting, { type: 'approval-resolved', requestId: approval.requestId })
+  const stillAwaiting = runActivityReducer(awaiting, streamEvent({
+    type: 'tool-status',
+    sessionId: 'session-a',
+    runId: 'run-a',
+    toolCallId: 'tool-approval',
+    toolName: 'Bash',
+    status: 'proposed',
+    approvalDecidedAt: 20,
+    approvalOutcome: 'allow',
+    updatedAt: 20
+  }))
+  assert.equal(stillAwaiting.toolCalls[0]?.status, 'awaiting-approval')
+
+  const resolved = runActivityReducer(stillAwaiting, {
+    type: 'approval-resolved',
+    event: {
+      requestId: approval.requestId,
+      sessionId: approval.sessionId,
+      runId: approval.runId,
+      toolCallId: approval.toolCallId,
+      approved: true,
+      reason: 'resolved',
+      resolvedAt: 20
+    }
+  })
   assert.equal(resolved.phase, 'waiting-model')
   assert.equal(resolved.approval, null)
+  assert.equal(resolved.toolCalls[0]?.status, 'proposed')
 
   const finalizing = runActivityReducer(awaiting, streamEvent({
     type: 'message-end',
@@ -166,19 +228,17 @@ void test('abort request and terminal events clean up after authoritative done',
 })
 
 void test('tool status telemetry retains timing and timeout outcome', () => {
-  const running = runActivityReducer(started(), streamEvent({
+  const proposed = runActivityReducer(started(), streamEvent({
     type: 'tool-call',
     sessionId: 'session-a',
     runId: 'run-a',
     toolCallId: 'tool-timed',
     toolName: 'Bash',
     input: { command: 'npm test' },
-    startedAt: 100,
-    updatedAt: 100,
-    lastProgressAt: 100,
-    deadlineAt: 1_100
+    proposedAt: 90,
+    updatedAt: 90
   }))
-  const heartbeat = runActivityReducer(running, streamEvent({
+  const heartbeat = runActivityReducer(proposed, streamEvent({
     type: 'tool-status',
     sessionId: 'session-a',
     runId: 'run-a',
@@ -220,13 +280,26 @@ void test('labels, data status and view model expose localized activity details'
   assert.equal(runActivityDataStatus('streaming-text'), 'running')
   assert.equal(runActivityDataStatus('failed'), 'failed')
 
-  const state = runActivityReducer(started(), streamEvent({
+  const proposed = runActivityReducer(started(), streamEvent({
     type: 'tool-call',
     sessionId: 'session-a',
     runId: 'run-a',
     toolCallId: 'tool-a',
     toolName: 'Read',
-    input: {}
+    input: {},
+    proposedAt: 10,
+    updatedAt: 10
+  }))
+  assert.equal(proposed.phase, 'waiting-model')
+  const state = runActivityReducer(proposed, streamEvent({
+    type: 'tool-status',
+    sessionId: 'session-a',
+    runId: 'run-a',
+    toolCallId: 'tool-a',
+    toolName: 'Read',
+    status: 'running',
+    startedAt: 20,
+    updatedAt: 20
   }))
   assert.deepEqual(toRunActivityViewModel(state, 'en'), {
     phase: 'running-tools',

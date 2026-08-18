@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Loader2, Wrench } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight, Clock3, Loader2, LockKeyhole, Wrench } from 'lucide-react'
 import type { ToolCallInfo } from '@shared/types'
 import { useStore } from '../store'
 import { t, toolLabel } from '../i18n'
@@ -13,7 +13,6 @@ interface Props {
 export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | null {
   const language = useStore((s) => s.language)
   const visibleToolCalls = useMemo(() => visibleToolCards(toolCalls), [toolCalls])
-  const hasRunning = visibleToolCalls.some((toolCall) => toolCall.status === 'running')
   const [expanded, setExpanded] = useState(false)
 
   const summary = useMemo(() => buildSummary(visibleToolCalls, language), [language, visibleToolCalls])
@@ -47,18 +46,44 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
     )
   }
 
-  const errorCount = visibleToolCalls.filter((toolCall) => toolCall.status !== 'done' && toolCall.status !== 'running').length
+  const runningCount = visibleToolCalls.filter((toolCall) => toolCall.status === 'running').length
+  const proposedCount = visibleToolCalls.filter((toolCall) => toolCall.status === 'proposed').length
+  const awaitingCount = visibleToolCalls.filter((toolCall) => toolCall.status === 'awaiting-approval').length
+  const outcomeUnknownCount = visibleToolCalls.filter((toolCall) => toolCall.status === 'outcome-unknown').length
+  const errorCount = visibleToolCalls.filter((toolCall) => ['error', 'denied', 'cancelled', 'timed-out'].includes(toolCall.status)).length
   const doneCount = visibleToolCalls.filter((toolCall) => toolCall.status === 'done').length
+  const groupStatus = outcomeUnknownCount > 0
+    ? 'outcome-unknown'
+    : errorCount > 0
+      ? 'error'
+      : awaitingCount > 0
+        ? 'awaiting-approval'
+        : runningCount > 0
+          ? 'running'
+          : proposedCount > 0
+            ? 'proposed'
+            : 'done'
+  const statusSummary = [
+    runningCount > 0 ? t(language, 'tool.group.running', { count: runningCount }) : '',
+    awaitingCount > 0 ? t(language, 'tool.group.awaitingApproval', { count: awaitingCount }) : '',
+    outcomeUnknownCount > 0 ? t(language, 'tool.group.outcomeUnknown', { count: outcomeUnknownCount }) : '',
+    errorCount > 0 ? t(language, 'tool.group.errors', { count: errorCount }) : '',
+    proposedCount > 0 ? t(language, 'tool.group.proposed', { count: proposedCount }) : '',
+    doneCount > 0 ? t(language, 'tool.group.done', { count: doneCount }) : ''
+  ].filter(Boolean).join(' · ')
 
   return (
     <div
       data-tool-call-group
+      data-tool-call-group-status={groupStatus}
       className={`w-full max-w-[640px] overflow-hidden rounded-lg border bg-[var(--color-surface)] shadow-[0_8px_24px_rgba(0,0,0,0.12)] ${
-        hasRunning
-          ? 'border-[var(--color-accent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent),0_8px_24px_rgba(0,0,0,0.16)]'
-          : errorCount > 0
-            ? 'border-red-700'
-            : 'border-[var(--color-border)]'
+        outcomeUnknownCount > 0 || errorCount > 0
+          ? 'border-red-700'
+          : awaitingCount > 0
+            ? 'border-amber-700/80'
+            : runningCount > 0
+              ? 'border-[var(--color-accent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent),0_8px_24px_rgba(0,0,0,0.16)]'
+              : 'border-[var(--color-border)]'
       }`}
     >
       <button
@@ -69,7 +94,17 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
         className="flex min-h-6 w-full items-center gap-2 px-2 py-1 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
       >
         <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[var(--color-bg)] text-[var(--color-text-secondary)]">
-          {hasRunning ? <Loader2 size={14} className="animate-spin text-[var(--color-accent)]" /> : <Wrench size={14} />}
+          {outcomeUnknownCount > 0
+            ? <AlertTriangle size={14} className="text-red-300" />
+            : errorCount > 0
+              ? <AlertTriangle size={14} className="text-red-400" />
+              : awaitingCount > 0
+                ? <LockKeyhole size={14} className="text-amber-300" />
+                : runningCount > 0
+                  ? <Loader2 size={14} className="animate-spin text-[var(--color-accent)]" />
+                  : proposedCount > 0
+                    ? <Clock3 size={14} className="text-[var(--color-text-muted)]" />
+                    : <Wrench size={14} />}
         </span>
         <span className="shrink-0 whitespace-nowrap rounded-md bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-[12px] font-medium leading-none text-[var(--color-text-primary)]">
           {t(language, 'tool.group.title', { count: visibleToolCalls.length })}
@@ -78,11 +113,7 @@ export default function ToolCallList({ toolCalls }: Props): React.JSX.Element | 
           {summary}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-2 text-[10px] text-[var(--color-text-muted)]">
-          {hasRunning
-            ? t(language, 'tool.group.running')
-            : errorCount > 0
-              ? t(language, 'tool.group.errors', { count: errorCount })
-              : t(language, 'tool.group.done', { count: doneCount })}
+          {statusSummary}
           {expanded ? (
             <ChevronDown size={15} className="text-[var(--color-text-muted)]" />
           ) : (

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { transitionToolCall } from '../../shared/types'
-import type { AppConfig, AssistantSegment, ChatMessage, ContextUsage, StreamFlowState, StreamUsage, ToolCallInfo, ApprovalRequest, SessionSummary, ReasoningLevel, ProjectEntry, RunMode, PendingUserMessage, SubagentActivity, UserQuestionRequest } from '@shared/types'
+import type { AppConfig, AssistantSegment, ChatMessage, ContextUsage, StreamFlowState, StreamUsage, ToolCallInfo, ApprovalRequest, ApprovalResolvedEvent, SessionSummary, ReasoningLevel, ProjectEntry, RunMode, PendingUserMessage, SubagentActivity, UserQuestionRequest } from '@shared/types'
 import { getInitialLanguage, persistLanguage, type Language } from './i18n'
 import { initialRunActivityState, runActivityReducer, type RunActivityAction, type RunActivityState } from './run-activity'
 import {
@@ -74,7 +74,7 @@ interface AppState extends SessionRuntimeState {
   setStreamRunMode: (sessionId: string, mode: RunMode | undefined) => void
   addPendingToolCall: (sessionId: string, tc: ToolCallInfo) => void
   resolveToolCall: (sessionId: string, toolCallId: string, toolName: string, output: string, metadata?: Record<string, unknown>, timing?: Partial<ToolCallInfo>) => void
-  failToolCall: (sessionId: string, toolCallId: string, toolName: string, error: string, status?: Extract<ToolCallInfo['status'], 'error' | 'cancelled' | 'timed-out'>, timing?: Partial<ToolCallInfo>) => void
+  failToolCall: (sessionId: string, toolCallId: string, toolName: string, error: string, status?: Extract<ToolCallInfo['status'], 'error' | 'cancelled' | 'timed-out' | 'outcome-unknown'>, timing?: Partial<ToolCallInfo>) => void
   updateToolStatus: (sessionId: string, update: ToolCallInfo) => void
   failRunningToolCalls: (sessionId: string, error: string) => void
   updateSubagentActivity: (sessionId: string, activity: SubagentActivity) => void
@@ -83,7 +83,7 @@ interface AppState extends SessionRuntimeState {
   dispatchRunActivity: (sessionId: string, action: RunActivityAction) => void
   addApproval: (req: ApprovalRequest) => void
   setApprovals: (requests: ApprovalRequest[]) => void
-  removeApproval: (requestId: string) => void
+  removeApproval: (event: ApprovalResolvedEvent) => void
   removeApprovalsForSession: (sessionId: string) => void
   selectApproval: (req: ApprovalRequest | null) => void
   addUserQuestion: (request: UserQuestionRequest) => void
@@ -139,6 +139,38 @@ function updateRuntime(
     sessionRuntimes: { ...state.sessionRuntimes, [sessionId]: runtime },
     ...(state.activeSessionId === sessionId ? runtimeProjection(runtime) : {})
   }
+}
+
+function projectApprovalTool(
+  runtime: SessionRuntimeState,
+  request: ApprovalRequest,
+  status: Extract<ToolCallInfo['status'], 'awaiting-approval' | 'proposed' | 'denied'>,
+  at: number,
+  approvalOutcome?: ToolCallInfo['approvalOutcome']
+): Pick<SessionRuntimeState, 'streamSegments' | 'pendingToolCalls'> {
+  const matcher = (toolCall: ToolCallInfo): boolean => request.toolCallId
+    ? toolCall.toolCallId === request.toolCallId
+    : toolCall.toolName === request.toolName && (toolCall.status === 'proposed' || toolCall.status === 'awaiting-approval')
+  const existing = flattenToolCalls(runtime.streamSegments).find(matcher)
+  const base: ToolCallInfo = existing ?? {
+    ...(request.toolCallId ? { toolCallId: request.toolCallId } : {}),
+    toolName: request.toolName,
+    input: request.input,
+    status: 'proposed',
+    proposedAt: request.askedAt ?? at,
+    updatedAt: request.askedAt ?? at
+  }
+  const next = transitionToolCall(base, {
+    status,
+    approvalAskedAt: request.askedAt ?? base.approvalAskedAt ?? at,
+    ...(status === 'proposed' || status === 'denied' ? { approvalDecidedAt: at, approvalOutcome } : {}),
+    ...(status === 'denied' ? { completedAt: at } : {}),
+    updatedAt: at
+  })
+  const streamSegments = existing
+    ? updateToolInSegments(runtime.streamSegments, matcher, () => next)
+    : appendToolSegment(runtime.streamSegments, next)
+  return { streamSegments, pendingToolCalls: flattenToolCalls(streamSegments) }
 }
 
 const initialRuntime = createSessionRuntime()
@@ -283,7 +315,19 @@ export const useStore = create<AppState>((set, get) => ({
   setStreamRunMode: (sessionId, streamRunMode) => set((state) => updateRuntime(state, sessionId, (runtime) => ({ ...runtime, streamRunMode: streamRunMode ?? null }))),
 
   addPendingToolCall: (sessionId, tc) => set((state) => updateRuntime(state, sessionId, (runtime) => {
-    const streamSegments = appendToolSegment(runtime.streamSegments, tc)
+    const existing = flattenToolCalls(runtime.streamSegments).find((toolCall) =>
+      (tc.toolCallId !== undefined && toolCall.toolCallId === tc.toolCallId) || (!toolCall.toolCallId && toolCall.toolName === tc.toolName))
+    const streamSegments = existing
+      ? updateToolInSegments(
+          runtime.streamSegments,
+          (toolCall) => toolCall === existing,
+          (toolCall) => transitionToolCall(toolCall, {
+            ...tc,
+            status: toolCall.status === 'awaiting-approval' && tc.status === 'proposed' ? 'awaiting-approval' : tc.status,
+            input: Object.keys(tc.input).length > 0 ? tc.input : toolCall.input
+          })
+        )
+      : appendToolSegment(runtime.streamSegments, tc)
     return {
       ...runtime,
       streamSegments,
@@ -364,6 +408,7 @@ export const useStore = create<AppState>((set, get) => ({
     return {
       ...updateRuntime(state, req.sessionId, (runtime) => ({
         ...runtime,
+        ...projectApprovalTool(runtime, req, 'awaiting-approval', req.askedAt ?? Date.now()),
         runActivity: runActivityReducer(runtime.runActivity, { type: 'approval', request: req })
       })),
       approvalQueue,
@@ -381,6 +426,7 @@ export const useStore = create<AppState>((set, get) => ({
         ...sessionRuntimes,
         [request.sessionId]: {
           ...runtime,
+          ...projectApprovalTool(runtime, request, 'awaiting-approval', request.askedAt ?? Date.now()),
           runActivity: runActivityReducer(runtime.runActivity, { type: 'approval', request })
         }
       }
@@ -395,19 +441,20 @@ export const useStore = create<AppState>((set, get) => ({
         : null
     }
   }),
-  removeApproval: (requestId) => set((state) => {
-    const removed = state.approvalQueue.find((approval) => approval.requestId === requestId)
-    const queue = state.approvalQueue.filter((approval) => approval.requestId !== requestId)
+  removeApproval: (event) => set((state) => {
+    const removed = state.approvalQueue.find((approval) => approval.requestId === event.requestId)
+    const queue = state.approvalQueue.filter((approval) => approval.requestId !== event.requestId)
     const runtimeUpdate = removed
       ? updateRuntime(state, removed.sessionId, (runtime) => ({
           ...runtime,
-          runActivity: runActivityReducer(runtime.runActivity, { type: 'approval-resolved', requestId })
+          ...projectApprovalTool(runtime, removed, event.approved ? 'proposed' : 'denied', event.resolvedAt, event.approved ? 'allow' : 'deny'),
+          runActivity: runActivityReducer(runtime.runActivity, { type: 'approval-resolved', event })
         }))
       : {}
     return {
       ...runtimeUpdate,
       approvalQueue: queue,
-      selectedApproval: state.selectedApproval?.requestId === requestId
+      selectedApproval: state.selectedApproval?.requestId === event.requestId
         ? (queue.find((approval) => approval.sessionId === state.activeSessionId) ?? null)
         : state.selectedApproval
     }

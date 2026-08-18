@@ -260,3 +260,33 @@ void test('sub-agent observability translations cover lifecycle and disclosure s
     ]) assert.notEqual(t(language, key), key)
   }
 })
+
+void test('ToolCall lifecycle and Spill translations exist in both languages', () => {
+  const keys = [
+    'tool.status.proposed',
+    'tool.status.proposedDetail',
+    'tool.status.awaitingApproval',
+    'tool.status.awaitingApprovalDetail',
+    'tool.status.denied',
+    'tool.status.deniedDetail',
+    'tool.status.outcomeUnknown',
+    'tool.status.outcomeUnknownDetail',
+    'tool.group.proposed',
+    'tool.group.awaitingApproval',
+    'tool.group.outcomeUnknown',
+    'tool.spill.preview',
+    'tool.spill.fullResult',
+    'tool.spill.loadMore',
+    'tool.spill.loading',
+    'tool.spill.retry',
+    'tool.spill.error',
+    'tool.spill.eof',
+    'tool.spill.progress',
+    'tool.spill.unavailable'
+  ]
+  for (const language of ['zh', 'en'] as const) {
+    for (const key of keys) assert.notEqual(t(language, key, { count: 2, loaded: '1 KB', total: '2 KB', error: 'offline' }), key)
+  }
+  assert.match(t('zh', 'tool.status.outcomeUnknownDetail'), /重试前请先核实/)
+  assert.match(t('en', 'tool.status.outcomeUnknownDetail'), /before retrying/i)
+})

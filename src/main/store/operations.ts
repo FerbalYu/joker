@@ -4,6 +4,7 @@ import { appendFileSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync,
 import { join } from 'node:path'
 import { getJokerHomeDir } from './paths'
 import { withFileLock } from './atomic-json'
+import type { ChatMessage, ToolCallInfo, ToolCallStatus } from '@shared/types'
 
 /**
  * Causal operation journal: a per-session sidecar JSONL
@@ -68,6 +69,177 @@ export function readOperations(sessionId: string): OperationEvent[] {
     }
   }
   return events
+}
+
+export interface OperationToolCallProjection {
+  runId: string
+  toolCall: ToolCallInfo
+}
+
+export interface ToolCallProjectionOptions {
+  activeRunIds?: ReadonlySet<string>
+  pendingApprovalToolCallIds?: ReadonlySet<string>
+  assumeApprovalPending?: boolean
+}
+
+/**
+ * Projects the causal journal into the renderer's ToolCallInfo state model.
+ * The journal owns durable lifecycle facts; live approval activity decides
+ * whether an approval request is still actually pending in this process.
+ */
+export function projectToolCallsFromOperations(
+  events: readonly OperationEvent[],
+  options: ToolCallProjectionOptions = {}
+): OperationToolCallProjection[] {
+  const activeRunIds = options.activeRunIds ?? new Set<string>()
+  const pendingApprovalToolCallIds = options.pendingApprovalToolCallIds ?? new Set<string>()
+  const assumeApprovalPending = options.assumeApprovalPending ?? true
+  const calls = new Map<string, { runId: string; toolCall: ToolCallInfo }>()
+
+  const ensure = (runId: string, toolCallId: string, toolName = ''): ToolCallInfo => {
+    const key = `${runId}\0${toolCallId}`
+    const existing = calls.get(key)
+    if (existing) {
+      if (toolName && !existing.toolCall.toolName) existing.toolCall.toolName = toolName
+      return existing.toolCall
+    }
+    const toolCall: ToolCallInfo = { toolCallId, toolName, input: {}, status: 'proposed' }
+    calls.set(key, { runId, toolCall })
+    return toolCall
+  }
+
+  for (const event of events) {
+    if (event.type === 'tool-proposed') {
+      const toolCall = ensure(event.runId, event.toolCallId, event.toolName)
+      toolCall.toolName = event.toolName
+      toolCall.status = 'proposed'
+      toolCall.proposedAt = event.at
+      toolCall.updatedAt = event.at
+    } else if (event.type === 'approval-asked') {
+      const toolCall = ensure(event.runId, event.toolCallId)
+      toolCall.approvalAskedAt = event.at
+      toolCall.updatedAt = event.at
+      if (assumeApprovalPending || pendingApprovalToolCallIds.has(event.toolCallId)) toolCall.status = 'awaiting-approval'
+    } else if (event.type === 'approval-decided') {
+      const toolCall = ensure(event.runId, event.toolCallId)
+      toolCall.approvalDecidedAt = event.at
+      toolCall.approvalOutcome = event.outcome
+      toolCall.updatedAt = event.at
+      toolCall.status = event.outcome === 'deny' ? 'denied' : 'proposed'
+      if (event.outcome === 'deny') toolCall.completedAt = event.at
+    } else if (event.type === 'tool-started') {
+      const toolCall = ensure(event.runId, event.toolCallId, event.toolName)
+      toolCall.toolName = event.toolName
+      toolCall.status = 'running'
+      toolCall.startedAt = event.at
+      toolCall.updatedAt = event.at
+      toolCall.lastProgressAt = event.at
+    } else if (event.type === 'tool-result') {
+      const toolCall = ensure(event.runId, event.toolCallId)
+      toolCall.status = event.status
+      toolCall.completedAt = event.at
+      toolCall.updatedAt = event.at
+      toolCall.lastProgressAt = event.at
+      if (toolCall.startedAt !== undefined) toolCall.durationMs = Math.max(0, event.at - toolCall.startedAt)
+    }
+  }
+
+  for (const { runId, toolCall } of calls.values()) {
+    if (toolCall.status === 'running' && !activeRunIds.has(runId)) {
+      toolCall.status = 'outcome-unknown'
+      toolCall.error = 'TOOL_OUTCOME_UNKNOWN'
+      toolCall.errorCode = 'TOOL_OUTCOME_UNKNOWN'
+    }
+    if (toolCall.status === 'awaiting-approval' && !pendingApprovalToolCallIds.has(toolCall.toolCallId ?? '') && !assumeApprovalPending) {
+      toolCall.status = toolCall.approvalOutcome === 'deny' ? 'denied' : 'proposed'
+    }
+  }
+
+  return [...calls.values()]
+    .sort((left, right) => (left.toolCall.proposedAt ?? left.toolCall.updatedAt ?? 0) - (right.toolCall.proposedAt ?? right.toolCall.updatedAt ?? 0))
+    .map(({ runId, toolCall }) => ({ runId, toolCall: { ...toolCall } }))
+}
+
+export function projectToolCallsIntoMessages(
+  messages: readonly ChatMessage[],
+  projections: readonly OperationToolCallProjection[]
+): ChatMessage[] {
+  if (projections.length === 0) return messages.map((message) => ({ ...message }))
+  const byId = new Map(projections.flatMap((projection) => projection.toolCall.toolCallId ? [[projection.toolCall.toolCallId, projection]] : []))
+  const used = new Set<string>()
+  const mergeToolCall = (toolCall: ToolCallInfo): ToolCallInfo => {
+    const toolCallId = toolCall.toolCallId
+    const projection = toolCallId ? byId.get(toolCallId) : undefined
+    if (!projection || !toolCallId) return toolCall
+    used.add(toolCallId)
+    return mergeToolCallProjection(toolCall, projection.toolCall)
+  }
+  const projectedMessages = messages.map((message) => {
+    if (message.role !== 'assistant') return { ...message }
+    const toolCalls = message.toolCalls?.map(mergeToolCall)
+    const segments = message.segments?.map((segment) => segment.type === 'tools'
+      ? { ...segment, tools: segment.tools.map(mergeToolCall) }
+      : { ...segment })
+    return {
+      ...message,
+      ...(toolCalls ? { toolCalls } : {}),
+      ...(segments ? { segments } : {})
+    }
+  })
+
+  const unmatched = projections.filter((projection) => {
+    const toolCallId = projection.toolCall.toolCallId
+    return toolCallId && !used.has(toolCallId)
+  })
+  const grouped = new Map<string, OperationToolCallProjection[]>()
+  for (const projection of unmatched) {
+    const group = grouped.get(projection.runId) ?? []
+    group.push(projection)
+    grouped.set(projection.runId, group)
+  }
+  for (const [runId, group] of grouped) {
+    const tools = group.map((projection) => ({ ...projection.toolCall }))
+    const createdAt = Math.min(...tools.map((toolCall) => toolCall.proposedAt ?? toolCall.updatedAt ?? Date.now()))
+    projectedMessages.push({
+      id: `operation-journal-${runId}`,
+      role: 'assistant',
+      content: '',
+      toolCalls: tools,
+      segments: [{ type: 'tools', tools }],
+      createdAt
+    })
+  }
+  return projectedMessages
+}
+
+function mergeToolCallProjection(current: ToolCallInfo, projection: ToolCallInfo): ToolCallInfo {
+  const status = strongerToolCallStatus(current.status, projection.status)
+  return {
+    ...projection,
+    ...current,
+    status,
+    input: Object.keys(current.input).length > 0 ? current.input : projection.input,
+    ...(current.output !== undefined ? { output: current.output } : {}),
+    ...(current.metadata !== undefined ? { metadata: current.metadata } : {}),
+    proposedAt: projection.proposedAt ?? current.proposedAt,
+    approvalAskedAt: projection.approvalAskedAt ?? current.approvalAskedAt,
+    approvalDecidedAt: projection.approvalDecidedAt ?? current.approvalDecidedAt,
+    approvalOutcome: projection.approvalOutcome ?? current.approvalOutcome,
+    startedAt: projection.startedAt ?? current.startedAt,
+    completedAt: projection.completedAt ?? current.completedAt,
+    updatedAt: Math.max(current.updatedAt ?? 0, projection.updatedAt ?? 0) || undefined,
+    lastProgressAt: Math.max(current.lastProgressAt ?? 0, projection.lastProgressAt ?? 0) || undefined,
+    durationMs: Math.max(current.durationMs ?? 0, projection.durationMs ?? 0) || undefined,
+    error: status === 'outcome-unknown' ? 'TOOL_OUTCOME_UNKNOWN' : current.error ?? projection.error,
+    errorCode: status === 'outcome-unknown' ? 'TOOL_OUTCOME_UNKNOWN' : current.errorCode ?? projection.errorCode
+  }
+}
+
+function strongerToolCallStatus(current: ToolCallStatus, projected: ToolCallStatus): ToolCallStatus {
+  if (projected === 'outcome-unknown') return projected
+  if (['done', 'error', 'denied', 'cancelled', 'timed-out'].includes(projected)) return projected
+  if (['done', 'error', 'denied', 'cancelled', 'timed-out', 'outcome-unknown'].includes(current)) return current
+  return projected
 }
 
 export interface ToolResultSpillRef {

@@ -70,13 +70,13 @@ void test('approval activity reports owner scope, retained request, and pending 
   registry.cancel('request-b', { windowId: 1, sessionId: 's2', runId: 'r2' })
   unsubscribe()
 
-  assert.deepEqual(activity.map(({ type, requestId, webContentsId, sessionId, runId, pendingCount, request }) => ({
-    type, requestId, webContentsId, sessionId, runId, pendingCount, request
+  assert.deepEqual(activity.map(({ type, requestId, webContentsId, sessionId, runId, pendingCount, request, approved }) => ({
+    type, requestId, webContentsId, sessionId, runId, pendingCount, request, approved
   })), [
-    { type: 'pending', requestId: 'request-a', webContentsId: 1, sessionId: 's1', runId: 'r1', pendingCount: 1, request: first },
-    { type: 'pending', requestId: 'request-b', webContentsId: 1, sessionId: 's2', runId: 'r2', pendingCount: 1, request: second },
-    { type: 'resolved', requestId: 'request-a', webContentsId: 1, sessionId: 's1', runId: 'r1', pendingCount: 0, request: first },
-    { type: 'cancelled', requestId: 'request-b', webContentsId: 1, sessionId: 's2', runId: 'r2', pendingCount: 0, request: second }
+    { type: 'pending', requestId: 'request-a', webContentsId: 1, sessionId: 's1', runId: 'r1', pendingCount: 1, request: first, approved: undefined },
+    { type: 'pending', requestId: 'request-b', webContentsId: 1, sessionId: 's2', runId: 'r2', pendingCount: 1, request: second, approved: undefined },
+    { type: 'resolved', requestId: 'request-a', webContentsId: 1, sessionId: 's1', runId: 'r1', pendingCount: 0, request: first, approved: true },
+    { type: 'cancelled', requestId: 'request-b', webContentsId: 1, sessionId: 's2', runId: 'r2', pendingCount: 0, request: second, approved: false }
   ])
 })
 
@@ -94,13 +94,17 @@ void test('approval timeout removes the request and notifies the owner', async (
   const registry = new ApprovalRegistry(5)
   const resolved: boolean[] = []
   const terminal: unknown[] = []
-  const request = approvalRequest({ requestId: 'request-timeout' })
+  const request = approvalRequest({ requestId: 'request-timeout', toolCallId: 'call-timeout' })
   registry.add(request, (approved) => resolved.push(approved), (event) => terminal.push(event))
 
   await new Promise((resolve) => setTimeout(resolve, 20))
 
   assert.deepEqual(resolved, [false])
-  assert.deepEqual(terminal, [{ requestId: 'request-timeout', sessionId: 's1', runId: 'r1' }])
+  assert.equal((terminal[0] as { resolvedAt?: unknown } | undefined)?.resolvedAt && typeof (terminal[0] as { resolvedAt?: unknown }).resolvedAt, 'number')
+  assert.deepEqual(terminal.map((event) => {
+    const { resolvedAt: _resolvedAt, ...rest } = event as Record<string, unknown>
+    return rest
+  }), [{ requestId: 'request-timeout', sessionId: 's1', runId: 'r1', toolCallId: 'call-timeout', approved: false, reason: 'timeout' }])
   assert.deepEqual(registry.listPending(1), [])
 })
 
@@ -228,11 +232,12 @@ void test('approval gate retains the sanitized request and emits terminal remova
   }
   setApprovalMode('suggest', 931)
   const gate = createApprovalGate(win as never, 'recovery-session', 'recovery-run')
-  const pending = gate('Bash', { command: 'x'.repeat(501), nested: { untouched: true } })
+  const pending = gate('Bash', { command: 'x'.repeat(501), nested: { untouched: true } }, undefined, 'call-recovery')
   const request = sent[0]?.payload as ApprovalRequest
 
   assert.equal(sent[0]?.channel, 'approval:request')
   assert.equal(request.input.command, `${'x'.repeat(500)}... [truncated]`)
+  assert.equal(request.toolCallId, 'call-recovery')
   assert.deepEqual(request.input.nested, { untouched: true })
   assert.deepEqual(getApprovalRegistry().listPending(931), [request])
   assert.equal(resolveApproval(request.requestId, false, {
@@ -246,7 +251,11 @@ void test('approval gate retains the sanitized request and emits terminal remova
     payload: {
       requestId: request.requestId,
       sessionId: 'recovery-session',
-      runId: 'recovery-run'
+      runId: 'recovery-run',
+      toolCallId: 'call-recovery',
+      approved: false,
+      reason: 'resolved',
+      resolvedAt: (sent[1]?.payload as { resolvedAt: number }).resolvedAt
     }
   })
   cleanupApprovalWindow(930)
@@ -315,9 +324,11 @@ void test('explicit approval is sender and run bound and cannot be auto-approved
     toolName: 'GeneratedToolEnable',
     sessionId: 'promotion-session',
     runId: 'promotion-run',
+    toolCallId: 'call-promotion',
     input: { promotionId: 'promotion-1' }
   })
   assert.equal(sent.length, 1)
+  assert.equal(sent[0]?.toolCallId, 'call-promotion')
   assert.equal(resolveApproval(sent[0]!.requestId, true, { windowId: 952, sessionId: 'promotion-session', runId: 'promotion-run' }), false)
   assert.equal(resolveApproval(sent[0]!.requestId, true, { windowId: 951, sessionId: 'promotion-session', runId: 'wrong-run' }), false)
   assert.equal(resolveApproval(sent[0]!.requestId, true, { windowId: 951, sessionId: 'promotion-session', runId: 'promotion-run' }), true)

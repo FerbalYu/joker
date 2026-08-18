@@ -6,7 +6,7 @@
 //    real, observable tool execution through the fallback path on the shipped bundle.
 import { chromium } from 'playwright-core'
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { normalize } from 'node:path'
@@ -256,7 +256,7 @@ try {
   await runPhase({
     scenario: 'large-result-spill',
     seedFiles: { 'large-result.txt': ('中文🙂 large spill line\n').repeat(12_000) },
-    drive: async ({ page, providerRequests, consoleErrors, pageErrors, screenshot }, check) => {
+    drive: async ({ page, home, providerRequests, consoleErrors, pageErrors, screenshot }, check) => {
       await waitFor(async () => (await page.evaluate(() => window.joker.session.list())).length > 0, 20_000, 'initial spill session')
       const session = (await page.evaluate(() => window.joker.session.list()))[0]
       const projectId = (await page.evaluate(() => window.joker.project.get())).state?.activeProjectId
@@ -276,9 +276,51 @@ try {
       const parsedPage = toolResultJson(String(pageResult?.content ?? ''))
       const pageData = parsedPage ? JSON.parse(parsedPage.output) : null
       check('ToolResultRead returns byte cursor data', pageData?.offsetBytes === 0 && pageData?.contentBytes > 0 && pageData?.totalBytes > pageData?.contentBytes, pageData)
+
+      const groupToggle = page.locator('[data-tool-call-group-toggle]').first()
+      if (await groupToggle.count()) await groupToggle.click()
+      const spillCard = page.locator('[data-tool-card]').filter({ hasText: 'large-result.txt' }).first()
+      await spillCard.waitFor({ state: 'visible', timeout: 20_000 })
+      await spillCard.locator('button').first().click()
+      const spillPanel = spillCard.locator('[data-tool-spill]')
+      await spillPanel.waitFor({ state: 'visible', timeout: 20_000 })
+      check('Spill ToolCard shows the bounded preview separately', await spillCard.locator('[data-tool-spill-preview]').count() === 1)
+      const loadMore = spillCard.locator('[data-tool-spill-load-more]')
+      check('Spill ToolCard exposes load more before EOF', await loadMore.count() === 1)
+      check('Spill ToolCard load more is enabled for the active session', await loadMore.isEnabled(), await loadMore.evaluate((element) => element.outerHTML))
+      let loadingObserved = false
+      await Promise.all([
+        spillCard.locator('[data-tool-spill-loading]').waitFor({ state: 'attached', timeout: 5_000 }).then(() => { loadingObserved = true }),
+        loadMore.click()
+      ])
+      check('Spill ToolCard exposes loading while reading the next page', loadingObserved)
+      await spillCard.locator('[data-tool-spill-loading]').waitFor({ state: 'detached', timeout: 10_000 })
+      check('Spill ToolCard appends the first full-result page', await spillCard.locator('[data-tool-spill-content]').innerText().then((text) => text.includes('中文🙂 large spill line')))
+
+      const spillId = parsedRead.metadata.spill.id
+      const spillPath = join(home, '.joker', 'sessions', 'tool-results', session.id, `${spillId}.txt`)
+      const spillBackupPath = `${spillPath}.qa-backup`
+      await rename(spillPath, spillBackupPath)
+      await loadMore.click()
+      const spillError = spillCard.locator('[data-tool-spill-error]')
+      await spillError.waitFor({ state: 'visible', timeout: 10_000 })
+      check('Spill ToolCard exposes a retryable read error', /失败|Could not load/.test(await spillError.innerText()) && /重试|Retry/.test(await loadMore.innerText()))
+      await rename(spillBackupPath, spillPath)
+
+      for (let pageIndex = 0; pageIndex < 12 && await spillCard.locator('[data-tool-spill-eof]').count() === 0; pageIndex += 1) {
+        const progressBefore = await spillPanel.innerText()
+        await loadMore.click()
+        await waitFor(async () => {
+          if (await spillCard.locator('[data-tool-spill-eof]').count() > 0) return true
+          if (await spillCard.locator('[data-tool-spill-loading]').count() > 0) return false
+          if (await spillCard.locator('[data-tool-spill-error]').count() > 0) return false
+          return (await spillPanel.innerText()) !== progressBefore
+        }, 10_000, `Spill ToolCard page ${pageIndex + 2}`)
+      }
+      check('Spill ToolCard reaches EOF and removes load more', await spillCard.locator('[data-tool-spill-eof]').count() === 1 && await spillCard.locator('[data-tool-spill-load-more]').count() === 0)
       check('large spill phase leaves no renderer console errors', consoleErrors.length === 0, consoleErrors)
       check('large spill phase leaves no renderer page errors', pageErrors.length === 0, pageErrors)
-      await screenshot('large-spill-complete')
+      await screenshot('large-spill-toolcard-eof')
     }
   })
 
@@ -289,9 +331,18 @@ try {
       const now = Date.now()
       await mkdir(join(home, '.joker', 'sessions'), { recursive: true })
       await writeFile(join(home, '.joker', 'sessions', `${sessionId}.json`), JSON.stringify({
-        schemaVersion: 9,
-        revision: 1,
-        session: { id: sessionId, title: 'Unknown outcome recovery', createdAt: now, updatedAt: now, messages: [], pendingUserMessages: [], messageQueueRevision: 0, runActivity: { status: 'idle', revision: 0 } }
+        schemaVersion: 7,
+        data: {
+          id: sessionId,
+          title: 'Unknown outcome recovery',
+          createdAt: now,
+          updatedAt: now,
+          messages: [],
+          pendingUserMessages: [],
+          messageQueueRevision: 0,
+          runActivity: { state: 'idle', terminalRevision: 0, seenTerminalRevision: 0 },
+          projectId: 'runtime-contract-workspace'
+        }
       }, null, 2))
       const input = { filePath: 'unknown-outcome.txt', content: 'must not be written twice' }
       const canonical = JSON.stringify(Object.fromEntries(Object.entries(input).sort(([left], [right]) => left.localeCompare(right))))
@@ -310,10 +361,22 @@ try {
     },
     drive: async ({ page, home, project, screenshot, providerRequests, consoleErrors, pageErrors }, check) => {
       await waitFor(async () => (await page.evaluate(() => window.joker.session.list())).length > 0, 20_000, 'initial recovery session')
-      const session = (await page.evaluate(() => window.joker.session.list()))[0]
+      const sessions = await page.evaluate(() => window.joker.session.list())
+      const session = sessions.find((candidate) => candidate.title === 'Unknown outcome recovery')
+      check('seeded recovery session is accepted by the current session schema', Boolean(session), sessions)
       const projectId = (await page.evaluate(() => window.joker.project.get())).state?.activeProjectId
       const bound = await page.evaluate(({ sessionId, projectId }) => window.joker.session.setProject(sessionId, projectId), { sessionId: session.id, projectId })
       check('unknown-outcome session is bound to the seeded workspace', Boolean(bound))
+      const sessionRow = page.locator(`[data-session-id="${session.id}"]`)
+      await sessionRow.locator('button').first().click()
+      await sessionRow.locator('button').first().waitFor({ state: 'visible' })
+      const unknownCard = page.locator('[data-tool-card][data-tool-status="outcome-unknown"]').first()
+      await unknownCard.waitFor({ state: 'visible', timeout: 20_000 })
+      check('interrupted journal projects an outcome-unknown ToolCard on startup', await unknownCard.locator('[data-tool-outcome-unknown]').count() === 1)
+      check('outcome-unknown ToolCard is never rendered as running', await unknownCard.locator('[data-tool-state-icon="outcome-unknown"]').count() === 1 && await unknownCard.locator('[data-tool-state-icon="running"]').count() === 0)
+      const projectedSession = await page.evaluate((sessionId) => window.joker.session.get(sessionId), session.id)
+      check('session:get returns TOOL_OUTCOME_UNKNOWN as an independent terminal state', projectedSession.messages.some((message) => message.toolCalls?.some((tool) => tool.toolCallId === 'interrupted-write' && tool.status === 'outcome-unknown' && tool.errorCode === 'TOOL_OUTCOME_UNKNOWN')))
+      await screenshot('unknown-outcome-startup')
       const now = Date.now()
       const input = { filePath: 'unknown-outcome.txt', content: 'must not be written twice' }
       const canonical = JSON.stringify(Object.fromEntries(Object.entries(input).sort(([left], [right]) => left.localeCompare(right))))

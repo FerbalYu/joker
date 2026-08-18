@@ -26,7 +26,7 @@ export function deriveResearchProgress(
 
   if (tools.some((tool) => tool.status === 'error')) return { stage: 'error', searchCount, readCount }
   if (tools.some((tool) => tool.toolName === 'PresentResearchReport' && tool.status === 'done' && ResearchReportSchema.safeParse(tool.metadata?.researchReport).success)) return { stage: 'completed', searchCount, readCount }
-  if (!streaming && tools.some((tool) => tool.status === 'running')) return { stage: 'stopped', searchCount, readCount }
+  if (!streaming && tools.some((tool) => ['proposed', 'awaiting-approval', 'running'].includes(tool.status))) return { stage: 'stopped', searchCount, readCount }
   if (tools.some((tool) => tool.toolName === 'PresentResearchReport')) return { stage: 'synthesizing', searchCount, readCount }
   if (tools.some((tool) => tool.toolName === 'WebRead')) return { stage: 'reading', searchCount, readCount }
   if (tools.some((tool) => tool.toolName === 'WebSearch')) return { stage: 'searching', searchCount, readCount }

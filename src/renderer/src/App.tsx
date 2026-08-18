@@ -442,11 +442,9 @@ export default function App(): React.JSX.Element {
               toolCallId: event.toolCallId,
               toolName: event.toolName,
               input: event.input,
-              status: 'running',
-              startedAt: event.startedAt,
-              updatedAt: event.updatedAt,
-              lastProgressAt: event.lastProgressAt,
-              deadlineAt: event.deadlineAt
+              status: 'proposed',
+              proposedAt: event.proposedAt,
+              updatedAt: event.updatedAt
             })
             break
           case 'tool-status':
@@ -455,12 +453,18 @@ export default function App(): React.JSX.Element {
               toolName: event.toolName,
               input: {},
               status: event.status,
+              proposedAt: event.proposedAt,
+              approvalAskedAt: event.approvalAskedAt,
+              approvalDecidedAt: event.approvalDecidedAt,
+              approvalOutcome: event.approvalOutcome,
               startedAt: event.startedAt,
+              completedAt: event.completedAt,
               updatedAt: event.updatedAt,
               lastProgressAt: event.lastProgressAt,
               deadlineAt: event.deadlineAt,
               durationMs: event.durationMs,
-              error: event.error
+              error: event.error,
+              errorCode: event.errorCode
             })
             break
           case 'tool-result':
@@ -514,7 +518,7 @@ export default function App(): React.JSX.Element {
     removeApprovalListener = window.joker.approval.onRequest((req: ApprovalRequest) => {
       addApproval(req)
     })
-    removeApprovalResolvedListener = window.joker.approval.onResolved((event) => removeApproval(event.requestId))
+    removeApprovalResolvedListener = window.joker.approval.onResolved((event) => removeApproval(event))
     void window.joker.userQuestion.listPending().then((requests) => {
       for (const request of requests) addUserQuestion(request)
     }).catch(() => undefined)

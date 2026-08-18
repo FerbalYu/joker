@@ -1,4 +1,4 @@
-import { readSpilledToolResult, readToolRecoveries, resolveToolRecovery } from '../store/operations'
+import { projectToolCallsFromOperations, projectToolCallsIntoMessages, readOperations, readSpilledToolResult, readToolRecoveries, resolveToolRecovery } from '../store/operations'
 import { BrowserWindow, ipcMain, webContents } from 'electron'
 import { compactSession } from '../agent/session-compact'
 import { getApprovalRegistry, subscribeApprovalActivity } from '../agent/approval'
@@ -69,8 +69,20 @@ export function registerSessionIpc(): void {
     return session
   })
 
-  ipcMain.handle('session:get', (_event, id: string) => {
-    return getSession(id)
+  ipcMain.handle('session:get', (event, id: string) => {
+    const session = getSession(id)
+    if (!session) return null
+    const scope = scopeForWebContents(event.sender.id)
+    const activeRunIds = new Set((scope ? listActiveRuns(scope.browserWindowId) : []).filter((run) => run.sessionId === id).map((run) => run.runId))
+    const pendingApprovalToolCallIds = new Set(getApprovalRegistry().listPending(event.sender.id)
+      .filter((request) => request.sessionId === id && request.toolCallId)
+      .map((request) => request.toolCallId!))
+    const projections = projectToolCallsFromOperations(readOperations(id), {
+      activeRunIds,
+      pendingApprovalToolCallIds,
+      assumeApprovalPending: false
+    }).filter((projection) => !activeRunIds.has(projection.runId))
+    return { ...session, messages: projectToolCallsIntoMessages(session.messages, projections) }
   })
 
   ipcMain.handle('session:list', () => {

@@ -14,6 +14,8 @@ import {
   spillToolResult,
   readSpilledToolResult,
   cleanupSpilledToolResults,
+  projectToolCallsFromOperations,
+  projectToolCallsIntoMessages,
   toolInputFingerprint,
   unknownOutcomeGuard,
   setOperationsDirForTests,
@@ -47,6 +49,81 @@ void test('append and read round-trip preserves event order', () => {
     const raw = readFileSync(operationsPath('session-a'), 'utf8')
     assert.equal(raw.trim().split('\n').length, 5)
   })
+})
+
+void test('journal lifecycle projects proposed, approval, running, and terminal facts in order', () => {
+  const events: OperationEvent[] = [
+    { type: 'tool-proposed', at: 10, runId: 'run-projection', toolCallId: 'call-projection', toolName: 'Write' },
+    { type: 'approval-asked', at: 20, runId: 'run-projection', toolCallId: 'call-projection' },
+    { type: 'approval-decided', at: 30, runId: 'run-projection', toolCallId: 'call-projection', outcome: 'allow' },
+    { type: 'tool-started', at: 40, runId: 'run-projection', toolCallId: 'call-projection', toolName: 'Write' },
+    { type: 'tool-result', at: 55, runId: 'run-projection', toolCallId: 'call-projection', status: 'done' }
+  ]
+  const [projection] = projectToolCallsFromOperations(events)
+  assert.equal(projection?.runId, 'run-projection')
+  assert.deepEqual(projection?.toolCall, {
+    toolCallId: 'call-projection',
+    toolName: 'Write',
+    input: {},
+    status: 'done',
+    proposedAt: 10,
+    approvalAskedAt: 20,
+    approvalDecidedAt: 30,
+    approvalOutcome: 'allow',
+    startedAt: 40,
+    completedAt: 55,
+    updatedAt: 55,
+    lastProgressAt: 55,
+    durationMs: 15
+  })
+})
+
+void test('approval activity decides whether an asked approval is still pending', () => {
+  const events: OperationEvent[] = [
+    { type: 'tool-proposed', at: 1, runId: 'run-approval', toolCallId: 'call-approval', toolName: 'Bash' },
+    { type: 'approval-asked', at: 2, runId: 'run-approval', toolCallId: 'call-approval' }
+  ]
+  assert.equal(projectToolCallsFromOperations(events, {
+    assumeApprovalPending: false,
+    pendingApprovalToolCallIds: new Set(['call-approval'])
+  })[0]?.toolCall.status, 'awaiting-approval')
+  assert.equal(projectToolCallsFromOperations(events, {
+    assumeApprovalPending: false,
+    pendingApprovalToolCallIds: new Set()
+  })[0]?.toolCall.status, 'proposed')
+})
+
+void test('started tools without a durable result become outcome-unknown only after their run is inactive', () => {
+  const events: OperationEvent[] = [
+    { type: 'tool-proposed', at: 1, runId: 'run-interrupted', toolCallId: 'call-interrupted', toolName: 'Bash' },
+    { type: 'approval-decided', at: 2, runId: 'run-interrupted', toolCallId: 'call-interrupted', outcome: 'allow' },
+    { type: 'tool-started', at: 3, runId: 'run-interrupted', toolCallId: 'call-interrupted', toolName: 'Bash' }
+  ]
+  const inactive = projectToolCallsFromOperations(events)[0]?.toolCall
+  assert.equal(inactive?.status, 'outcome-unknown')
+  assert.equal(inactive?.errorCode, 'TOOL_OUTCOME_UNKNOWN')
+  const active = projectToolCallsFromOperations(events, { activeRunIds: new Set(['run-interrupted']) })[0]?.toolCall
+  assert.equal(active?.status, 'running')
+  assert.equal(active?.errorCode, undefined)
+})
+
+void test('journal-only calls synthesize a ToolCard message and merge stronger recovery state into saved calls', () => {
+  const projections = projectToolCallsFromOperations([
+    { type: 'tool-proposed', at: 1, runId: 'run-existing', toolCallId: 'call-existing', toolName: 'Write' },
+    { type: 'tool-started', at: 2, runId: 'run-existing', toolCallId: 'call-existing', toolName: 'Write' },
+    { type: 'tool-proposed', at: 3, runId: 'run-journal-only', toolCallId: 'call-journal-only', toolName: 'Read' }
+  ])
+  const messages = projectToolCallsIntoMessages([{
+    id: 'message-existing',
+    role: 'assistant',
+    content: '',
+    toolCalls: [{ toolCallId: 'call-existing', toolName: 'Write', input: { path: 'a.txt' }, status: 'running' }],
+    createdAt: 1
+  }], projections)
+  assert.equal(messages[0]?.toolCalls?.[0]?.status, 'outcome-unknown')
+  assert.deepEqual(messages[0]?.toolCalls?.[0]?.input, { path: 'a.txt' })
+  assert.equal(messages[1]?.id, 'operation-journal-run-journal-only')
+  assert.equal(messages[1]?.toolCalls?.[0]?.status, 'proposed')
 })
 
 void test('classify: proposed without started is TOOL_NOT_STARTED', () => {

@@ -5,6 +5,7 @@ import type {
   StreamEvent,
   StreamFlowState,
   ApprovalRequest,
+  ApprovalResolvedEvent,
   AppConfig,
   ChatMessage,
   ChatIntent,
@@ -90,8 +91,8 @@ const api = {
     respond: (requestId: string, approved: boolean, sessionId?: string, runId?: string): Promise<boolean> =>
       ipcRenderer.invoke('approval:response', { requestId, approved, sessionId, runId }),
     listPending: (): Promise<ApprovalRequest[]> => ipcRenderer.invoke('approval:list-pending'),
-    onResolved: (callback: (event: Pick<ApprovalRequest, 'requestId' | 'sessionId' | 'runId'>) => void): (() => void) => {
-      const listener = (_e: Electron.IpcRendererEvent, event: Pick<ApprovalRequest, 'requestId' | 'sessionId' | 'runId'>) => callback(event)
+    onResolved: (callback: (event: ApprovalResolvedEvent) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, event: ApprovalResolvedEvent) => callback(event)
       ipcRenderer.on('approval:resolved', listener)
       return () => ipcRenderer.removeListener('approval:resolved', listener)
     },

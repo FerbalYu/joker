@@ -73,6 +73,7 @@ export async function runDirectImageGeneration(options: {
   const messageId = crypto.randomUUID()
   const toolCallId = crypto.randomUUID()
   const input = { prompt }
+  const proposedAt = Date.now()
 
   await onEvent({ type: 'message-start', sessionId, runId, messageId, runMode: 'chat' })
   await onEvent({
@@ -81,13 +82,15 @@ export async function runDirectImageGeneration(options: {
     runId,
     toolCallId,
     toolName: 'GenerateImage',
-    input
+    input,
+    proposedAt,
+    updatedAt: proposedAt
   })
 
   try {
     const tool = options.tool ?? imageTools[0]
     if (!tool) throw new Error('GenerateImage tool is unavailable')
-    const result = await executeToolDefinition(tool, input, context)
+    const result = await executeToolDefinition(tool, input, context, context.abortSignal, toolCallId)
     const denied = result.metadata?.['terminalStatus'] === 'denied'
     await onEvent({
       type: 'tool-result',

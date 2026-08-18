@@ -1,4 +1,5 @@
-import type { ApprovalRequest, GoalState, RunMode, StreamEvent, ToolCallInfo } from '@shared/types'
+import { transitionToolCall } from '../../shared/types'
+import type { ApprovalRequest, ApprovalResolvedEvent, GoalState, RunMode, StreamEvent, ToolCallInfo } from '@shared/types'
 import type { Language } from './i18n'
 
 export type RunActivityPhase =
@@ -45,7 +46,7 @@ export type RunActivityAction =
       goal?: GoalState
     }
   | { type: 'approval'; request: ApprovalRequest }
-  | { type: 'approval-resolved'; requestId: string }
+  | { type: 'approval-resolved'; event: ApprovalResolvedEvent }
   | { type: 'abort-request' }
   | RunActivityStreamEvent
 
@@ -88,18 +89,34 @@ export function runActivityReducer(state: RunActivityState, action: RunActivityA
   if (action.type === 'abort-request') return { ...state, phase: 'cancelling' }
 
   if (action.type === 'approval') {
+    const now = action.request.askedAt ?? Date.now()
+    const toolCalls = updateApprovalTool(state.toolCalls, action.request, (toolCall) => transitionToolCall(toolCall, {
+      status: 'awaiting-approval',
+      approvalAskedAt: toolCall.approvalAskedAt ?? now,
+      updatedAt: Math.max(toolCall.updatedAt ?? 0, now)
+    }))
     return {
       ...state,
       phase: 'awaiting-approval',
+      toolCalls,
       approval: action.request
     }
   }
 
   if (action.type === 'approval-resolved') {
-    if (state.approval?.requestId !== action.requestId) return state
+    if (state.approval?.requestId !== action.event.requestId) return state
+    const now = action.event.resolvedAt
+    const toolCalls = updateApprovalTool(state.toolCalls, state.approval, (toolCall) => transitionToolCall(toolCall, {
+      status: action.event.approved ? 'proposed' : 'denied',
+      approvalDecidedAt: now,
+      approvalOutcome: action.event.approved ? 'allow' : 'deny',
+      completedAt: action.event.approved ? toolCall.completedAt : now,
+      updatedAt: Math.max(toolCall.updatedAt ?? 0, now)
+    }))
     return {
       ...state,
-      phase: state.toolCalls.some((toolCall) => toolCall.status === 'running') ? 'running-tools' : 'waiting-model',
+      phase: phaseForToolCalls(toolCalls),
+      toolCalls,
       approval: null
     }
   }
@@ -120,42 +137,50 @@ export function runActivityReducer(state: RunActivityState, action: RunActivityA
     case 'token':
       return { ...state, phase: 'streaming-text', approval: null }
     case 'tool-call': {
-      const now = action.startedAt ?? action.updatedAt ?? Date.now()
+      const now = action.proposedAt ?? action.updatedAt ?? Date.now()
       const toolCall: ToolCallInfo = {
         toolCallId: action.toolCallId,
         toolName: action.toolName,
         input: action.input,
-        status: 'running',
-        startedAt: now,
-        updatedAt: action.updatedAt ?? now,
-        lastProgressAt: action.lastProgressAt ?? now,
-        deadlineAt: action.deadlineAt
+        status: 'proposed',
+        proposedAt: now,
+        updatedAt: action.updatedAt ?? now
       }
       return {
         ...state,
-        phase: 'running-tools',
+        phase: state.approval ? 'awaiting-approval' : 'waiting-model',
         toolCalls: upsertToolCall(state.toolCalls, toolCall),
-        approval: null
+        approval: state.approval
       }
     }
     case 'tool-status': {
-      const toolCalls = state.toolCalls.map((toolCall) => sameToolCall(toolCall, action.toolCallId, action.toolName)
-        ? {
-            ...toolCall,
-            status: action.status,
-            startedAt: action.startedAt ?? toolCall.startedAt,
-            updatedAt: action.updatedAt,
-            lastProgressAt: action.lastProgressAt ?? toolCall.lastProgressAt,
-            deadlineAt: action.deadlineAt ?? toolCall.deadlineAt,
-            durationMs: action.durationMs ?? toolCall.durationMs,
-            error: action.error ?? toolCall.error
-          }
-        : toolCall)
+      const existing = state.toolCalls.find((toolCall) => sameToolCall(toolCall, action.toolCallId, action.toolName))
+      const next = transitionToolCall(existing ?? {
+        toolCallId: action.toolCallId,
+        toolName: action.toolName,
+        input: {},
+        status: 'proposed'
+      }, {
+        status: action.status,
+        proposedAt: action.proposedAt,
+        approvalAskedAt: action.approvalAskedAt,
+        approvalDecidedAt: action.approvalDecidedAt,
+        approvalOutcome: action.approvalOutcome,
+        startedAt: action.startedAt,
+        completedAt: action.completedAt,
+        updatedAt: action.updatedAt,
+        lastProgressAt: action.lastProgressAt,
+        deadlineAt: action.deadlineAt,
+        durationMs: action.durationMs,
+        error: action.error,
+        errorCode: action.errorCode
+      })
+      const toolCalls = upsertToolCall(state.toolCalls, next)
       return {
         ...state,
-        phase: toolCalls.some((toolCall) => toolCall.status === 'running') ? 'running-tools' : 'waiting-model',
+        phase: phaseForToolCalls(toolCalls, state.approval),
         toolCalls,
-        approval: null
+        approval: state.approval
       }
     }
     case 'tool-result':
@@ -163,7 +188,12 @@ export function runActivityReducer(state: RunActivityState, action: RunActivityA
         status: 'done',
         output: action.output,
         metadata: action.metadata,
+        proposedAt: action.proposedAt,
+        approvalAskedAt: action.approvalAskedAt,
+        approvalDecidedAt: action.approvalDecidedAt,
+        approvalOutcome: action.approvalOutcome,
         startedAt: action.startedAt,
+        completedAt: action.completedAt ?? action.updatedAt,
         updatedAt: action.updatedAt,
         lastProgressAt: action.lastProgressAt,
         deadlineAt: action.deadlineAt,
@@ -174,7 +204,13 @@ export function runActivityReducer(state: RunActivityState, action: RunActivityA
         status: action.status ?? 'error',
         output: action.error,
         error: action.error,
+        errorCode: action.errorCode,
+        proposedAt: action.proposedAt,
+        approvalAskedAt: action.approvalAskedAt,
+        approvalDecidedAt: action.approvalDecidedAt,
+        approvalOutcome: action.approvalOutcome,
         startedAt: action.startedAt,
+        completedAt: action.completedAt ?? action.updatedAt,
         updatedAt: action.updatedAt,
         lastProgressAt: action.lastProgressAt,
         deadlineAt: action.deadlineAt,
@@ -245,24 +281,60 @@ export function toRunActivityViewModel(state: RunActivityState, language: Langua
 function upsertToolCall(toolCalls: ToolCallInfo[], next: ToolCallInfo): ToolCallInfo[] {
   const index = toolCalls.findIndex((toolCall) => sameToolCall(toolCall, next.toolCallId, next.toolName))
   if (index === -1) return [...toolCalls, next]
-  return toolCalls.map((toolCall, toolIndex) => toolIndex === index ? next : toolCall)
+  return toolCalls.map((toolCall, toolIndex) => toolIndex === index ? mergeToolCall(toolCall, next) : toolCall)
 }
 
 function settleToolCall(
   state: RunActivityState,
   toolCallId: string,
   toolName: string,
-  result: Partial<Pick<ToolCallInfo, 'status' | 'output' | 'metadata' | 'startedAt' | 'updatedAt' | 'lastProgressAt' | 'deadlineAt' | 'durationMs' | 'error'>> & Pick<ToolCallInfo, 'status'>
+  result: Partial<ToolCallInfo> & Pick<ToolCallInfo, 'status'>
 ): RunActivityState {
-  const toolCalls = state.toolCalls.map((toolCall) => sameToolCall(toolCall, toolCallId, toolName)
-    ? { ...toolCall, ...result }
-    : toolCall)
+  const existing = state.toolCalls.find((toolCall) => sameToolCall(toolCall, toolCallId, toolName))
+  const next = transitionToolCall(existing ?? { toolCallId, toolName, input: {}, status: 'proposed' }, result)
+  const toolCalls = upsertToolCall(state.toolCalls, next)
   return {
     ...state,
-    phase: toolCalls.some((toolCall) => toolCall.status === 'running') ? 'running-tools' : 'waiting-model',
+    phase: phaseForToolCalls(toolCalls, state.approval),
     toolCalls,
     approval: null
   }
+}
+
+function updateApprovalTool(
+  toolCalls: ToolCallInfo[],
+  request: ApprovalRequest,
+  updater: (toolCall: ToolCallInfo) => ToolCallInfo
+): ToolCallInfo[] {
+  const exactIndex = request.toolCallId
+    ? toolCalls.findIndex((toolCall) => toolCall.toolCallId === request.toolCallId)
+    : -1
+  const fallbackIndex = exactIndex >= 0
+    ? exactIndex
+    : toolCalls.findLastIndex((toolCall) => toolCall.toolName === request.toolName && (toolCall.status === 'proposed' || toolCall.status === 'awaiting-approval'))
+  if (fallbackIndex >= 0) return toolCalls.map((toolCall, index) => index === fallbackIndex ? updater(toolCall) : toolCall)
+  const now = Date.now()
+  return [...toolCalls, updater({
+    ...(request.toolCallId ? { toolCallId: request.toolCallId } : {}),
+    toolName: request.toolName,
+    input: request.input,
+    status: 'proposed',
+    proposedAt: now,
+    updatedAt: now
+  })]
+}
+
+function mergeToolCall(current: ToolCallInfo, next: ToolCallInfo): ToolCallInfo {
+  if (current.status === 'awaiting-approval' && next.status === 'proposed') {
+    return transitionToolCall(current, { ...next, status: 'awaiting-approval', input: Object.keys(next.input).length > 0 ? next.input : current.input })
+  }
+  return transitionToolCall(current, { ...next, input: Object.keys(next.input).length > 0 ? next.input : current.input })
+}
+
+function phaseForToolCalls(toolCalls: ToolCallInfo[], approval?: ApprovalRequest | null): RunActivityPhase {
+  if (approval || toolCalls.some((toolCall) => toolCall.status === 'awaiting-approval')) return 'awaiting-approval'
+  if (toolCalls.some((toolCall) => toolCall.status === 'running')) return 'running-tools'
+  return 'waiting-model'
 }
 
 function sameToolCall(toolCall: ToolCallInfo, toolCallId: string | undefined, toolName: string): boolean {

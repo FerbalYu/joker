@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   FileText,
   FilePen,
@@ -20,7 +20,9 @@ import {
   Hammer,
   ShieldCheck,
   XCircle,
-  LockKeyhole
+  LockKeyhole,
+  AlertTriangle,
+  Clock3
 } from 'lucide-react'
 import type { GeneratedImageRef, GeneratedToolJobStatusView, ToolCallInfo } from '@shared/types'
 import { useStore } from '../store'
@@ -30,6 +32,7 @@ import { getToolOutputPreview } from '../tool-output-preview'
 import { getEditDiffPreview } from '../edit-diff'
 import { isInternalToolForgeTool } from '../tool-visibility'
 import { generatedToolJobProductState, isTransientGeneratedToolJobStatus } from './generated-tools/generated-tools-settings-state'
+import { appendSpillChunk, getToolResultSpill, initialSpillReadState, type SpillReadState, type ToolResultSpillRefView } from '../tool-spill'
 
 interface Props {
   toolCall: ToolCallInfo
@@ -66,14 +69,19 @@ export default function ToolCard({ toolCall, showForgeSummary = true }: Props): 
   const Icon = TOOL_ICONS[toolCall.toolName] ?? Wrench
   const isRunning = toolCall.status === 'running'
   const isDone = toolCall.status === 'done'
+  const isProposed = toolCall.status === 'proposed'
+  const isAwaitingApproval = toolCall.status === 'awaiting-approval'
+  const isOutcomeUnknown = toolCall.status === 'outcome-unknown'
   const editDiff = useMemo(() => toolCall.toolName === 'Edit' ? getEditDiffPreview(toolCall.metadata) : null, [toolCall.metadata, toolCall.toolName])
   const diffText = editDiff?.text ?? (typeof toolCall.metadata?.diff === 'string' ? toolCall.metadata.diff : '')
   const hasDiff = diffText.length > 0
   const generatedImages = useMemo(() => getGeneratedImages(toolCall.metadata), [toolCall.metadata])
+  const spill = useMemo(() => getToolResultSpill(toolCall.metadata), [toolCall.metadata])
   const internalForgeTool = isInternalToolForgeTool(toolCall.toolName)
-  const canExpand = !internalForgeTool && (toolCall.toolName !== 'GenerateImage' || !isDone) && (Boolean(toolCall.output) || hasDiff)
+  const canExpand = !internalForgeTool && (toolCall.toolName !== 'GenerateImage' || !isDone) && (Boolean(toolCall.output) || hasDiff || Boolean(spill))
 
   const language = useStore((s) => s.language)
+  const activeSessionId = useStore((s) => s.activeSessionId)
   const forgeSummary = useMemo(
     () => getToolForgeSummary(toolCall, language),
     [language, toolCall]
@@ -92,13 +100,9 @@ export default function ToolCard({ toolCall, showForgeSummary = true }: Props): 
 
   return (
     <div
-      className={`overflow-hidden rounded-lg border bg-[var(--color-surface)] shadow-[0_8px_24px_rgba(0,0,0,0.12)] transition-[border-color,box-shadow,background-color] ${
-        isRunning
-          ? 'border-[var(--color-accent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent),0_8px_24px_rgba(0,0,0,0.16)]'
-          : isDone
-            ? 'border-[var(--color-border)]'
-            : 'border-red-700'
-      }`}
+      data-tool-card
+      data-tool-status={toolCall.status}
+      className={`overflow-hidden rounded-lg border bg-[var(--color-surface)] shadow-[0_8px_24px_rgba(0,0,0,0.12)] transition-[border-color,box-shadow,background-color] ${toolCardBorderClass(toolCall.status)}`}
     >
       <button
         onClick={() => canExpand && setExpanded(!expanded)}
@@ -141,7 +145,10 @@ export default function ToolCard({ toolCall, showForgeSummary = true }: Props): 
               Browser
             </span>
           )}
-          {isRunning && <Loader2 size={14} className="animate-spin text-[var(--color-accent)]" />}
+          {isProposed && <Clock3 data-tool-state-icon="proposed" size={14} className="text-[var(--color-text-muted)]" />}
+          {isAwaitingApproval && <LockKeyhole data-tool-state-icon="awaiting-approval" size={14} className="text-amber-300" />}
+          {isOutcomeUnknown && <AlertTriangle data-tool-state-icon="outcome-unknown" size={14} className="text-red-300" />}
+          {isRunning && <Loader2 data-tool-state-icon="running" size={14} className="animate-spin text-[var(--color-accent)]" />}
           {hasDiff && isDone && <FileDiff size={14} className="text-[var(--color-accent)]" />}
           {canExpand && (expanded ? (
             <ChevronDown size={15} className="text-[var(--color-text-muted)]" />
@@ -150,6 +157,13 @@ export default function ToolCard({ toolCall, showForgeSummary = true }: Props): 
           ))}
         </span>
       </button>
+
+      {isOutcomeUnknown && (
+        <div data-tool-outcome-unknown className="border-t border-red-900/70 bg-red-950/25 px-3 py-2 text-xs text-red-200">
+          <p className="font-semibold">{t(language, 'tool.status.outcomeUnknown')}</p>
+          <p className="mt-1 leading-5 text-red-200/80">{t(language, 'tool.status.outcomeUnknownDetail')}</p>
+        </div>
+      )}
 
       {showForgeSummary && forgeSummary && (
         <ToolForgeSummary
@@ -166,24 +180,36 @@ export default function ToolCard({ toolCall, showForgeSummary = true }: Props): 
         </div>
       )}
 
-      {canExpand && expanded && <ToolExpandedContent toolCall={toolCall} language={language} diffText={diffText} />}
+      {canExpand && expanded && <ToolExpandedContent toolCall={toolCall} language={language} diffText={diffText} spill={spill} sessionId={activeSessionId} />}
     </div>
   )
 }
 
+function toolCardBorderClass(status: ToolCallInfo['status']): string {
+  if (status === 'running') return 'border-[var(--color-accent)] shadow-[0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent),0_8px_24px_rgba(0,0,0,0.16)]'
+  if (status === 'awaiting-approval') return 'border-amber-600/80 shadow-[0_0_0_1px_rgba(217,119,6,0.18),0_8px_24px_rgba(0,0,0,0.14)]'
+  if (status === 'outcome-unknown') return 'border-red-600 shadow-[0_0_0_1px_rgba(220,38,38,0.2),0_8px_24px_rgba(0,0,0,0.16)]'
+  if (status === 'done' || status === 'proposed') return 'border-[var(--color-border)]'
+  if (status === 'denied' || status === 'cancelled') return 'border-amber-800/80'
+  return 'border-red-700'
+}
+
 function toolActivityView(toolCall: ToolCallInfo, now: number, language: import('../i18n').Language): { level: string; label: string; title: string; className: string } | null {
+  if (toolCall.status === 'proposed') return { level: 'proposed', label: t(language, 'tool.status.proposed'), title: t(language, 'tool.status.proposedDetail'), className: 'text-[var(--color-text-muted)]' }
+  if (toolCall.status === 'awaiting-approval') return { level: 'awaiting-approval', label: t(language, 'tool.status.awaitingApproval'), title: t(language, 'tool.status.awaitingApprovalDetail'), className: 'text-amber-300' }
+  if (toolCall.status === 'outcome-unknown') return { level: 'outcome-unknown', label: t(language, 'tool.status.outcomeUnknown'), title: t(language, 'tool.status.outcomeUnknownDetail'), className: 'text-red-300' }
   const startedAt = toolCall.startedAt
   if (startedAt === undefined) {
     if (toolCall.status === 'timed-out') return { level: 'timed-out', label: t(language, 'tool.status.timedOut'), title: t(language, 'tool.status.timedOut'), className: 'text-red-400' }
     if (toolCall.status === 'cancelled') return { level: 'cancelled', label: t(language, 'tool.status.cancelled'), title: t(language, 'tool.status.cancelled'), className: 'text-amber-400' }
-    if (toolCall.status === 'denied') return { level: 'denied', label: language === 'zh' ? '已拒绝' : 'Denied', title: language === 'zh' ? '工具调用已被拒绝' : 'Tool call denied', className: 'text-amber-400' }
+    if (toolCall.status === 'denied') return { level: 'denied', label: t(language, 'tool.status.denied'), title: t(language, 'tool.status.deniedDetail'), className: 'text-amber-400' }
     return null
   }
   const elapsedMs = toolCall.durationMs ?? Math.max(0, now - startedAt)
   const progressAgeMs = Math.max(0, now - (toolCall.lastProgressAt ?? startedAt))
   const deadlineRemainingMs = toolCall.deadlineAt === undefined ? undefined : toolCall.deadlineAt - now
   const elapsed = formatToolDuration(elapsedMs)
-  if (toolCall.status === 'denied') return { level: 'denied', label: `${language === 'zh' ? '已拒绝' : 'Denied'} · ${elapsed}`, title: language === 'zh' ? '工具调用已被拒绝' : 'Tool call denied', className: 'text-amber-400' }
+  if (toolCall.status === 'denied') return { level: 'denied', label: `${t(language, 'tool.status.denied')} · ${elapsed}`, title: t(language, 'tool.status.deniedDetail'), className: 'text-amber-400' }
   if (toolCall.status === 'timed-out') return { level: 'timed-out', label: `${t(language, 'tool.status.timedOut')} · ${elapsed}`, title: t(language, 'tool.status.timedOutDetail', { elapsed }), className: 'text-red-400' }
   if (toolCall.status === 'cancelled') return { level: 'cancelled', label: `${t(language, 'tool.status.cancelled')} · ${elapsed}`, title: t(language, 'tool.status.cancelled'), className: 'text-amber-400' }
   if (toolCall.status !== 'running') return { level: toolCall.status, label: elapsed, title: t(language, 'tool.status.completedDetail', { elapsed }), className: 'text-[var(--color-text-muted)]' }
@@ -400,18 +426,114 @@ export function ToolForgeSummary({
   )
 }
 
-function ToolExpandedContent({ toolCall, language, diffText }: { toolCall: ToolCallInfo; language: import('../i18n').Language; diffText: string }): React.JSX.Element {
+function ToolExpandedContent({
+  toolCall,
+  language,
+  diffText,
+  spill,
+  sessionId
+}: {
+  toolCall: ToolCallInfo
+  language: import('../i18n').Language
+  diffText: string
+  spill: ToolResultSpillRefView | null
+  sessionId: string | null
+}): React.JSX.Element {
   const hasDiff = diffText.length > 0
   const outputPreview = toolCall.output ? getToolOutputPreview(toolCall.toolName, toolCall.output, language) : null
+  const requestRevisionRef = useRef(0)
+  const spillLoadingRef = useRef(false)
+  const [spillState, setSpillState] = useState<SpillReadState>(initialSpillReadState)
+  const [spillLoading, setSpillLoading] = useState(false)
+  const [spillError, setSpillError] = useState('')
+
+  useEffect(() => {
+    requestRevisionRef.current += 1
+    setSpillState(initialSpillReadState)
+    spillLoadingRef.current = false
+    setSpillLoading(false)
+    setSpillError('')
+  }, [sessionId, spill?.id])
+
+  const loadMoreSpill = async (): Promise<void> => {
+    if (!spill || !sessionId || spillLoadingRef.current || spillState.eof) return
+    const revision = ++requestRevisionRef.current
+    spillLoadingRef.current = true
+    setSpillLoading(true)
+    setSpillError('')
+    try {
+      const [chunk] = await Promise.all([
+        window.joker.session.readToolResult(sessionId, spill.id, spillState.nextOffsetBytes, 64_000),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 150))
+      ])
+      if (revision !== requestRevisionRef.current) return
+      if (!chunk) throw new Error(t(language, 'tool.spill.unavailable'))
+      setSpillState(appendSpillChunk(spillState, chunk))
+    } catch (error) {
+      if (revision !== requestRevisionRef.current) return
+      setSpillError(error instanceof Error ? error.message : String(error))
+    } finally {
+      if (revision === requestRevisionRef.current) {
+        spillLoadingRef.current = false
+        setSpillLoading(false)
+      }
+    }
+  }
 
   return (
     <div className="border-t border-[var(--color-border)]/70 px-2 py-1.5">
       {outputPreview && !(toolCall.toolName === 'Edit' && hasDiff) && (
         <div className={hasDiff ? 'mb-2' : undefined}>
-          <p className="mb-1 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'tool.output')}</p>
-          <pre className="max-w-full overflow-hidden whitespace-pre-wrap break-words rounded bg-[var(--color-bg)] p-2 text-xs text-[var(--color-text-secondary)]">
+          <p className="mb-1 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, spill ? 'tool.spill.preview' : 'tool.output')}</p>
+          <pre data-tool-spill-preview={spill ? '' : undefined} className="max-w-full overflow-hidden whitespace-pre-wrap break-words rounded bg-[var(--color-bg)] p-2 text-xs text-[var(--color-text-secondary)]">
             {outputPreview.text}
           </pre>
+        </div>
+      )}
+
+      {spill && (
+        <div data-tool-spill className={`${outputPreview ? 'mt-2' : ''} rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/55 p-2`}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{t(language, 'tool.spill.fullResult')}</p>
+              <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">
+                {t(language, 'tool.spill.progress', {
+                  loaded: formatBytes(spillState.loadedBytes),
+                  total: formatBytes(spillState.totalBytes ?? spill.bytes)
+                })}
+              </p>
+            </div>
+            {!spillState.eof && (
+              <button
+                data-tool-spill-load-more
+                type="button"
+                onClick={() => void loadMoreSpill()}
+                disabled={spillLoading || !sessionId}
+                className="inline-flex min-h-7 items-center gap-1.5 rounded-md border border-[var(--color-border-light)] px-2 text-[11px] font-medium text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {spillLoading && <Loader2 data-tool-spill-loading size={12} className="animate-spin text-[var(--color-accent)]" />}
+                {spillLoading ? t(language, 'tool.spill.loading') : t(language, spillError ? 'tool.spill.retry' : 'tool.spill.loadMore')}
+              </button>
+            )}
+          </div>
+          {spillState.content && (
+            <pre data-tool-spill-content className="mt-2 max-h-80 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-[#08090a] p-2 text-xs leading-5 text-[var(--color-text-secondary)]">
+              {spillState.content}
+            </pre>
+          )}
+          {spillError && (
+            <p data-tool-spill-error role="alert" className="mt-2 rounded border border-red-900/70 bg-red-950/25 px-2 py-1.5 text-[11px] text-red-300">
+              {t(language, 'tool.spill.error', { error: spillError })}
+            </p>
+          )}
+          {!sessionId && !spillError && (
+            <p data-tool-spill-error role="alert" className="mt-2 rounded border border-amber-800/70 bg-amber-950/20 px-2 py-1.5 text-[11px] text-amber-200">
+              {t(language, 'tool.spill.unavailable')}
+            </p>
+          )}
+          {spillState.eof && (
+            <p data-tool-spill-eof className="mt-2 text-[11px] text-emerald-400">{t(language, 'tool.spill.eof')}</p>
+          )}
         </div>
       )}
 
@@ -438,6 +560,12 @@ function ToolExpandedContent({ toolCall, language, diffText }: { toolCall: ToolC
       )}
     </div>
   )
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 function parseToolOutput(output: string | undefined): Record<string, unknown> | null {

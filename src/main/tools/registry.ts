@@ -111,6 +111,7 @@ export interface HostApprovalRequest {
   input: Record<string, unknown>
   sessionId: string
   runId: string
+  toolCallId?: string
 }
 
 export interface ToolExecutionLease { release(): void }
@@ -222,7 +223,8 @@ export interface ApprovalGate {
   (
     toolName: string,
     input: Record<string, unknown>,
-    tool?: Pick<ToolDefinition, 'risk' | 'source'>
+    tool?: Pick<ToolDefinition, 'risk' | 'source'>,
+    toolCallId?: string
   ): Promise<ApprovalDecision>
   requestExplicitApproval?: (request: HostApprovalRequest) => Promise<HostApprovalGrant | null>
 }
@@ -231,15 +233,21 @@ export interface ToolCallInfo {
   toolCallId?: string
   toolName: string
   input: Record<string, unknown>
-  status: 'running' | 'done' | 'error' | 'denied' | 'cancelled' | 'timed-out'
+  status: 'proposed' | 'awaiting-approval' | 'running' | 'done' | 'error' | 'denied' | 'cancelled' | 'timed-out' | 'outcome-unknown'
   result?: ToolResult
+  proposedAt?: number
+  approvalAskedAt?: number
+  approvalDecidedAt?: number
+  approvalOutcome?: 'allow' | 'deny'
   startedAt?: number
+  completedAt?: number
   updatedAt?: number
   lastProgressAt?: number
   deadlineAt?: number
   durationMs?: number
   heartbeat?: boolean
   error?: string
+  errorCode?: string
 }
 
 export interface ToolResult {
@@ -297,25 +305,38 @@ export async function executeToolDefinition(
     risk
   }
   let lifecycleState: unknown
+  const proposedAt = Date.now()
+  let approvalAskedAt: number | undefined
+  let approvalDecidedAt: number | undefined
+  let approvalOutcome: ApprovalDecision['outcome'] | undefined
   try {
     lifecycleState = definition.lifecycle
-      ? await boundedLifecycle('proposed', () => definition.lifecycle!.proposed(lifecycleEvent(Date.now())))
+      ? await boundedLifecycle('proposed', () => definition.lifecycle!.proposed(lifecycleEvent(proposedAt)))
       : undefined
     safeAudit(audit, { ...auditBase, stage: 'proposed', status: 'pending', arguments: input })
     const retrySemantics = definition.retrySemantics ?? (risk === 'read' ? 'read-only' : risk === 'write_local' ? 'verify-before-retry' : 'never-automatic')
     if (retrySemantics === 'idempotent-with-key' && !definition.idempotencyKey?.(input)?.trim()) throw new Error(`Tool ${definition.name} requires a non-empty idempotency key`)
     const executionMode = definition.executionMode ?? (risk === 'read' ? 'parallel-read' : 'exclusive')
     const fingerprint = toolInputFingerprint({ workspacePath: context.workspacePath, definition }, input)
-    context.operationJournal?.append({ type: 'tool-proposed', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId, toolName: definition.name, ...fingerprint, retrySemantics, executionMode })
+    context.operationJournal?.append({ type: 'tool-proposed', at: proposedAt, runId: context.runId ?? '', toolCallId: resolvedToolCallId, toolName: definition.name, ...fingerprint, retrySemantics, executionMode })
+    safeNotify(context.onToolCall, {
+      toolCallId: resolvedToolCallId,
+      toolName: definition.name,
+      input,
+      status: 'proposed',
+      proposedAt,
+      updatedAt: proposedAt
+    })
     let decision: ApprovalDecision
     let guardDenial: ToolGuardDenial | undefined
     try {
       if (generatedSource?.validationProfile !== 'user-owned-full-trust-v1') {
-        context.operationJournal?.append({ type: 'approval-asked', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId })
+        approvalAskedAt = Date.now()
+        context.operationJournal?.append({ type: 'approval-asked', at: approvalAskedAt, runId: context.runId ?? '', toolCallId: resolvedToolCallId })
       }
       decision = generatedSource?.validationProfile === 'user-owned-full-trust-v1'
         ? { outcome: 'allow', risk, reason: 'Generated Tool automatic execution' }
-        : await context.approvalGate(definition.name, input, definition)
+        : await context.approvalGate(definition.name, input, definition, resolvedToolCallId)
     } catch (error) {
       if (definition.lifecycle && lifecycleState !== undefined) {
         const deniedDecision: ApprovalDecision = {
@@ -333,7 +354,9 @@ export async function executeToolDefinition(
           denied: true
         })
       }
-      context.operationJournal?.append({ type: 'approval-decided', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId, outcome: 'deny' })
+      approvalDecidedAt = Date.now()
+      approvalOutcome = 'deny'
+      context.operationJournal?.append({ type: 'approval-decided', at: approvalDecidedAt, runId: context.runId ?? '', toolCallId: resolvedToolCallId, outcome: 'deny' })
       throw error
     }
     // Monotonic guards run at the final execution boundary: they can only
@@ -349,7 +372,20 @@ export async function executeToolDefinition(
         }
       }
     }
-    context.operationJournal?.append({ type: 'approval-decided', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId, outcome: decision.outcome })
+    approvalDecidedAt = Date.now()
+    approvalOutcome = decision.outcome
+    context.operationJournal?.append({ type: 'approval-decided', at: approvalDecidedAt, runId: context.runId ?? '', toolCallId: resolvedToolCallId, outcome: decision.outcome })
+    safeNotify(context.onToolCall, {
+      toolCallId: resolvedToolCallId,
+      toolName: definition.name,
+      input,
+      status: decision.outcome === 'deny' ? 'denied' : 'proposed',
+      proposedAt,
+      approvalAskedAt,
+      approvalDecidedAt,
+      approvalOutcome,
+      updatedAt: approvalDecidedAt
+    })
     lifecycleState = definition.lifecycle
       ? await boundedLifecycle('policyResolved', () => definition.lifecycle!.policyResolved(lifecycleState, {
           ...lifecycleEvent(Date.now()),
@@ -382,6 +418,11 @@ export async function executeToolDefinition(
         input,
         status: 'denied',
         result,
+        proposedAt,
+        approvalAskedAt,
+        approvalDecidedAt,
+        approvalOutcome,
+        completedAt: now,
         updatedAt: now,
         durationMs: 0
       })
@@ -406,13 +447,30 @@ export async function executeToolDefinition(
         ? await boundedLifecycle('started', () => definition.lifecycle!.started(lifecycleState, lifecycleEvent(startedAt)))
         : lifecycleState
       safeAudit(audit, { ...auditBase, stage: 'started', status: 'allowed', reason: decision.reason })
-      safeNotify(context.onToolCall, { toolCallId: resolvedToolCallId, toolName: definition.name, input, status: 'running', startedAt, updatedAt: startedAt, lastProgressAt: startedAt, deadlineAt })
+      safeNotify(context.onToolCall, {
+        toolCallId: resolvedToolCallId,
+        toolName: definition.name,
+        input,
+        status: 'running',
+        proposedAt,
+        approvalAskedAt,
+        approvalDecidedAt,
+        approvalOutcome,
+        startedAt,
+        updatedAt: startedAt,
+        lastProgressAt: startedAt,
+        deadlineAt
+      })
       heartbeat = setInterval(() => {
         safeNotify(context.onToolCall, {
           toolCallId: resolvedToolCallId,
           toolName: definition.name,
           input,
           status: 'running',
+          proposedAt,
+          approvalAskedAt,
+          approvalDecidedAt,
+          approvalOutcome,
           startedAt,
           updatedAt: Date.now(),
           lastProgressAt: startedAt,
@@ -500,7 +558,12 @@ export async function executeToolDefinition(
         input,
         status: 'done',
         result,
+        proposedAt,
+        approvalAskedAt,
+        approvalDecidedAt,
+        approvalOutcome,
         startedAt,
+        completedAt,
         updatedAt: completedAt,
         lastProgressAt: completedAt,
         deadlineAt,
@@ -535,7 +598,12 @@ export async function executeToolDefinition(
         toolName: definition.name,
         input,
         status,
+        proposedAt,
+        approvalAskedAt,
+        approvalDecidedAt,
+        approvalOutcome,
         startedAt,
+        completedAt,
         updatedAt: completedAt,
         lastProgressAt: startedAt,
         deadlineAt,

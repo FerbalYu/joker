@@ -57,7 +57,7 @@ export function updateRunningToolsInSegments(
     if (segment.type !== 'tools') return segment
     return {
       type: 'tools',
-      tools: segment.tools.map((tool) => tool.status === 'running' ? updater(tool) : tool)
+      tools: segment.tools.map((tool) => ['proposed', 'awaiting-approval', 'running'].includes(tool.status) ? updater(tool) : tool)
     }
   })
 }

@@ -1,5 +1,6 @@
 import { generateText, NoObjectGeneratedError, Output, type FinishReason, type LanguageModel } from 'ai'
 import { z } from 'zod'
+import { TERMINAL_TOOL_CALL_STATUSES } from '../../shared/types'
 import type { ChatMessage, StreamUsage, ToolCallInfo } from '../../shared/types'
 import { createLanguageModel } from '../providers'
 import { loadConfig, resolveActiveModel } from '../store/config'
@@ -216,7 +217,7 @@ function assertEvaluationInput(input: GoalEvaluationInput): void {
 }
 
 function findToolResult(message: ChatMessage, toolCallId: string): ToolCallInfo | undefined {
-  return toolCallsFromMessage(message).find((tool) => tool.toolCallId === toolCallId && tool.status !== 'running')
+  return toolCallsFromMessage(message).find((tool) => tool.toolCallId === toolCallId && TERMINAL_TOOL_CALL_STATUSES.has(tool.status))
 }
 
 function assistantText(message: ChatMessage): string {

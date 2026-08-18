@@ -281,10 +281,9 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             input: part.input as Record<string, unknown>,
-            status: 'running',
-            startedAt: now,
-            updatedAt: now,
-            lastProgressAt: now
+            status: 'proposed',
+            proposedAt: now,
+            updatedAt: now
           }
           const toolRepetition = toolRepetitionGuard.observe(part.toolName, part.input)
           if (toolRepetition.reminder) pendingToolReminder = toolRepetition.reminder
@@ -297,9 +296,8 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             input: part.input as Record<string, unknown>,
-            startedAt: now,
-            updatedAt: now,
-            lastProgressAt: now
+            proposedAt: now,
+            updatedAt: now
           })
         } else if (part.type === 'tool-result') {
           await flushStepBuffer(stepBuffer)
@@ -413,14 +411,13 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
             toolCallId,
             toolName: invoke.toolName,
             input: invoke.input,
-            status: 'running',
-            startedAt: now,
-            updatedAt: now,
-            lastProgressAt: now
+            status: 'proposed',
+            proposedAt: now,
+            updatedAt: now
           }
           toolCalls.push(toolCall)
           segments = appendToolSegment(segments, toolCall)
-          await onEvent({ type: 'tool-call', sessionId, runId, toolCallId, toolName: invoke.toolName, input: invoke.input, startedAt: now, updatedAt: now, lastProgressAt: now })
+          await onEvent({ type: 'tool-call', sessionId, runId, toolCallId, toolName: invoke.toolName, input: invoke.input, proposedAt: now, updatedAt: now })
           let output = 'Tool returned no output.'
           try {
             const toolResult = await executeTool.execute(invoke.input, { toolCallId, abortSignal: streamController.signal })

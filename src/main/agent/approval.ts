@@ -2,16 +2,10 @@ import { createHash } from 'node:crypto'
 import type { BrowserWindow } from 'electron'
 import type { ApprovalDecision, ApprovalGate, ToolDefinition } from '../tools/registry'
 import { classifyToolRisk, type ToolRisk } from '../tools/risk'
-import type { ApprovalRequest, RunMode } from '@shared/types'
+import type { ApprovalRequest, ApprovalResolvedEvent, RunMode } from '@shared/types'
 
 export type ApprovalMode = 'suggest' | 'auto-edit' | 'full-auto'
 export type ApprovalResolutionReason = 'resolved' | 'cancelled' | 'timeout'
-
-export interface ApprovalResolvedEvent {
-  requestId: string
-  sessionId: string
-  runId: string
-}
 
 export interface ApprovalActivityEvent {
   type: 'pending' | ApprovalResolutionReason
@@ -24,6 +18,7 @@ export interface ApprovalActivityEvent {
   windowId: number
   pendingCount: number
   request: ApprovalRequest
+  approved?: boolean
 }
 
 export type ApprovalActivityListener = (event: ApprovalActivityEvent) => void
@@ -45,6 +40,7 @@ export interface ExplicitApprovalGrant extends ApprovalScope {
 export interface ExplicitApprovalRequestOptions {
   toolName: string
   input: Record<string, unknown>
+  toolCallId?: string
   scope: ApprovalScope
   sendRequest: (request: ApprovalRequest) => void
   notifyResolved?: (event: ApprovalResolvedEvent) => void
@@ -147,21 +143,26 @@ export class ApprovalRegistry {
   private finish(pending: PendingApproval, approved: boolean, reason: ApprovalResolutionReason): void {
     this.pending.delete(pending.requestId)
     clearTimeout(pending.timer)
+    const resolvedAt = Date.now()
     pending.resolve(approved)
     const resolvedEvent: ApprovalResolvedEvent = {
       requestId: pending.requestId,
       sessionId: pending.sessionId,
-      runId: pending.runId
+      runId: pending.runId,
+      ...(pending.request.toolCallId ? { toolCallId: pending.request.toolCallId } : {}),
+      approved,
+      reason,
+      resolvedAt
     }
     try {
       pending.notifyResolved?.(resolvedEvent)
     } catch {
       // Resolution must complete even if the owning renderer disappears mid-notification.
     }
-    this.emitActivity(pending, reason)
+    this.emitActivity(pending, reason, approved)
   }
 
-  private emitActivity(pending: PendingApproval, type: ApprovalActivityEvent['type']): void {
+  private emitActivity(pending: PendingApproval, type: ApprovalActivityEvent['type'], approved?: boolean): void {
     const event: ApprovalActivityEvent = {
       type,
       requestId: pending.requestId,
@@ -171,7 +172,8 @@ export class ApprovalRegistry {
       webContentsId: pending.windowId,
       windowId: pending.windowId,
       pendingCount: this.countPendingScope(pending),
-      request: pending.request
+      request: pending.request,
+      ...(type === 'pending' ? {} : { approved: approved === true })
     }
     for (const listener of this.activityListeners) {
       try {
@@ -294,7 +296,8 @@ export function createApprovalGate(win: BrowserWindow, sessionId: string, runId?
   const gate: ApprovalGate = async (
     toolName: string,
     input: Record<string, unknown>,
-    tool?: Pick<ToolDefinition, 'risk' | 'source'>
+    tool?: Pick<ToolDefinition, 'risk' | 'source'>,
+    toolCallId?: string
   ): Promise<ApprovalDecision> => {
     const decision = evaluateToolPermission(registry.getMode(scope.windowId), runMode, toolName, tool, researchWebApproved)
     if (decision.action !== 'ask') {
@@ -308,6 +311,8 @@ export function createApprovalGate(win: BrowserWindow, sessionId: string, runId?
       windowId: scope.windowId,
       runId: scope.runId,
       sessionId: scope.sessionId,
+      ...(toolCallId ? { toolCallId } : {}),
+      askedAt: Date.now(),
       toolName: researchWebRequest ? 'ResearchWebAccess' : toolName,
       input: researchWebRequest
         ? { tools: ['WebSearch', 'WebRead'], firstCall: { toolName, input: sanitizeInput(toolName, input) } }
@@ -337,11 +342,12 @@ export function createApprovalGate(win: BrowserWindow, sessionId: string, runId?
       approvedByUser: approved
     }
   }
-  gate.requestExplicitApproval = ({ toolName, input, sessionId: requestedSessionId, runId: requestedRunId }) => {
+  gate.requestExplicitApproval = ({ toolName, input, sessionId: requestedSessionId, runId: requestedRunId, toolCallId }) => {
     if (requestedSessionId !== scope.sessionId || requestedRunId !== scope.runId) return Promise.resolve(null)
     return requestExplicitApproval({
       toolName,
       input,
+      toolCallId,
       scope,
       sendRequest: (request) => {
         if (win.isDestroyed() || win.webContents.isDestroyed()) throw new Error('Approval owner is unavailable')
@@ -361,6 +367,8 @@ export function requestExplicitApproval(options: ExplicitApprovalRequestOptions)
     windowId: options.scope.windowId,
     sessionId: options.scope.sessionId,
     runId: options.scope.runId,
+    ...(options.toolCallId ? { toolCallId: options.toolCallId } : {}),
+    askedAt: Date.now(),
     toolName: options.toolName,
     input: sanitizeInput(options.toolName, options.input)
   }

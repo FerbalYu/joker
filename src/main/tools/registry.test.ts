@@ -142,6 +142,8 @@ void test('generated tools reuse approval, audit, and observability lifecycle', 
     ['generated', 'tool-1', 'v1', 'report-1', 'finished']
   ])
   assert.deepEqual(observed.map((event) => [event.toolCallId, event.status]), [
+    ['call-generated', 'proposed'],
+    ['call-generated', 'proposed'],
     ['call-generated', 'running'],
     ['call-generated', 'done']
   ])
@@ -290,7 +292,7 @@ void test('host deadline settles a tool that never returns and records timed-out
     onToolCall: (event) => { observed.push(event) }
   }), /timed out/i)
 
-  assert.equal(observed[0]?.status, 'running')
+  assert.equal(observed[0]?.status, 'proposed')
   assert.ok(observed.some((event) => event.status === 'running' && event.deadlineAt !== undefined))
   assert.equal(observed.at(-1)?.status, 'timed-out')
   assert.equal(typeof observed.at(-1)?.durationMs, 'number')
@@ -403,10 +405,12 @@ void test('tool observability reports running and completion with the provider t
 
   assert.equal(result.output, 'observed')
   assert.deepEqual(events.map((event) => [event.toolCallId, event.status]), [
+    ['call-observed', 'proposed'],
+    ['call-observed', 'proposed'],
     ['call-observed', 'running'],
     ['call-observed', 'done']
   ])
-  assert.equal(typeof events[1]?.durationMs, 'number')
+  assert.equal(typeof events.at(-1)?.durationMs, 'number')
 })
 
 void test('scheduler implements fair shared reads, exclusive writes, cancellation, and independent lanes', async () => {

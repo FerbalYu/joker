@@ -171,17 +171,21 @@ void test('background approval changes only the matching runtime activity', () =
   resetStore()
   useStore.getState().dispatchRunActivity(sessionA, { type: 'send-accepted', runId: 'run-a', sessionId: sessionA, runMode: 'chat' })
   useStore.getState().dispatchRunActivity(sessionB, { type: 'send-accepted', runId: 'run-b', sessionId: sessionB, runMode: 'chat' })
+  useStore.getState().addPendingToolCall(sessionB, { toolCallId: 'call-b', toolName: 'Bash', input: {}, status: 'proposed', proposedAt: 1, updatedAt: 1 })
   useStore.getState().addApproval({
     requestId: 'approval-b',
     windowId: 1,
     runId: 'run-b',
     sessionId: sessionB,
+    toolCallId: 'call-b',
+    askedAt: 2,
     toolName: 'Bash',
     input: {}
   })
 
   assert.equal(useStore.getState().runActivity.phase, 'starting')
   assert.equal(useStore.getState().sessionRuntimes[sessionB]?.runActivity.phase, 'awaiting-approval')
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.pendingToolCalls[0]?.status, 'awaiting-approval')
   assert.equal(useStore.getState().selectedApproval, null)
   useStore.getState().setActiveSession(sessionB)
   assert.equal(useStore.getState().selectedApproval?.requestId, 'approval-b')
@@ -196,13 +200,52 @@ void test('pending approval snapshots hydrate and resolved approvals clear runti
     windowId: 1,
     runId: 'run-b',
     sessionId: sessionB,
+    toolCallId: 'call-b',
+    askedAt: 1,
     toolName: 'Bash',
     input: {}
   }])
   assert.equal(useStore.getState().sessionRuntimes[sessionB]?.runActivity.phase, 'awaiting-approval')
-  useStore.getState().removeApproval('approval-b')
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.pendingToolCalls[0]?.status, 'awaiting-approval')
+  useStore.getState().removeApproval({
+    requestId: 'approval-b',
+    sessionId: sessionB,
+    runId: 'run-b',
+    approved: true,
+    reason: 'resolved',
+    resolvedAt: 2
+  })
   assert.equal(useStore.getState().approvalQueue.length, 0)
   assert.equal(useStore.getState().sessionRuntimes[sessionB]?.runActivity.phase, 'waiting-model')
+  assert.equal(useStore.getState().sessionRuntimes[sessionB]?.pendingToolCalls[0]?.status, 'proposed')
+})
+
+void test('a denied approval terminates the matching rendered ToolCard without starting it', () => {
+  resetStore()
+  useStore.getState().addPendingToolCall(sessionA, { toolCallId: 'call-denied', toolName: 'Write', input: { path: 'a.txt' }, status: 'proposed', proposedAt: 1, updatedAt: 1 })
+  useStore.getState().addApproval({
+    requestId: 'approval-denied',
+    windowId: 1,
+    runId: 'run-a',
+    sessionId: sessionA,
+    toolCallId: 'call-denied',
+    askedAt: 2,
+    toolName: 'Write',
+    input: { path: 'a.txt' }
+  })
+  useStore.getState().removeApproval({
+    requestId: 'approval-denied',
+    sessionId: sessionA,
+    runId: 'run-a',
+    toolCallId: 'call-denied',
+    approved: false,
+    reason: 'resolved',
+    resolvedAt: 3
+  })
+  const toolCall = useStore.getState().sessionRuntimes[sessionA]?.pendingToolCalls[0]
+  assert.equal(toolCall?.status, 'denied')
+  assert.equal(toolCall?.startedAt, undefined)
+  assert.equal(toolCall?.completedAt, 3)
 })
 
 void test('session summary upserts and deletes stay incremental', () => {

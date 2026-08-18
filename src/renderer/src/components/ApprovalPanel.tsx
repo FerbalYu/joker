@@ -9,7 +9,6 @@ interface Props {
 }
 
 export default function ApprovalPanel({ approval }: Props): React.JSX.Element {
-  const removeApproval = useStore((s) => s.removeApproval)
   const language = useStore((s) => s.language)
   const [responding, setResponding] = useState(false)
   const respondingRef = useRef(false)
@@ -19,8 +18,7 @@ export default function ApprovalPanel({ approval }: Props): React.JSX.Element {
     respondingRef.current = true
     setResponding(true)
     try {
-      const accepted = await window.joker.approval.respond(approval.requestId, approved, approval.sessionId, approval.runId)
-      if (accepted) removeApproval(approval.requestId)
+      await window.joker.approval.respond(approval.requestId, approved, approval.sessionId, approval.runId)
     } finally {
       respondingRef.current = false
       setResponding(false)

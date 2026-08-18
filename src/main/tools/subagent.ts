@@ -136,13 +136,13 @@ export async function runSubagent({ prompt, context: extraContext, toolContext, 
               }
           next.status = info.status
           if (info.durationMs !== undefined) next.durationMs = info.durationMs
-          if (info.status !== 'running') next.completedAt = now
+          if (!['proposed', 'awaiting-approval', 'running'].includes(info.status)) next.completedAt = now
           if (info.error) next.error = boundedText(info.error, 320)
           const tools = [...activity.tools]
           if (existingIndex >= 0) tools[existingIndex] = next
           else tools.push(next)
           await emit({
-            phase: info.status === 'running' ? 'using-tool' : 'working',
+            phase: ['proposed', 'awaiting-approval', 'running'].includes(info.status) ? 'using-tool' : 'working',
             tools: tools.slice(-40)
           })
         }
@@ -217,7 +217,7 @@ function findToolActivity(tools: SubagentToolActivity[], toolCallId: string | un
     if (exact >= 0) return exact
   }
   for (let index = tools.length - 1; index >= 0; index -= 1) {
-    if (tools[index].toolName === toolName && tools[index].status === 'running') return index
+    if (tools[index].toolName === toolName && ['proposed', 'awaiting-approval', 'running'].includes(tools[index].status)) return index
   }
   return -1
 }

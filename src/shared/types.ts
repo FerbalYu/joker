@@ -323,9 +323,18 @@ export interface ToolRecoveryResolutionResult {
   error?: 'invalid-session' | 'invalid-input' | 'invalid-resolution' | 'not-found' | 'already-resolved' | 'conflict'
 }
 
-export type ToolCallStatus = 'running' | 'done' | 'error' | 'denied' | 'cancelled' | 'timed-out'
+export type ToolCallStatus =
+  | 'proposed'
+  | 'awaiting-approval'
+  | 'running'
+  | 'done'
+  | 'error'
+  | 'denied'
+  | 'cancelled'
+  | 'timed-out'
+  | 'outcome-unknown'
 
-export const TERMINAL_TOOL_CALL_STATUSES: ReadonlySet<ToolCallStatus> = new Set(['done', 'error', 'denied', 'cancelled', 'timed-out'])
+export const TERMINAL_TOOL_CALL_STATUSES: ReadonlySet<ToolCallStatus> = new Set(['done', 'error', 'denied', 'cancelled', 'timed-out', 'outcome-unknown'])
 
 export interface ToolCallInfo {
   toolCallId?: string
@@ -334,12 +343,18 @@ export interface ToolCallInfo {
   output?: string
   metadata?: Record<string, unknown>
   status: ToolCallStatus
+  proposedAt?: number
+  approvalAskedAt?: number
+  approvalDecidedAt?: number
+  approvalOutcome?: 'allow' | 'deny'
   startedAt?: number
+  completedAt?: number
   updatedAt?: number
   lastProgressAt?: number
   deadlineAt?: number
   durationMs?: number
   error?: string
+  errorCode?: string
 }
 
 export function transitionToolCall(current: ToolCallInfo, update: Partial<ToolCallInfo>): ToolCallInfo {
@@ -347,7 +362,7 @@ export function transitionToolCall(current: ToolCallInfo, update: Partial<ToolCa
   if (current.updatedAt !== undefined && update.updatedAt !== undefined && update.updatedAt < current.updatedAt) return current
   if (TERMINAL_TOOL_CALL_STATUSES.has(current.status) && nextStatus !== current.status) return current
   const next = { ...current, ...update, status: nextStatus }
-  for (const field of ['startedAt', 'updatedAt', 'lastProgressAt', 'deadlineAt', 'completedAt'] as const) {
+  for (const field of ['proposedAt', 'approvalAskedAt', 'approvalDecidedAt', 'startedAt', 'completedAt', 'updatedAt', 'lastProgressAt', 'deadlineAt'] as const) {
     const previous = current[field]
     const candidate = next[field]
     if (previous !== undefined && (candidate === undefined || candidate < previous)) next[field] = previous
@@ -458,10 +473,10 @@ export type StreamEvent =
   | { type: 'message-deferred'; sessionId: string; runId?: string; pendingMessageId: string; reason: string }
   | { type: 'goal-update'; sessionId: string; runId?: string; goal?: GoalState }
   | { type: 'context-usage'; sessionId: string; runId?: string; usage: ContextUsage }
-  | { type: 'tool-call'; sessionId: string; runId?: string; toolCallId: string; toolName: string; input: Record<string, unknown>; startedAt?: number; updatedAt?: number; lastProgressAt?: number; deadlineAt?: number }
-  | { type: 'tool-status'; sessionId: string; runId?: string; toolCallId: string; toolName: string; status: ToolCallStatus; startedAt?: number; updatedAt: number; lastProgressAt?: number; deadlineAt?: number; durationMs?: number; error?: string; heartbeat?: boolean }
-  | { type: 'tool-result'; sessionId: string; runId?: string; toolCallId: string; toolName: string; output: string; metadata?: Record<string, unknown>; startedAt?: number; updatedAt?: number; lastProgressAt?: number; deadlineAt?: number; durationMs?: number }
-  | { type: 'tool-error'; sessionId: string; runId?: string; toolCallId: string; toolName: string; error: string; status?: Extract<ToolCallStatus, 'error' | 'cancelled' | 'timed-out'>; startedAt?: number; updatedAt?: number; lastProgressAt?: number; deadlineAt?: number; durationMs?: number }
+  | { type: 'tool-call'; sessionId: string; runId?: string; toolCallId: string; toolName: string; input: Record<string, unknown>; proposedAt?: number; updatedAt?: number }
+  | { type: 'tool-status'; sessionId: string; runId?: string; toolCallId: string; toolName: string; status: ToolCallStatus; proposedAt?: number; approvalAskedAt?: number; approvalDecidedAt?: number; approvalOutcome?: 'allow' | 'deny'; startedAt?: number; completedAt?: number; updatedAt: number; lastProgressAt?: number; deadlineAt?: number; durationMs?: number; error?: string; errorCode?: string; heartbeat?: boolean }
+  | { type: 'tool-result'; sessionId: string; runId?: string; toolCallId: string; toolName: string; output: string; metadata?: Record<string, unknown>; proposedAt?: number; approvalAskedAt?: number; approvalDecidedAt?: number; approvalOutcome?: 'allow' | 'deny'; startedAt?: number; completedAt?: number; updatedAt?: number; lastProgressAt?: number; deadlineAt?: number; durationMs?: number }
+  | { type: 'tool-error'; sessionId: string; runId?: string; toolCallId: string; toolName: string; error: string; status?: Extract<ToolCallStatus, 'error' | 'cancelled' | 'timed-out' | 'outcome-unknown'>; proposedAt?: number; approvalAskedAt?: number; approvalDecidedAt?: number; approvalOutcome?: 'allow' | 'deny'; startedAt?: number; completedAt?: number; updatedAt?: number; lastProgressAt?: number; deadlineAt?: number; durationMs?: number; errorCode?: string }
   | { type: 'subagent-update'; sessionId: string; runId?: string; activity: SubagentActivity }
   | { type: 'error'; sessionId: string; runId?: string; error: string }
   | { type: 'abort'; sessionId: string; runId?: string }
@@ -530,8 +545,20 @@ export interface ApprovalRequest {
   windowId: number
   runId: string
   sessionId: string
+  toolCallId?: string
+  askedAt?: number
   toolName: string
   input: Record<string, unknown>
+}
+
+export interface ApprovalResolvedEvent {
+  requestId: string
+  sessionId: string
+  runId: string
+  toolCallId?: string
+  approved: boolean
+  reason: 'resolved' | 'cancelled' | 'timeout'
+  resolvedAt: number
 }
 
 // Structured user questions raised by the model via AskUserQuestion
