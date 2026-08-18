@@ -404,6 +404,36 @@ void test('runAgent preserves denied status from the AI SDK json output envelope
   assert.equal(events.find((event) => event.type === 'tool-result')?.type, 'tool-result')
 })
 
+void test('terminal ToolCall states reject late state regressions', async () => {
+  const { transitionToolCall } = await import('../../shared/types')
+  const denied = { toolCallId: 'call-1', toolName: 'Write', input: {}, status: 'denied' as const }
+  assert.equal(transitionToolCall(denied, { status: 'running', output: 'late' }), denied)
+  assert.equal(transitionToolCall(denied, { status: 'denied', metadata: { recoveryId: 'r1' } }).metadata?.recoveryId, 'r1')
+  assert.equal(transitionToolCall({ ...denied, status: 'running' }, { status: 'timed-out' }).status, 'timed-out')
+})
+
+void test('runAgent hard-stops after the second denial for the same recovery', async () => {
+  let call = 0
+  const model = {
+    specificationVersion: 'v3', provider: 'test', modelId: 'recovery-stop', supportedUrls: {}, doGenerate: async () => { throw new Error('not used') },
+    doStream: async () => ({ stream: new ReadableStream({ start(controller) {
+      const id = `recovery-call-${call++}`
+      controller.enqueue({ type: 'response-metadata', id, modelId: 'recovery-stop', timestamp: new Date(0) })
+      controller.enqueue({ type: 'tool-input-start', id, toolName: 'Blocked' })
+      controller.enqueue({ type: 'tool-input-delta', id, delta: '{}' })
+      controller.enqueue({ type: 'tool-input-end', id })
+      controller.enqueue({ type: 'tool-call', toolCallId: id, toolName: 'Blocked', input: '{}' })
+      controller.enqueue({ type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool-calls' }, usage: v3Usage(2, 1) })
+      controller.close()
+    } }), response: { headers: {} } })
+  } as unknown as LanguageModel
+  const tools = { Blocked: tool({ description: 'blocked recovery', inputSchema: z.object({}), execute: async () => ({ output: 'Tool call was denied.', metadata: { terminalStatus: 'denied', recoveryId: 'recovery-1', requiresUserAction: true } }) }) }
+  const result = await runAgent({ sessionId: 'recovery-stop', runId: 'recovery-stop', messages: [{ role: 'user', content: 'retry' }], tools, reasoningLevel: 'auto', model, onEvent: () => undefined })
+  assert.equal(result.status, 'needs-user-action')
+  if (result.status === 'needs-user-action') assert.deepEqual(result.recoveryIds, ['recovery-1'])
+  assert.equal(call, 2)
+})
+
 void test('runAgent preserves long stream order and emits measured context updates', async () => {
   const { events, result } = await runWith(fakeModel('normal', Array.from({ length: 256 }, (_, index) => `chunk-${index};`)))
   assert.equal(events[0]?.type, 'message-start')

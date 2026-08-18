@@ -218,6 +218,9 @@ const api = {
       ipcRenderer.invoke('session:goal-clear', sessionId, input),
     compact: (sessionId: string): Promise<SessionCompactResult> =>
       ipcRenderer.invoke('session:compact', sessionId),
+    readToolResult: (sessionId: string, spillId: string, offsetBytes?: number, limitBytes?: number): Promise<import('@shared/types').SpilledToolResultChunk | null> => ipcRenderer.invoke('session:read-tool-result', sessionId, spillId, offsetBytes, limitBytes),
+    listRecoveries: (sessionId: string): Promise<import('@shared/types').ToolRecoveryRecord[]> => ipcRenderer.invoke('session:list-recoveries', sessionId),
+    resolveRecovery: (sessionId: string, input: import('@shared/types').ToolRecoveryResolutionInput): Promise<import('@shared/types').ToolRecoveryResolutionResult> => ipcRenderer.invoke('session:resolve-recovery', sessionId, input),
     setProject: (sessionId: string, projectId: string | null): Promise<boolean> =>
       ipcRenderer.invoke('session:set-project', sessionId, projectId)
   }

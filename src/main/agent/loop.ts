@@ -4,7 +4,7 @@ import { createLanguageModel } from '../providers'
 import { loadConfig, resolveActiveModel } from '../store/config'
 import { compressContext, estimateTextTokens, type CompressionResult } from './context'
 import type { AssistantSegment, ChatMessage, ReasoningLevel, RunMode, StreamEvent, StreamUsage, ToolCallInfo } from '../../shared/types'
-import { DEFAULT_MAX_CONTEXT_TOKENS } from '../../shared/types'
+import { DEFAULT_MAX_CONTEXT_TOKENS, transitionToolCall } from '../../shared/types'
 import type { CapabilitySnapshot } from './capabilities'
 import { formatSafeError } from './diagnostics'
 import { addStreamUsage, buildContextUsage, streamUsageFromModelUsage } from './usage'
@@ -41,6 +41,7 @@ interface AgentRunSnapshot {
 type AgentRunDetails =
   | { status: 'completed'; messageId: string; usage: StreamUsage; finishReason: FinishReason }
   | { status: 'step-limit'; messageId: string; usage: StreamUsage; finishReason: FinishReason }
+  | { status: 'needs-user-action'; messageId: string; usage: StreamUsage; finishReason: FinishReason; recoveryIds: string[] }
   | { status: 'repetition'; messageId: string; usage: StreamUsage; error: string }
   | { status: 'aborted' }
   | { status: 'error'; error: string }
@@ -101,6 +102,9 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
   const toolRepetitionGuard = new ToolCallRepetitionGuard()
   let pendingToolReminder: string | undefined
   let preparedToolReminder: string | undefined
+  const recoveryDenials = new Map<string, number>()
+  let needsUserAction = false
+  const needsUserRecoveryIds = new Set<string>()
   let currentStepNumber = 1
   let currentStepTextStart = 0
   const runStartAt = Date.now()
@@ -301,6 +305,16 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
           await flushStepBuffer(stepBuffer)
           const output = toolOutputText(part.output)
           const metadata = toolOutputMetadata(part.output)
+          const recoveryId = typeof metadata?.['recoveryId'] === 'string' && metadata?.['requiresUserAction'] === true ? metadata['recoveryId'] : undefined
+          if (recoveryId) {
+            const count = (recoveryDenials.get(recoveryId) ?? 0) + 1
+            recoveryDenials.set(recoveryId, count)
+            needsUserRecoveryIds.add(recoveryId)
+            if (count >= 2) {
+              needsUserAction = true
+              streamController.abort(new Error('Tool recovery requires user action'))
+            }
+          }
           auxiliaryUsage = addStreamUsage(auxiliaryUsage, usageFromMetadata(metadata))
           const completedAt = Date.now()
           const terminalStatus = metadata?.['terminalStatus'] === 'denied' ? 'denied' : 'done'
@@ -360,6 +374,9 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
       }
       await flushStepBuffer(stepBuffer)
 
+      if (needsUserAction) {
+        return snapshot({ status: 'needs-user-action', messageId, usage: totalUsage ?? completedStepUsage ?? {}, finishReason: finishReason ?? 'tool-calls', recoveryIds: [...needsUserRecoveryIds] })
+      }
       if (repetitionDetected) return await finalizeRepetition()
       if (primaryErrorEmitted || abortEmitted) {
         if (terminalResult) return terminalResult
@@ -408,7 +425,7 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
           try {
             const toolResult = await executeTool.execute(invoke.input, { toolCallId, abortSignal: streamController.signal })
             output = toolOutputText(toolResult)
-            toolCall.status = toolResult.metadata?.['terminalStatus'] === 'denied' ? 'denied' : 'done'
+            Object.assign(toolCall, transitionToolCall(toolCall, { status: toolResult.metadata?.['terminalStatus'] === 'denied' ? 'denied' : 'done' }))
             toolCall.metadata = toolResult.metadata
             toolCall.output = output
             toolCall.updatedAt = Date.now()
@@ -416,7 +433,7 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
             await onEvent({ type: 'tool-result', sessionId, runId, toolCallId, toolName: invoke.toolName, output, updatedAt: toolCall.updatedAt, lastProgressAt: toolCall.lastProgressAt })
           } catch (err) {
             output = formatSafeError(err)
-            toolCall.status = 'error'
+            Object.assign(toolCall, transitionToolCall(toolCall, { status: 'error' }))
             toolCall.output = output
             toolCall.error = output
             toolCall.updatedAt = Date.now()
@@ -513,7 +530,8 @@ export async function runAgent({ sessionId, runId = crypto.randomUUID(), message
   function updateTool(toolCallId: string, update: Partial<Pick<ToolCallInfo, 'output' | 'status' | 'metadata' | 'startedAt' | 'updatedAt' | 'lastProgressAt' | 'deadlineAt' | 'durationMs' | 'error'>>): void {
     const tool = toolCalls.find((candidate) => candidate.toolCallId === toolCallId)
     if (!tool) return
-    Object.assign(tool, update)
+    const next = transitionToolCall(tool, update)
+    Object.assign(tool, next)
   }
 
   function snapshot<T extends AgentRunDetails>(details: T): AgentRunSnapshot & T {

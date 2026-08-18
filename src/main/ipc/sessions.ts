@@ -1,3 +1,4 @@
+import { readSpilledToolResult, readToolRecoveries, resolveToolRecovery } from '../store/operations'
 import { BrowserWindow, ipcMain, webContents } from 'electron'
 import { compactSession } from '../agent/session-compact'
 import { getApprovalRegistry, subscribeApprovalActivity } from '../agent/approval'
@@ -158,6 +159,25 @@ export function registerSessionIpc(): void {
       return { success: false, changed: false, beforeTokens: 0, afterTokens: 0, sourceMessageCount: 0, retainedMessageCount: 0, error: 'invalid-session' }
     }
     return compactSession(sessionId)
+  })
+
+  ipcMain.handle('session:read-tool-result', (_event, sessionId: unknown, spillId: unknown, offsetBytes: unknown, limitBytes: unknown) => {
+    if (typeof sessionId !== 'string' || typeof spillId !== 'string' || !getSession(sessionId)) return null
+    return readSpilledToolResult(sessionId, spillId, typeof offsetBytes === 'number' ? offsetBytes : 0, typeof limitBytes === 'number' ? limitBytes : 64_000)
+  })
+
+  ipcMain.handle('session:list-recoveries', (_event, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !getSession(sessionId)) return []
+    return readToolRecoveries(sessionId)
+  })
+
+  ipcMain.handle('session:resolve-recovery', (_event, sessionId: unknown, input: unknown) => {
+    if (typeof sessionId !== 'string' || !getSession(sessionId)) return { success: false, changed: false, error: 'invalid-session' }
+    if (!input || typeof input !== 'object') return { success: false, changed: false, error: 'invalid-input' }
+    const value = input as { recoveryId?: unknown; expectedRevision?: unknown; resolution?: unknown; note?: unknown }
+    if (typeof value.recoveryId !== 'string' || !Number.isSafeInteger(value.expectedRevision) || Number(value.expectedRevision) < 0) return { success: false, changed: false, error: 'invalid-input' }
+    if (!['verified-not-applied', 'verified-applied', 'user-authorized-retry', 'superseded'].includes(String(value.resolution))) return { success: false, changed: false, error: 'invalid-resolution' }
+    return resolveToolRecovery(sessionId, { recoveryId: value.recoveryId, expectedRevision: Number(value.expectedRevision), resolution: value.resolution as Parameters<typeof resolveToolRecovery>[1]['resolution'], ...(typeof value.note === 'string' ? { note: value.note } : {}) })
   })
 
   ipcMain.handle('session:set-project', (event, sessionId: unknown, projectId: unknown) => {

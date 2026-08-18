@@ -588,6 +588,23 @@ function fsOccResponse(messages) {
   return textResponse(`FS_OCC_OK ${FS_OCC_MARKER}`)
 }
 
+const LARGE_SPILL_MARKER = 'zzqlargespill41x'
+
+function largeResultSpillResponse(messages) {
+  const history = researchToolHistory(messages)
+  const readId = 'call_large_spill_read'
+  const pageId = 'call_large_spill_page'
+  if (!history.results.has(readId)) return toolCall('Read', { filePath: 'large-result.txt' }, readId)
+  const readResult = toolResultJson(String(history.results.get(readId) ?? ''))
+  const spillId = readResult?.metadata?.spill?.id
+  if (!spillId) return textResponse('LARGE_SPILL_UNEXPECTED: Read did not return spill metadata.')
+  if (!history.results.has(pageId)) return toolCall('ToolResultRead', { spillId, offsetBytes: 0, limitBytes: 4096 }, pageId)
+  const page = toolResultJson(String(history.results.get(pageId) ?? ''))
+  const parsed = page ? JSON.parse(page.output) : null
+  if (!parsed || parsed.offsetBytes !== 0 || !(parsed.contentBytes > 0)) return textResponse('LARGE_SPILL_UNEXPECTED: ToolResultRead returned invalid byte cursor data.')
+  return textResponse(`LARGE_RESULT_SPILL_OK ${LARGE_SPILL_MARKER}`)
+}
+
 const UNKNOWN_OUTCOME_MARKER = 'zzqunknownoutcome41x'
 
 function unknownOutcomeRetryResponse(messages) {
@@ -665,6 +682,7 @@ const server = http.createServer((req, res) => {
     if (scenario === 'toolforge-vertical-slice') return respond(electronToolForgeResponse(messages, parsed.tools, systemText))
     if (scenario === 'fs-optimistic-concurrency') return respond(fsOccResponse(messages))
     if (scenario === 'unknown-outcome-retry') return respond(unknownOutcomeRetryResponse(messages))
+    if (scenario === 'large-result-spill') return respond(largeResultSpillResponse(messages))
     if (scenario === 'invoke-fallback') return respond(invokeFallbackResponse(messages))
     if (scenario === 'tool-repeat-reminder') return respond(toolRepeatReminderResponse(messages))
     if (scenario === 'toolforge-edit-success') return respond(electronToolForgeEditResponse(messages, parsed.tools, systemText, false))

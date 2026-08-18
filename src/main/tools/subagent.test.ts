@@ -46,7 +46,7 @@ function fakeModel(active: { count: number; max: number }, delayMs: number): Par
 }
 
 void test('sub-agent allowlist is read-only and excludes write, Bash, web, image, and MCP tools', () => {
-  assert.deepEqual(getReadonlySubagentToolNames(), ['Read', 'Grep', 'Glob', 'GitStatus', 'GitDiff', 'GitLog', 'GitBranch'])
+  assert.deepEqual(getReadonlySubagentToolNames(), ['Read', 'Grep', 'Glob', 'GitStatus', 'GitDiff', 'GitLog', 'GitBranch', 'ToolResultRead'])
 })
 
 void test('sub-agent rejects an already-aborted request before creating a provider run', async () => {

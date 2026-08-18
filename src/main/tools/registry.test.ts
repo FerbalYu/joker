@@ -409,6 +409,39 @@ void test('tool observability reports running and completion with the provider t
   assert.equal(typeof events[1]?.durationMs, 'number')
 })
 
+void test('scheduler implements fair shared reads, exclusive writes, cancellation, and independent lanes', async () => {
+  const { createToolScheduler } = await import('./registry')
+  const scheduler = createToolScheduler()
+  const read1 = await scheduler.acquire('workspace', 'parallel-read')
+  const read2 = await scheduler.acquire('workspace', 'parallel-read')
+  let writerAcquired = false
+  const writerPromise = scheduler.acquire('workspace', 'exclusive').then((lease) => { writerAcquired = true; return lease })
+  let lateReadAcquired = false
+  const lateReadPromise = scheduler.acquire('workspace', 'parallel-read').then((lease) => { lateReadAcquired = true; return lease })
+  await Promise.resolve()
+  assert.equal(writerAcquired, false)
+  assert.equal(lateReadAcquired, false)
+  const independent = await scheduler.acquire('other-workspace', 'exclusive')
+  independent.release()
+  read1.release(); read2.release()
+  const writer = await writerPromise
+  assert.equal(writerAcquired, true)
+  assert.equal(lateReadAcquired, false)
+  writer.release()
+  const lateRead = await lateReadPromise
+  assert.equal(lateReadAcquired, true)
+  lateRead.release()
+
+  const blocker = await scheduler.acquire('cancel-lane', 'exclusive')
+  const controller = new AbortController()
+  const cancelled = scheduler.acquire('cancel-lane', 'exclusive', controller.signal)
+  controller.abort('cancelled')
+  await assert.rejects(cancelled)
+  blocker.release()
+  const afterCancel = await scheduler.acquire('cancel-lane', 'exclusive')
+  afterCancel.release()
+})
+
 void test('final guard blocks an identical unknown-outcome retry before the tool starts', async () => {
   let executed = false
   const events: OperationEvent[] = []

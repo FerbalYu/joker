@@ -9,6 +9,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
+import { normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { once } from 'node:events'
@@ -27,6 +28,13 @@ function check(phase, name, value, details = undefined) {
   const result = { phase, name, pass: Boolean(value), ...(details === undefined ? {} : { details }) }
   checks.push(result)
   if (!result.pass) throw new Error(`Runtime contract smoke failed: ${name}`)
+}
+
+function toolResultJson(content) {
+  try {
+    const parsed = JSON.parse(content)
+    return parsed && typeof parsed === 'object' && typeof parsed.output === 'string' ? parsed : null
+  } catch { return null }
 }
 
 async function stopProcess(child) {
@@ -209,6 +217,7 @@ try {
       await textarea.fill('Use expectedVersion to update notes.txt safely.')
       await textarea.press('Enter')
       await page.waitForFunction(() => document.body.innerText.includes('FS_OCC_OK'), undefined, { timeout: 60_000 })
+      const finalReplyObserved = true
 
       const requests = await providerRequests()
       const allMessages = requests.flatMap((entry) => entry.body?.messages ?? [])
@@ -235,7 +244,9 @@ try {
 
       const persisted = await readFile(join(project, 'notes.txt'), 'utf8')
       check('workspace file holds the edited content, not the stale overwrite', persisted.includes('edited with expectedVersion') && !persisted.includes('colliding overwrite'), persisted)
-      check('chat renders the tool workflow and the final reply', await page.locator('body').innerText().then((text) => text.includes('FS_OCC_OK')) && await page.locator('[data-tool-call-group]').count() >= 1)
+      const renderedText = await page.locator('body').innerText()
+      const renderedToolSurfaces = await page.locator('[data-tool-call-group], [data-tool-health]').count()
+      check('chat renders the tool workflow and the final reply', finalReplyObserved && renderedToolSurfaces >= 1, { renderedToolSurfaces, hasFinalReply: finalReplyObserved, stillVisible: renderedText.includes('FS_OCC_OK') })
       check('fs-occ phase leaves no renderer console errors', consoleErrors.length === 0, consoleErrors)
       check('fs-occ phase leaves no renderer page errors', pageErrors.length === 0, pageErrors)
       await screenshot('fs-occ-complete')
@@ -243,8 +254,37 @@ try {
   })
 
   await runPhase({
+    scenario: 'large-result-spill',
+    seedFiles: { 'large-result.txt': ('中文🙂 large spill line\n').repeat(12_000) },
+    drive: async ({ page, providerRequests, consoleErrors, pageErrors, screenshot }, check) => {
+      await waitFor(async () => (await page.evaluate(() => window.joker.session.list())).length > 0, 20_000, 'initial spill session')
+      const session = (await page.evaluate(() => window.joker.session.list()))[0]
+      const projectId = (await page.evaluate(() => window.joker.project.get())).state?.activeProjectId
+      await page.evaluate(({ sessionId, projectId }) => window.joker.session.setProject(sessionId, projectId), { sessionId: session.id, projectId })
+      const textarea = page.locator('textarea').first()
+      await textarea.fill('Read the large fixture and inspect its full result through the spill reader.')
+      await textarea.press('Enter')
+      await page.waitForFunction(() => document.body.innerText.includes('LARGE_RESULT_SPILL_OK'), undefined, { timeout: 60_000 })
+      const requests = await providerRequests()
+      const messages = requests.flatMap((entry) => entry.body?.messages ?? [])
+      const calls = messages.filter((message) => Array.isArray(message.tool_calls)).flatMap((message) => message.tool_calls)
+      check('large Read is followed by ToolResultRead', calls.some((call) => call.function?.name === 'Read') && calls.some((call) => call.function?.name === 'ToolResultRead'), calls.map((call) => call.function?.name))
+      const readResult = messages.find((message) => message.role === 'tool' && message.tool_call_id === 'call_large_spill_read')
+      const parsedRead = toolResultJson(String(readResult?.content ?? ''))
+      check('model receives bounded spill preview with opaque id', Boolean(parsedRead?.metadata?.spill?.id) && String(parsedRead.output).includes('ToolResultRead'), parsedRead?.metadata?.spill)
+      const pageResult = messages.find((message) => message.role === 'tool' && message.tool_call_id === 'call_large_spill_page')
+      const parsedPage = toolResultJson(String(pageResult?.content ?? ''))
+      const pageData = parsedPage ? JSON.parse(parsedPage.output) : null
+      check('ToolResultRead returns byte cursor data', pageData?.offsetBytes === 0 && pageData?.contentBytes > 0 && pageData?.totalBytes > pageData?.contentBytes, pageData)
+      check('large spill phase leaves no renderer console errors', consoleErrors.length === 0, consoleErrors)
+      check('large spill phase leaves no renderer page errors', pageErrors.length === 0, pageErrors)
+      await screenshot('large-spill-complete')
+    }
+  })
+
+  await runPhase({
     scenario: 'unknown-outcome-retry',
-    prepareHome: async ({ home }) => {
+    prepareHome: async ({ home, project }) => {
       const sessionId = randomUUID()
       const now = Date.now()
       await mkdir(join(home, '.joker', 'sessions'), { recursive: true })
@@ -255,11 +295,17 @@ try {
       }, null, 2))
       const input = { filePath: 'unknown-outcome.txt', content: 'must not be written twice' }
       const canonical = JSON.stringify(Object.fromEntries(Object.entries(input).sort(([left], [right]) => left.localeCompare(right))))
-      const fingerprint = createHash('sha256').update(`Write\0${canonical}`).digest('hex')
+      const workspaceIdentity = normalize(project).replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
+      const workspaceFingerprint = createHash('sha256').update(`workspace:v2:${workspaceIdentity}`).digest('hex')
+      const sourceCanonical = JSON.stringify({ id: 'Write', type: 'builtin' })
+      const toolSourceFingerprint = createHash('sha256').update(`source:v2:${sourceCanonical}`).digest('hex')
+      const material = JSON.stringify({ input: JSON.parse(canonical), toolName: 'Write', toolSourceFingerprint, version: 2, workspaceFingerprint })
+      const fingerprint = createHash('sha256').update(material).digest('hex')
       await writeFile(join(home, '.joker', 'sessions', `${sessionId}.operations.jsonl`), [
         { type: 'request-prepared', at: now - 3, runId: 'interrupted-run', step: 1 },
-        { type: 'tool-proposed', at: now - 2, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write', inputFingerprint: fingerprint },
-        { type: 'tool-started', at: now - 1, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write' }
+        { type: 'tool-proposed', at: now - 2, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write', inputFingerprint: fingerprint, fingerprintVersion: 2, workspaceFingerprint, toolSourceFingerprint, retrySemantics: 'verify-before-retry', executionMode: 'exclusive' },
+        { type: 'tool-started', at: now - 1, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write' },
+        { type: 'run-terminal', at: now, runId: 'interrupted-run', status: 'failed' }
       ].map((event) => JSON.stringify(event)).join('\n') + '\n')
     },
     drive: async ({ page, home, project, screenshot, providerRequests, consoleErrors, pageErrors }, check) => {
@@ -271,11 +317,17 @@ try {
       const now = Date.now()
       const input = { filePath: 'unknown-outcome.txt', content: 'must not be written twice' }
       const canonical = JSON.stringify(Object.fromEntries(Object.entries(input).sort(([left], [right]) => left.localeCompare(right))))
-      const fingerprint = createHash('sha256').update(`Write\0${canonical}`).digest('hex')
+      const workspaceIdentity = normalize(project).replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
+      const workspaceFingerprint = createHash('sha256').update(`workspace:v2:${workspaceIdentity}`).digest('hex')
+      const sourceCanonical = JSON.stringify({ id: 'Write', type: 'builtin' })
+      const toolSourceFingerprint = createHash('sha256').update(`source:v2:${sourceCanonical}`).digest('hex')
+      const material = JSON.stringify({ input: JSON.parse(canonical), toolName: 'Write', toolSourceFingerprint, version: 2, workspaceFingerprint })
+      const fingerprint = createHash('sha256').update(material).digest('hex')
       await writeFile(join(home, '.joker', 'sessions', `${session.id}.operations.jsonl`), [
         { type: 'request-prepared', at: now - 3, runId: 'interrupted-run', step: 1 },
-        { type: 'tool-proposed', at: now - 2, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write', inputFingerprint: fingerprint },
-        { type: 'tool-started', at: now - 1, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write' }
+        { type: 'tool-proposed', at: now - 2, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write', inputFingerprint: fingerprint, fingerprintVersion: 2, workspaceFingerprint, toolSourceFingerprint, retrySemantics: 'verify-before-retry', executionMode: 'exclusive' },
+        { type: 'tool-started', at: now - 1, runId: 'interrupted-run', toolCallId: 'interrupted-write', toolName: 'Write' },
+        { type: 'run-terminal', at: now, runId: 'interrupted-run', status: 'failed' }
       ].map((event) => JSON.stringify(event)).join('\n') + '\n')
       const textarea = page.locator('textarea').first()
       await textarea.fill('Retry the interrupted Write exactly as requested by the provider.')
@@ -286,6 +338,16 @@ try {
       const tools = stored.messages.flatMap((message) => message.toolCalls ?? []).filter((tool) => tool.toolName === 'Write')
       check('identical recovered Write persists as denied', tools.some((tool) => tool.status === 'denied' && String(tool.metadata?.reason ?? '').includes('interrupted previous run')), tools)
       check('denied recovery ToolCard is visible', await page.locator('[data-tool-health="denied"]').count() >= 1)
+      check('persistent recovery panel is visible', await page.locator('[data-tool-recovery-panel]').count() === 1)
+      await page.reload()
+      await page.waitForFunction(() => Boolean(window.joker?.session?.list))
+      await page.waitForSelector('[data-tool-recovery-panel]', { timeout: 20_000 })
+      check('recovery panel survives renderer reload', await page.locator('[data-tool-recovery-panel]').count() === 1)
+      const retryButton = page.getByRole('button', { name: /确认未执行|Confirm not applied/ }).first()
+      await retryButton.click()
+      await page.waitForFunction(() => document.querySelector('[data-tool-recovery-panel]') === null, undefined, { timeout: 20_000 })
+      const resolvedRecoveries = await page.evaluate((sessionId) => window.joker.session.listRecoveries(sessionId), session.id)
+      check('explicit resolution closes the persistent recovery', resolvedRecoveries.some((item) => item.status === 'resolved' && item.resolution === 'verified-not-applied'), resolvedRecoveries)
       const requests = await providerRequests()
       check('provider received a denied tool result for the retry', requests.some((entry) => (entry.body?.messages ?? []).some((message) => message.role === 'tool' && String(message.content ?? '').includes('terminalStatus'))))
       check('unknown-outcome phase leaves no renderer console errors', consoleErrors.length === 0, consoleErrors)

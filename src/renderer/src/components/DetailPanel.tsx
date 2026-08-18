@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { PanelRightClose, PanelRightOpen, ShieldAlert, Circle, CircleCheck, CircleDot } from 'lucide-react'
 import { useStore } from '../store'
 import { t } from '../i18n'
-import type { GoalState, GoalStatus, StreamUsage } from '@shared/types'
+import type { GoalState, GoalStatus, StreamUsage, ToolRecoveryRecord, ToolRecoveryResolution } from '@shared/types'
 import ToolCallList from './ToolCallList'
 import { latestTodoState } from '../detail-todos'
 import { visibleChatTools } from '../tool-visibility'
@@ -34,6 +34,8 @@ export default function DetailPanel({ onGoalAction }: Props): React.JSX.Element 
   const language = useStore((s) => s.language)
   const [collapsed, setCollapsed] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1180)
   const [compactHidden, setCompactHidden] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1180)
+  const [recoveries, setRecoveries] = useState<ToolRecoveryRecord[]>([])
+  const [resolvingRecovery, setResolvingRecovery] = useState<string | null>(null)
   const [elapsedNow, setElapsedNow] = useState(Date.now())
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeApprovals = approvalQueue.filter((approval) => approval.sessionId === activeSessionId)
@@ -65,6 +67,28 @@ export default function DetailPanel({ onGoalAction }: Props): React.JSX.Element 
     }
     return { sessionUsage: cumulative, assistantUsageCount: count }
   }, [messages])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!activeSessionId) { setRecoveries([]); return }
+    void window.joker.session.listRecoveries(activeSessionId).then((items) => { if (!cancelled) setRecoveries(items) })
+    return () => { cancelled = true }
+  }, [activeSessionId, messages, streaming])
+
+  const resolveRecovery = async (recovery: ToolRecoveryRecord, resolution: ToolRecoveryResolution): Promise<void> => {
+    if (!activeSessionId || resolvingRecovery) return
+    setResolvingRecovery(recovery.recoveryId)
+    try {
+      const result = await window.joker.session.resolveRecovery(activeSessionId, { recoveryId: recovery.recoveryId, expectedRevision: recovery.revision, resolution })
+      if (!result.success && result.error === 'conflict' && result.recovery) {
+        setRecoveries((items) => items.map((item) => item.recoveryId === result.recovery!.recoveryId ? result.recovery! : item))
+      } else {
+        setRecoveries(await window.joker.session.listRecoveries(activeSessionId))
+      }
+    } finally {
+      setResolvingRecovery(null)
+    }
+  }
 
   useEffect(() => {
     if (!streaming || activityStartedAt === undefined) return
@@ -127,6 +151,20 @@ export default function DetailPanel({ onGoalAction }: Props): React.JSX.Element 
               <span>{t(language, 'detail.transportQueue')}</span><span className="text-right font-mono tabular-nums">{streamFlow ? `${streamFlow.queueDepth} / ${streamFlow.inFlight}` : '—'}</span>
               <span>{t(language, 'detail.transportAckAge')}</span><span className="text-right font-mono tabular-nums">{streamFlow?.lastAckAt ? formatStatusAge(elapsedNow - streamFlow.lastAckAt) : '—'}</span>
               <span>{t(language, 'detail.transportBlockedFor')}</span><span className="text-right font-mono tabular-nums">{streamFlow?.blockedSince ? formatStatusAge(elapsedNow - streamFlow.blockedSince) : '—'}</span>
+            </div>
+          </section>}
+
+          {recoveries.some((item) => item.status === 'unresolved') && <section data-tool-recovery-panel className="rounded-lg border border-amber-700/60 bg-amber-950/20 p-3">
+            <p className="text-xs font-semibold text-amber-300">{language === 'zh' ? '需要处理的工具结果' : 'Tool outcomes need review'}</p>
+            <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{language === 'zh' ? '上一次运行在工具开始后中断，结果未知。为避免重复副作用，相同调用已暂停。' : 'A previous run stopped after a tool started, so its outcome is unknown. Identical retries are paused.'}</p>
+            <div className="mt-3 space-y-2">
+              {recoveries.filter((item) => item.status === 'unresolved').map((recovery) => <div key={recovery.recoveryId} data-tool-recovery-id={recovery.recoveryId} className="rounded-md bg-[var(--color-bg)] p-2">
+                <div className="flex items-center justify-between gap-2"><span className="text-xs font-medium">{recovery.toolName}</span><span className="font-mono text-[9px] text-[var(--color-text-muted)]">{recovery.recoveryId.slice(0, 8)}</span></div>
+                <div className="mt-2 grid gap-1">
+                  <button disabled={resolvingRecovery === recovery.recoveryId} onClick={() => void resolveRecovery(recovery, 'verified-not-applied')} className="rounded bg-amber-500/15 px-2 py-1 text-left text-[10px] text-amber-200 hover:bg-amber-500/25">{language === 'zh' ? '确认未执行，允许重试' : 'Confirm not applied; allow retry'}</button>
+                  <button disabled={resolvingRecovery === recovery.recoveryId} onClick={() => void resolveRecovery(recovery, 'verified-applied')} className="rounded bg-[var(--color-surface)] px-2 py-1 text-left text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]">{language === 'zh' ? '确认已经执行，不再重试' : 'Confirm applied; do not retry'}</button>
+                </div>
+              </div>)}
             </div>
           </section>}
 

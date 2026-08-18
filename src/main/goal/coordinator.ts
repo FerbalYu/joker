@@ -144,6 +144,9 @@ export class GoalCoordinator {
       if (execution.status === 'aborted' || signal.aborted) {
         return this.pauseOwned(sessionId, runIdentity, 'user-paused')
       }
+      if (execution.status === 'needs-user-action') {
+        return this.pauseOwned(sessionId, runIdentity, 'user-paused', `Tool recovery requires user action: ${execution.recoveryIds.join(', ')}`)
+      }
       if (execution.status !== 'completed' && execution.status !== 'step-limit' && execution.status !== 'repetition') {
         const feedback = execution.status === 'error' || execution.status === 'empty'
           ? boundedFeedback(execution.error)

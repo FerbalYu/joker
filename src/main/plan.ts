@@ -5,8 +5,9 @@ import { fsTools } from './tools/fs'
 import { searchTools } from './tools/grep'
 import { todoTools } from './tools/todo'
 import { gitTools } from './tools/git'
+import { toolResultTools } from './tools/tool-result-read'
 
-export const PLAN_TOOL_NAMES = ['ContextRetrieve', 'Read', 'Grep', 'Glob', 'TodoWrite', 'GitStatus', 'GitDiff', 'GitLog'] as const
+export const PLAN_TOOL_NAMES = ['ContextRetrieve', 'Read', 'Grep', 'Glob', 'TodoWrite', 'GitStatus', 'GitDiff', 'GitLog', 'ToolResultRead'] as const
 
 export function normalizeChatIntent(value: unknown): ChatIntent | undefined {
   if (value === undefined) return undefined
@@ -16,7 +17,7 @@ export function normalizeChatIntent(value: unknown): ChatIntent | undefined {
 
 export function buildPlanTools(): ToolDefinition[] {
   const definitions = new Map(
-    [...contextTools, ...fsTools, ...searchTools, ...todoTools, ...gitTools]
+    [...contextTools, ...fsTools, ...searchTools, ...todoTools, ...gitTools, ...toolResultTools]
       .map((tool) => [tool.name, tool] as const)
   )
   return PLAN_TOOL_NAMES.map((name) => {

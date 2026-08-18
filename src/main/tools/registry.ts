@@ -5,7 +5,7 @@ import type { ResearchContext } from '../research/context'
 import type { SubagentActivity } from '../../shared/types'
 import { writeToolAudit, type ToolAuditWriter } from './audit'
 import { classifyToolRisk, type ToolRisk } from './risk'
-import { toolInputFingerprint, type OperationJournal } from '../store/operations'
+import { spillToolResult, toolInputFingerprint, type OperationJournal } from '../store/operations'
 
 const DEFAULT_TOOL_TIMEOUT_MS = 3 * 60_000
 const DEFAULT_TOOL_HEARTBEAT_MS = 2_000
@@ -67,12 +67,19 @@ export interface ToolExecutionLifecycle {
 }
 
 // Tool definition shape compatible with AI SDK's tool()
+export type RetrySemantics = 'read-only' | 'idempotent' | 'idempotent-with-key' | 'verify-before-retry' | 'never-automatic'
+export type ToolExecutionMode = 'parallel-read' | 'exclusive'
+
 export interface ToolDefinition {
   name: string
   description: string
   inputSchema: z.ZodObject<z.ZodRawShape>
   source?: ToolSource
   risk?: ToolRisk
+  retrySemantics?: RetrySemantics
+  idempotencyKey?: (input: Record<string, unknown>) => string | undefined
+  executionMode?: ToolExecutionMode
+  spillResults?: boolean
   lifecycle?: ToolExecutionLifecycle
   /** Host-owned upper bound. Tool-specific internal deadlines may be shorter. */
   timeoutMs?: number
@@ -106,6 +113,60 @@ export interface HostApprovalRequest {
   runId: string
 }
 
+export interface ToolExecutionLease { release(): void }
+export interface ToolScheduler { acquire(key: string, mode: ToolExecutionMode, signal?: AbortSignal): Promise<ToolExecutionLease> }
+
+export function createToolScheduler(): ToolScheduler {
+  type Waiter = { mode: ToolExecutionMode; resolve: (lease: ToolExecutionLease) => void; reject: (error: unknown) => void; signal?: AbortSignal; onAbort?: () => void; cancelled: boolean }
+  const lanes = new Map<string, { readers: number; writer: boolean; queue: Waiter[] }>()
+  const pump = (key: string): void => {
+    const lane = lanes.get(key)
+    if (!lane || lane.writer || lane.queue.length === 0) return
+    const grant = (waiter: Waiter): void => {
+      waiter.signal?.removeEventListener('abort', waiter.onAbort!)
+      if (waiter.mode === 'exclusive') lane.writer = true
+      else lane.readers += 1
+      let released = false
+      waiter.resolve({ release() {
+        if (released) return
+        released = true
+        if (waiter.mode === 'exclusive') lane.writer = false
+        else lane.readers -= 1
+        if (!lane.writer && lane.readers === 0 && lane.queue.length === 0) lanes.delete(key)
+        else pump(key)
+      } })
+    }
+    while (lane.queue[0]?.cancelled) lane.queue.shift()
+    const first = lane.queue[0]
+    if (!first) {
+      if (!lane.writer && lane.readers === 0) lanes.delete(key)
+      return
+    }
+    if (lane.readers > 0) {
+      // Active readers admit only leading parallel-read waiters; a queued writer must not be bypassed.
+      while (lane.queue[0]?.mode === 'parallel-read') grant(lane.queue.shift()!)
+      return
+    }
+    if (first.mode === 'exclusive') grant(lane.queue.shift()!)
+    else while (lane.queue[0]?.mode === 'parallel-read') grant(lane.queue.shift()!)
+  }
+  return {
+    acquire(key, mode, signal) {
+      if (signal?.aborted) return Promise.reject(new ToolCancelledError(signal.reason))
+      const lane = lanes.get(key) ?? { readers: 0, writer: false, queue: [] }
+      lanes.set(key, lane)
+      return new Promise<ToolExecutionLease>((resolve, reject) => {
+        const waiter: Waiter = { mode, resolve, reject, signal, cancelled: false }
+        const onAbort = (): void => { if (waiter.cancelled) return; waiter.cancelled = true; signal?.removeEventListener('abort', onAbort); const index = lane.queue.indexOf(waiter); if (index >= 0) lane.queue.splice(index, 1); reject(new ToolCancelledError(signal?.reason)); pump(key) }
+        waiter.onAbort = onAbort
+        signal?.addEventListener('abort', onAbort, { once: true })
+        lane.queue.push(waiter)
+        pump(key)
+      })
+    }
+  }
+}
+
 export interface ToolContext {
   workspacePath: string | null
   sessionId: string
@@ -123,6 +184,7 @@ export interface ToolContext {
   operationJournal?: OperationJournal
   /** Monotonic guards evaluated at the final execution boundary (deny-only). */
   guards?: readonly ToolGuard[]
+  scheduler?: ToolScheduler
 }
 
 export interface ApprovalDecision {
@@ -147,7 +209,14 @@ export interface ToolGuardContext {
  * earlier guard already denied. Use it for policies that must hold at the
  * moment of execution, not merely at ToolSet construction time.
  */
-export type ToolGuard = (exec: ToolGuardContext) => string | undefined
+export interface ToolGuardDenial {
+  reason: string
+  code?: string
+  recoveryId?: string
+  requiresUserAction?: boolean
+}
+
+export type ToolGuard = (exec: ToolGuardContext) => string | ToolGuardDenial | undefined
 
 export interface ApprovalGate {
   (
@@ -233,8 +302,13 @@ export async function executeToolDefinition(
       ? await boundedLifecycle('proposed', () => definition.lifecycle!.proposed(lifecycleEvent(Date.now())))
       : undefined
     safeAudit(audit, { ...auditBase, stage: 'proposed', status: 'pending', arguments: input })
-    context.operationJournal?.append({ type: 'tool-proposed', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId, toolName: definition.name, inputFingerprint: toolInputFingerprint(definition.name, input) })
+    const retrySemantics = definition.retrySemantics ?? (risk === 'read' ? 'read-only' : risk === 'write_local' ? 'verify-before-retry' : 'never-automatic')
+    if (retrySemantics === 'idempotent-with-key' && !definition.idempotencyKey?.(input)?.trim()) throw new Error(`Tool ${definition.name} requires a non-empty idempotency key`)
+    const executionMode = definition.executionMode ?? (risk === 'read' ? 'parallel-read' : 'exclusive')
+    const fingerprint = toolInputFingerprint({ workspacePath: context.workspacePath, definition }, input)
+    context.operationJournal?.append({ type: 'tool-proposed', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId, toolName: definition.name, ...fingerprint, retrySemantics, executionMode })
     let decision: ApprovalDecision
+    let guardDenial: ToolGuardDenial | undefined
     try {
       if (generatedSource?.validationProfile !== 'user-owned-full-trust-v1') {
         context.operationJournal?.append({ type: 'approval-asked', at: Date.now(), runId: context.runId ?? '', toolCallId: resolvedToolCallId })
@@ -266,9 +340,11 @@ export async function executeToolDefinition(
     // tighten an allow into a deny, never the other way around.
     if (decision.outcome === 'allow' && context.guards) {
       for (const guard of context.guards) {
-        const reason = guard({ toolName: definition.name, input, definition, context: lifecycleContext })
-        if (reason) {
-          decision = { outcome: 'deny', risk, reason: `Host guard rejected the call: ${reason}` }
+        const denial = guard({ toolName: definition.name, input, definition, context: lifecycleContext })
+        if (denial) {
+          const detail = typeof denial === 'string' ? { reason: denial } : denial
+          decision = { outcome: 'deny', risk, reason: `Host guard rejected the call: ${detail.reason}` }
+          guardDenial = detail
           break
         }
       }
@@ -290,7 +366,7 @@ export async function executeToolDefinition(
     })
     if (decision.outcome === 'deny') {
       const now = Date.now()
-      const result = { output: 'Tool call was denied.', metadata: { terminalStatus: 'denied', reason: decision.reason } }
+      const result = { output: 'Tool call was denied.', metadata: { terminalStatus: 'denied', reason: decision.reason, ...(guardDenial?.code ? { denialCode: guardDenial.code } : {}), ...(guardDenial?.recoveryId ? { recoveryId: guardDenial.recoveryId } : {}), ...(guardDenial?.requiresUserAction ? { requiresUserAction: true } : {}) } }
       if (definition.lifecycle) {
         await finishLifecycleBounded(definition.lifecycle, lifecycleState, {
           ...lifecycleEvent(now),
@@ -312,31 +388,25 @@ export async function executeToolDefinition(
       return result
     }
 
-    const startedAt = Date.now()
     const timeoutMs = resolveToolTimeoutMs(definition, input)
-    const deadlineAt = startedAt + timeoutMs
     const heartbeatMs = Math.max(250, definition.heartbeatMs ?? DEFAULT_TOOL_HEARTBEAT_MS)
-    context.operationJournal?.append({ type: 'tool-started', at: startedAt, runId: context.runId ?? '', toolCallId: resolvedToolCallId, toolName: definition.name })
-    lifecycleState = definition.lifecycle
-      ? await boundedLifecycle('started', () => definition.lifecycle!.started(lifecycleState, lifecycleEvent(startedAt)))
-      : lifecycleState
-    safeAudit(audit, { ...auditBase, stage: 'started', status: 'allowed', reason: decision.reason })
-    safeNotify(context.onToolCall, {
-      toolCallId: resolvedToolCallId,
-      toolName: definition.name,
-      input,
-      status: 'running',
-      startedAt,
-      updatedAt: startedAt,
-      lastProgressAt: startedAt,
-      deadlineAt
-    })
-
+    let startedAt = 0
+    let deadlineAt = 0
+    let lease: ToolExecutionLease | undefined
     let heartbeat: NodeJS.Timeout | undefined
     let deadline: NodeJS.Timeout | undefined
     let quiescenceGrace: NodeJS.Timeout | undefined
     let abortListener: (() => void) | undefined
     try {
+      lease = context.scheduler ? await context.scheduler.acquire(context.workspacePath ?? `session:${context.sessionId}`, executionMode, abortSignal ?? context.abortSignal) : undefined
+      startedAt = Date.now()
+      deadlineAt = startedAt + timeoutMs
+      context.operationJournal?.append({ type: 'tool-started', at: startedAt, runId: context.runId ?? '', toolCallId: resolvedToolCallId, toolName: definition.name })
+      lifecycleState = definition.lifecycle
+        ? await boundedLifecycle('started', () => definition.lifecycle!.started(lifecycleState, lifecycleEvent(startedAt)))
+        : lifecycleState
+      safeAudit(audit, { ...auditBase, stage: 'started', status: 'allowed', reason: decision.reason })
+      safeNotify(context.onToolCall, { toolCallId: resolvedToolCallId, toolName: definition.name, input, status: 'running', startedAt, updatedAt: startedAt, lastProgressAt: startedAt, deadlineAt })
       heartbeat = setInterval(() => {
         safeNotify(context.onToolCall, {
           toolCallId: resolvedToolCallId,
@@ -406,6 +476,8 @@ export async function executeToolDefinition(
         throw new ToolCancelledError(executionController.signal.reason)
       }
       result = outcome.value
+      const spill = definition.spillResults === false ? undefined : (() => { try { return spillToolResult(context.sessionId, resolvedToolCallId, result.output) } catch (error) { result = { output: result.output.slice(0, 24_000), metadata: { ...(result.metadata ?? {}), spillFailed: error instanceof Error ? error.message : String(error) } }; return undefined } })()
+      if (spill) result = { output: spill.preview, metadata: { ...(result.metadata ?? {}), spill } }
       const completedAt = Date.now()
       const durationMs = completedAt - startedAt
       if (definition.lifecycle) {
@@ -476,6 +548,7 @@ export async function executeToolDefinition(
       if (deadline) clearTimeout(deadline)
       if (quiescenceGrace) clearTimeout(quiescenceGrace)
       if (abortListener) executionController.signal.removeEventListener('abort', abortListener)
+      lease?.release()
     }
   } finally {
     parentSignal?.removeEventListener('abort', forwardAbort)

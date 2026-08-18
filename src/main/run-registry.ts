@@ -10,7 +10,7 @@ export type RunPhase =
   | 'error'
   | 'aborting'
 
-export type RunTerminalReason = 'completed' | 'aborted' | 'error'
+export type RunTerminalReason = 'completed' | 'aborted' | 'error' | 'needs-user-action'
 
 export interface ActiveRunSummary {
   windowId: number

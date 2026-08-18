@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { transitionToolCall } from '../../shared/types'
 import type { AppConfig, AssistantSegment, ChatMessage, ContextUsage, StreamFlowState, StreamUsage, ToolCallInfo, ApprovalRequest, SessionSummary, ReasoningLevel, ProjectEntry, RunMode, PendingUserMessage, SubagentActivity, UserQuestionRequest } from '@shared/types'
 import { getInitialLanguage, persistLanguage, type Language } from './i18n'
 import { initialRunActivityState, runActivityReducer, type RunActivityAction, type RunActivityState } from './run-activity'
@@ -294,7 +295,7 @@ export const useStore = create<AppState>((set, get) => ({
     const streamSegments = updateToolInSegments(
       runtime.streamSegments,
       (tc) => tc.toolCallId === toolCallId || (!tc.toolCallId && tc.toolName === toolName),
-      (tc) => ({ ...tc, ...timing, output, metadata, status: 'done' as const })
+      (tc) => transitionToolCall(tc, { ...timing, output, metadata, status: metadata?.terminalStatus === 'denied' ? 'denied' : 'done' })
     )
     return {
       ...runtime,
@@ -307,13 +308,7 @@ export const useStore = create<AppState>((set, get) => ({
     const streamSegments = updateToolInSegments(
       runtime.streamSegments,
       (tc) => tc.toolCallId === toolCallId || (!tc.toolCallId && tc.toolName === toolName),
-      (tc) => ({
-        ...tc,
-        ...timing,
-        output: error,
-        error,
-        status: tc.status === 'timed-out' || tc.status === 'cancelled' || tc.status === 'denied' ? tc.status : status
-      })
+      (tc) => transitionToolCall(tc, { ...timing, output: error, error, status })
     )
     return {
       ...runtime,
@@ -327,9 +322,8 @@ export const useStore = create<AppState>((set, get) => ({
       runtime.streamSegments,
       (tc) => (update.toolCallId !== undefined && tc.toolCallId === update.toolCallId) || (!tc.toolCallId && tc.toolName === update.toolName),
       (tc) => {
-        if (tc.status !== 'running' && update.status === 'running') return tc
         if (tc.updatedAt !== undefined && update.updatedAt !== undefined && update.updatedAt < tc.updatedAt) return tc
-        return { ...tc, ...update, input: Object.keys(update.input).length > 0 ? update.input : tc.input }
+        return transitionToolCall(tc, { ...update, input: Object.keys(update.input).length > 0 ? update.input : tc.input })
       }
     )
     return { ...runtime, streamSegments, pendingToolCalls: flattenToolCalls(streamSegments) }

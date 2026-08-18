@@ -7,6 +7,7 @@ import { buildToolSet, type ToolDefinition, type ToolResult, type ToolContext } 
 import { readTool } from './fs'
 import { grepTool, globTool } from './grep'
 import { gitTools } from './git'
+import { toolResultReadTool } from './tool-result-read'
 import type { SubagentActivity, SubagentToolActivity } from '../../shared/types'
 
 // Concurrency limiter — max 4 concurrent sub-agents.
@@ -68,7 +69,7 @@ function drainSubagentQueue(): void {
   }
 }
 
-const READ_ONLY_SUBAGENT_TOOLS: ToolDefinition[] = [readTool, grepTool, globTool, ...gitTools]
+const READ_ONLY_SUBAGENT_TOOLS: ToolDefinition[] = [readTool, grepTool, globTool, ...gitTools, toolResultReadTool]
 
 export function getReadonlySubagentToolNames(): string[] {
   return READ_ONLY_SUBAGENT_TOOLS.map((tool) => tool.name)

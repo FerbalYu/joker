@@ -281,7 +281,51 @@ export interface PendingUserMessageListResult {
   error?: 'invalid-session'
 }
 
+export interface SpilledToolResultChunk {
+  content: string
+  totalBytes: number
+  offsetBytes: number
+  contentBytes: number
+  nextOffsetBytes?: number
+  eof: boolean
+}
+
+export type ToolRecoveryResolution = 'verified-not-applied' | 'verified-applied' | 'user-authorized-retry' | 'superseded'
+
+export type RetrySemantics = 'read-only' | 'idempotent' | 'idempotent-with-key' | 'verify-before-retry' | 'never-automatic'
+export type ToolRecoveryAction = 'automatic-retry-allowed' | 'retry-requires-verification' | 'retry-requires-user-authorization' | 'retry-forbidden'
+
+export interface ToolRecoveryRecord {
+  recoveryId: string
+  sourceRunId: string
+  sourceToolCallId: string
+  toolName: string
+  inputFingerprint?: string
+  fingerprintVersion: 'legacy-v1' | 'v2'
+  workspaceFingerprint?: string
+  toolSourceFingerprint?: string
+  retrySemantics: RetrySemantics
+  recommendedAction: ToolRecoveryAction
+  revision: number
+  createdAt: number
+  status: 'unresolved' | 'resolved'
+  resolution?: ToolRecoveryResolution
+  resolvedAt?: number
+  note?: string
+}
+
+export interface ToolRecoveryResolutionInput { recoveryId: string; expectedRevision: number; resolution: ToolRecoveryResolution; note?: string }
+
+export interface ToolRecoveryResolutionResult {
+  success: boolean
+  changed: boolean
+  recovery?: ToolRecoveryRecord
+  error?: 'invalid-session' | 'invalid-input' | 'invalid-resolution' | 'not-found' | 'already-resolved' | 'conflict'
+}
+
 export type ToolCallStatus = 'running' | 'done' | 'error' | 'denied' | 'cancelled' | 'timed-out'
+
+export const TERMINAL_TOOL_CALL_STATUSES: ReadonlySet<ToolCallStatus> = new Set(['done', 'error', 'denied', 'cancelled', 'timed-out'])
 
 export interface ToolCallInfo {
   toolCallId?: string
@@ -296,6 +340,20 @@ export interface ToolCallInfo {
   deadlineAt?: number
   durationMs?: number
   error?: string
+}
+
+export function transitionToolCall(current: ToolCallInfo, update: Partial<ToolCallInfo>): ToolCallInfo {
+  const nextStatus = update.status ?? current.status
+  if (current.updatedAt !== undefined && update.updatedAt !== undefined && update.updatedAt < current.updatedAt) return current
+  if (TERMINAL_TOOL_CALL_STATUSES.has(current.status) && nextStatus !== current.status) return current
+  const next = { ...current, ...update, status: nextStatus }
+  for (const field of ['startedAt', 'updatedAt', 'lastProgressAt', 'deadlineAt', 'completedAt'] as const) {
+    const previous = current[field]
+    const candidate = next[field]
+    if (previous !== undefined && (candidate === undefined || candidate < previous)) next[field] = previous
+  }
+  if (current.durationMs !== undefined && (next.durationMs === undefined || next.durationMs < current.durationMs)) next.durationMs = current.durationMs
+  return next
 }
 
 export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -875,7 +933,7 @@ export interface GoalTransitionResult {
 }
 
 export interface SessionRunActivityRecord {
-  state: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  state: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'needs-user-action'
   terminalRevision: number
   seenTerminalRevision: number
   runId?: string

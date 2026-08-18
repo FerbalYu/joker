@@ -9,6 +9,11 @@ import {
   operationsPath,
   readInterruptedRun,
   readOperations,
+  readToolRecoveries,
+  resolveToolRecovery,
+  spillToolResult,
+  readSpilledToolResult,
+  cleanupSpilledToolResults,
   toolInputFingerprint,
   unknownOutcomeGuard,
   setOperationsDirForTests,
@@ -113,21 +118,113 @@ void test('readInterruptedRun returns no missing tools for a cleanly terminated 
   })
 })
 
-void test('unknown outcome guard blocks only the identical canonical tool call', () => {
-  const fingerprint = toolInputFingerprint('Write', { filePath: 'a.txt', content: 'x' })
-  const guard = unknownOutcomeGuard([{ toolCallId: 'call-1', toolName: 'Write', inputFingerprint: fingerprint, kind: 'TOOL_OUTCOME_UNKNOWN' }])
-  const base = { definition: {} as never, context: {} as never }
-  assert.match(guard({ ...base, toolName: 'Write', input: { content: 'x', filePath: 'a.txt' } }) ?? '', /interrupted previous run/)
+void test('unknown outcome guard blocks only the identical scoped v2 call', () => {
+  const definition = { name: 'Write', source: { type: 'builtin' as const, id: 'Write' } }
+  const fingerprint = toolInputFingerprint({ workspacePath: 'C:/workspace', definition }, { filePath: 'a.txt', content: 'x' })
+  const guard = unknownOutcomeGuard([{ recoveryId: 'recovery-1', sourceRunId: 'run-1', sourceToolCallId: 'call-1', toolName: 'Write', ...fingerprint, fingerprintVersion: 'v2', retrySemantics: 'verify-before-retry', recommendedAction: 'retry-requires-verification', revision: 0, createdAt: 1, status: 'unresolved' }])
+  const base = { definition: definition as never, context: { workspacePath: 'C:/workspace' } as never }
+  assert.match((guard({ ...base, toolName: 'Write', input: { content: 'x', filePath: 'a.txt' } }) as { reason: string }).reason, /verify current state/)
   assert.equal(guard({ ...base, toolName: 'Write', input: { filePath: 'b.txt', content: 'x' } }), undefined)
-  assert.equal(guard({ ...base, toolName: 'Read', input: { filePath: 'a.txt', content: 'x' } }), undefined)
+  assert.equal(guard({ definition: definition as never, context: { workspacePath: 'D:/workspace' } as never, toolName: 'Write', input: { filePath: 'a.txt', content: 'x' } }), undefined)
 })
 
 void test('unknown outcome guard does not block not-started or legacy calls without fingerprints', () => {
   const guard = unknownOutcomeGuard([
-    { toolCallId: 'call-1', toolName: 'Write', inputFingerprint: toolInputFingerprint('Write', { filePath: 'a.txt' }), kind: 'TOOL_NOT_STARTED' },
-    { toolCallId: 'call-2', toolName: 'Write', kind: 'TOOL_OUTCOME_UNKNOWN' }
+    { recoveryId: 'recovery-1', sourceRunId: 'run-1', sourceToolCallId: 'call-1', toolName: 'Write', fingerprintVersion: 'legacy-v1', retrySemantics: 'never-automatic', recommendedAction: 'retry-requires-user-authorization', revision: 0, createdAt: 1, status: 'unresolved' },
+    { recoveryId: 'recovery-2', sourceRunId: 'run-2', sourceToolCallId: 'call-2', toolName: 'Write', inputFingerprint: toolInputFingerprint('Write', { filePath: 'a.txt' }), fingerprintVersion: 'legacy-v1', retrySemantics: 'never-automatic', recommendedAction: 'retry-requires-user-authorization', revision: 1, createdAt: 2, status: 'resolved', resolution: 'verified-not-applied', resolvedAt: 3 }
   ])
   assert.equal(guard({ toolName: 'Write', input: { filePath: 'a.txt' }, definition: {} as never, context: {} as never }), undefined)
+})
+
+void test('verified-applied resolution permanently blocks the identical call while not-applied re-allows it', () => {
+  const definition = { name: 'Write', source: { type: 'builtin' as const, id: 'Write' } }
+  const applied = toolInputFingerprint({ workspacePath: 'C:/workspace', definition }, { filePath: 'applied.txt' })
+  const guard = unknownOutcomeGuard([
+    { recoveryId: 'recovery-applied', sourceRunId: 'run-1', sourceToolCallId: 'call-1', toolName: 'Write', ...applied, fingerprintVersion: 'v2', retrySemantics: 'verify-before-retry', recommendedAction: 'retry-requires-verification', revision: 1, createdAt: 1, status: 'resolved', resolution: 'verified-applied', resolvedAt: 2 }
+  ])
+  const denial = guard({ toolName: 'Write', input: { filePath: 'applied.txt' }, definition: definition as never, context: { workspacePath: 'C:/workspace' } as never }) as { code?: string; requiresUserAction?: boolean }
+  assert.equal(denial?.code, 'TOOL_ALREADY_APPLIED')
+  assert.equal(denial?.requiresUserAction, undefined)
+})
+
+
+void test('retry semantics decision table only blocks verification and never-automatic calls', () => {
+  const definition = { name: 'Fixture', source: { type: 'builtin' as const, id: 'Fixture' } }
+  const input = { idempotencyKey: 'k1' }
+  const fingerprint = toolInputFingerprint({ workspacePath: 'C:/workspace', definition }, input)
+  const base = { sourceRunId: 'run', sourceToolCallId: 'call', toolName: 'Fixture', ...fingerprint, fingerprintVersion: 'v2' as const, revision: 0, createdAt: 1, status: 'unresolved' as const }
+  for (const retrySemantics of ['read-only', 'idempotent', 'idempotent-with-key'] as const) {
+    const guard = unknownOutcomeGuard([{ ...base, recoveryId: retrySemantics, retrySemantics, recommendedAction: 'automatic-retry-allowed' }])
+    assert.equal(guard({ toolName: 'Fixture', input, definition: definition as never, context: { workspacePath: 'C:/workspace' } as never }), undefined)
+  }
+  for (const [retrySemantics, recommendedAction] of [['verify-before-retry', 'retry-requires-verification'], ['never-automatic', 'retry-requires-user-authorization']] as const) {
+    const guard = unknownOutcomeGuard([{ ...base, recoveryId: retrySemantics, retrySemantics, recommendedAction }])
+    const denial = guard({ toolName: 'Fixture', input, definition: definition as never, context: { workspacePath: 'C:/workspace' } as never }) as { code?: string; requiresUserAction?: boolean }
+    assert.equal(denial.code, 'TOOL_OUTCOME_UNKNOWN')
+    assert.equal(denial.requiresUserAction, true)
+  }
+})
+
+void test('large tool results spill to session-owned storage and support bounded reads', () => {
+  withDir(() => {
+    const output = `head-${'x'.repeat(140_000)}-tail`
+    const spill = spillToolResult('session-spill', 'call-spill', output)
+    assert.ok(spill)
+    assert.equal(spill.truncated, true)
+    assert.match(spill.preview, /Full tool result stored as spill/)
+    const secondSpill = spillToolResult('session-spill', 'call-spill', output)
+    assert.ok(secondSpill)
+    assert.notEqual(secondSpill.id, spill.id)
+    const first = readSpilledToolResult('session-spill', spill.id, 0, 100)
+    assert.equal(first?.content, output.slice(0, 100))
+    assert.equal(first?.offsetBytes, 0)
+    assert.equal(first?.contentBytes, 100)
+    assert.equal(first?.nextOffsetBytes, 100)
+    assert.equal(readSpilledToolResult('other-session', spill.id), null)
+    assert.equal(readSpilledToolResult('session-spill', '../escape'), null)
+    cleanupSpilledToolResults('session-spill')
+    assert.equal(readSpilledToolResult('session-spill', spill.id), null)
+  })
+})
+
+void test('active runs do not expose premature recovery actions', () => {
+  withDir(() => {
+    appendOperation('session-active', { type: 'tool-proposed', at: 1, runId: 'run-active', toolCallId: 'call-active', toolName: 'Write' })
+    appendOperation('session-active', { type: 'tool-started', at: 2, runId: 'run-active', toolCallId: 'call-active', toolName: 'Write' })
+    assert.deepEqual(readToolRecoveries('session-active'), [])
+    appendOperation('session-active', { type: 'run-terminal', at: 3, runId: 'run-active', status: 'failed' })
+    assert.equal(readToolRecoveries('session-active').length, 1)
+  })
+})
+
+void test('persistent recovery survives later run terminals until explicitly resolved', () => {
+  withDir(() => {
+    const fingerprint = toolInputFingerprint('Write', { filePath: 'a.txt' })
+    appendOperation('session-recovery', { type: 'tool-proposed', at: 1, runId: 'run-crashed', toolCallId: 'call-1', toolName: 'Write', inputFingerprint: fingerprint })
+    appendOperation('session-recovery', { type: 'tool-started', at: 2, runId: 'run-crashed', toolCallId: 'call-1', toolName: 'Write' })
+    appendOperation('session-recovery', { type: 'run-terminal', at: 3, runId: 'run-crashed', status: 'failed' })
+    const unresolved = readToolRecoveries('session-recovery')
+    assert.equal(unresolved.length, 1)
+    assert.equal(unresolved[0]?.status, 'unresolved')
+    const resolved = resolveToolRecovery('session-recovery', { recoveryId: unresolved[0]!.recoveryId, expectedRevision: 0, resolution: 'verified-not-applied', note: 'checked file' })
+    assert.equal(resolved.success, true)
+    assert.equal(readToolRecoveries('session-recovery')[0]?.resolution, 'verified-not-applied')
+    assert.equal(resolveToolRecovery('session-recovery', { recoveryId: unresolved[0]!.recoveryId, expectedRevision: 0, resolution: 'verified-applied' }).error, 'conflict')
+  })
+})
+
+void test('recovery resolution CAS accepts only one current revision', () => {
+  withDir(() => {
+    appendOperation('session-cas', { type: 'tool-proposed', at: 1, runId: 'run-cas', toolCallId: 'call-cas', toolName: 'Bash', retrySemantics: 'never-automatic' })
+    appendOperation('session-cas', { type: 'tool-started', at: 2, runId: 'run-cas', toolCallId: 'call-cas', toolName: 'Bash' })
+    appendOperation('session-cas', { type: 'run-terminal', at: 3, runId: 'run-cas', status: 'failed' })
+    const recovery = readToolRecoveries('session-cas')[0]!
+    const first = resolveToolRecovery('session-cas', { recoveryId: recovery.recoveryId, expectedRevision: 0, resolution: 'user-authorized-retry' })
+    const stale = resolveToolRecovery('session-cas', { recoveryId: recovery.recoveryId, expectedRevision: 0, resolution: 'verified-applied' })
+    assert.equal(first.success, true)
+    assert.equal(stale.error, 'conflict')
+    assert.equal(readToolRecoveries('session-cas')[0]?.resolution, 'user-authorized-retry')
+  })
 })
 
 void test('readOperations tolerates a torn tail line from a crash mid-write', () => {

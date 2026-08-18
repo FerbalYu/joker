@@ -161,7 +161,7 @@ export function mergeSessionActivity(
 
   return {
     ...revision,
-    status: durable.state,
+    status: durable.state === 'needs-user-action' ? 'awaiting-user' : durable.state,
     ...durableRunFields(durable)
   }
 }

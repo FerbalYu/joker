@@ -244,3 +244,11 @@ void test('messages remain selected-session data while runtime state is keyed', 
   useStore.getState().startStream(sessionB)
   assert.deepEqual(useStore.getState().messages, [message])
 })
+
+void test('renderer ToolCall updates are monotonic after terminal states', () => {
+  useStore.getState().resetTransientState('session-a')
+  useStore.getState().addPendingToolCall('session-a', { toolCallId: 'call-terminal', toolName: 'Write', input: {}, status: 'running' })
+  useStore.getState().resolveToolCall('session-a', 'call-terminal', 'Write', 'denied', { terminalStatus: 'denied' })
+  useStore.getState().updateToolStatus('session-a', { toolCallId: 'call-terminal', toolName: 'Write', input: {}, status: 'running', updatedAt: Date.now() + 1 })
+  assert.equal(useStore.getState().pendingToolCalls.find((item) => item.toolCallId === 'call-terminal')?.status, 'denied')
+})

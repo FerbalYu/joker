@@ -1,3 +1,4 @@
+import { cleanupSessionOperations } from './operations'
 import { createHash } from 'node:crypto'
 import * as electron from 'electron'
 import { join } from 'node:path'
@@ -557,7 +558,7 @@ export function startSessionRunActivity(sessionId: string, runId: string, kind: 
 export function finishSessionRunActivity(
   sessionId: string,
   runId: string,
-  state: Extract<SessionRunActivityRecord['state'], 'completed' | 'failed' | 'cancelled' | 'interrupted'>,
+  state: Extract<SessionRunActivityRecord['state'], 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'needs-user-action'>,
   error?: string,
   finishedAt = Date.now()
 ): SessionRunActivityRecord | null {
@@ -1298,6 +1299,7 @@ export function deleteSession(id: string): boolean {
     if (existsSync(path)) unlinkSync(path)
     if (existsSync(`${path}.bak`)) unlinkSync(`${path}.bak`)
     cleanupGeneratedImages(id)
+    cleanupSessionOperations(id)
     return true
   })
 }

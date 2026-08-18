@@ -2,6 +2,7 @@ export type ToolRisk = 'read' | 'write_local' | 'exec' | 'external'
 
 const BUILTIN_RISKS: Record<string, ToolRisk> = {
   Read: 'read',
+  ToolResultRead: 'read',
   ContextRetrieve: 'read',
   Grep: 'read',
   Glob: 'read',

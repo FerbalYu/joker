@@ -2,7 +2,7 @@ import { BrowserWindow, MessageChannelMain } from 'electron'
 import { runAgent } from './agent/loop'
 import { createApprovalGate, cancelApprovalsForRun, cleanupApprovalWindow } from './agent/approval'
 import { userQuestionRegistry } from './agent/user-question'
-import { buildToolSet, type ToolDefinition, type ToolContext } from './tools/registry'
+import { buildToolSet, createToolScheduler, type ToolDefinition, type ToolContext } from './tools/registry'
 import { fsTools } from './tools/fs'
 import { bashTools } from './tools/bash'
 import { searchTools } from './tools/grep'
@@ -31,11 +31,12 @@ import {
   steerPendingUserMessage
 } from './store/sessions'
 import { resolveProjectPath } from './store/projects'
-import { appendOperation, readInterruptedRun, unknownOutcomeGuard, type OperationJournal } from './store/operations'
+import { appendOperation, readInterruptedRun, readToolRecoveries, unknownOutcomeGuard, type OperationJournal } from './store/operations'
 import { getMcpTools } from './tools/mcp-bridge'
 import { webTools } from './tools/web'
 import { imageTools } from './tools/image'
 import { gitTools } from './tools/git'
+import { toolResultTools } from './tools/tool-result-read'
 import { buildCapabilitySnapshot } from './agent/capabilities'
 import { buildGeneratedToolDefinitions, listGeneratedToolSnapshotBindings, type GeneratedToolSnapshotBinding } from './generated-tools/adapter'
 import { generatedToolExecutionGuard } from './generated-tools/execution-guard'
@@ -90,7 +91,7 @@ function buildAllTools(
   generatedToolVersions: GeneratedToolSnapshotBinding[] = [],
   projectId?: string
 ): ToolDefinition[] {
-  const base = [...contextTools, ...fsTools, ...bashTools, ...searchTools, ...todoTools, ...subagentTools, ...webTools, ...imageTools, ...gitTools, ...buildAskUserTools(win), ...getMcpTools(allowedMcpTools)]
+  const base = [...contextTools, ...fsTools, ...bashTools, ...searchTools, ...todoTools, ...subagentTools, ...webTools, ...imageTools, ...gitTools, ...toolResultTools, ...buildAskUserTools(win), ...getMcpTools(allowedMcpTools)]
   const existing = [...base, ...buildToolForgeMetaTools({ builtinTools: base })]
   return [
     ...existing,
@@ -105,7 +106,7 @@ function buildAllTools(
 }
 
 function buildResearchTools(): ToolDefinition[] {
-  return [...contextTools, ...todoTools, ...webTools, ...researchReportTools]
+  return [...contextTools, ...todoTools, ...webTools, ...researchReportTools, ...toolResultTools]
 }
 
 interface RunRequestOptions {
@@ -141,6 +142,7 @@ interface StreamEndpoint {
   retired: boolean
 }
 
+const toolScheduler = createToolScheduler()
 const runRegistry = new RunRegistry<ActiveRun>()
 const endpointRegistry = new EndpointGenerationRegistry<StreamEndpoint>()
 
@@ -180,7 +182,7 @@ function startRunActivity(run: ActiveRun): boolean {
   return Boolean(registration && startSessionRunActivity(run.sessionId, run.runId, run.kind, registration.startedAt))
 }
 
-function finishRunActivity(run: ActiveRun, state: 'completed' | 'failed' | 'cancelled' | 'interrupted', error?: string): void {
+function finishRunActivity(run: ActiveRun, state: 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'needs-user-action', error?: string): void {
   if (run.activityFinished) return
   const finished = finishSessionRunActivity(run.sessionId, run.runId, state, error)
   if (finished) run.activityFinished = true
@@ -274,12 +276,17 @@ function createWindowGoalCoordinator(win: BrowserWindow): GoalCoordinator {
           generatedToolVersions
         }
       )
+      const goalOperationJournal: OperationJournal = { append: (event) => appendOperation(sessionId, event) }
+      const goalRecoveries = readToolRecoveries(sessionId)
       const toolContext: ToolContext = {
         workspacePath,
         sessionId,
         runId: invocationId,
         approvalGate: createApprovalGate(win, sessionId, invocationId, 'chat'),
         abortSignal: signal,
+        operationJournal: goalOperationJournal,
+        scheduler: toolScheduler,
+        guards: [unknownOutcomeGuard(goalRecoveries), generatedToolExecutionGuard(getJokerHomeDir())],
         onToolCall: (info) => onEvent({
           type: 'tool-status',
           sessionId,
@@ -309,8 +316,9 @@ function createWindowGoalCoordinator(win: BrowserWindow): GoalCoordinator {
         projectId
       )
       const tools: ToolSet = buildToolSet(definitions, toolContext)
+      let goalTerminalStatus = 'error'
       try {
-        return await runAgent({
+        const result = await runAgent({
           sessionId,
           runId: invocationId,
           messages: goalMessages,
@@ -320,9 +328,13 @@ function createWindowGoalCoordinator(win: BrowserWindow): GoalCoordinator {
           capabilities,
           checkpointUsed: projection.checkpointUsed,
           onEvent: (event) => event.type === 'done' ? undefined : onEvent(event),
+          operationJournal: goalOperationJournal,
           signal
         })
+        goalTerminalStatus = result.status
+        return result
       } finally {
+        goalOperationJournal.append({ type: 'run-terminal', at: Date.now(), runId: invocationId, status: signal.aborted ? 'aborted' : goalTerminalStatus })
         cancelApprovalsForRun({ windowId: win.id, sessionId, runId: invocationId })
         userQuestionRegistry.cancelRun(sessionId, invocationId)
       }
@@ -503,6 +515,10 @@ export function setupStreaming(win: BrowserWindow): void {
           } else if (result.status === 'paused' && controller.signal.aborted) {
             finishRunActivity(active, 'cancelled')
             active.terminalReason = 'aborted'
+          } else if (result.status === 'paused' && String(result.goal?.feedback ?? '').startsWith('Tool recovery requires user action:')) {
+            active.terminalReason = 'needs-user-action'
+            active.allowQueueDrain = false
+            finishRunActivity(active, 'needs-user-action', result.goal?.feedback)
           } else if (result.status === 'interrupted' || result.status === 'superseded') {
             finishRunActivity(active, 'interrupted')
           } else {
@@ -634,6 +650,7 @@ function handleSend(
 
   const researchContext = runMode === 'research' ? createResearchContext() : undefined
   const interrupted = readInterruptedRun(sessionId)
+  const recoveries = readToolRecoveries(sessionId)
   const operationJournal: OperationJournal = {
     append: (event) => appendOperation(sessionId, event)
   }
@@ -645,7 +662,8 @@ function handleSend(
     researchContext,
     abortSignal: controller.signal,
     operationJournal,
-    guards: [unknownOutcomeGuard(interrupted.missing), generatedToolExecutionGuard(getJokerHomeDir())],
+    scheduler: toolScheduler,
+    guards: [unknownOutcomeGuard(recoveries), generatedToolExecutionGuard(getJokerHomeDir())],
     onToolCall: (info) => onEvent({
       type: 'tool-status',
       sessionId,
@@ -823,7 +841,7 @@ function handleSend(
   })
     .then(async (result) => {
       if (!ownsRun(activeRun)) return
-      if (result.status === 'completed' || result.status === 'step-limit' || result.status === 'repetition') {
+      if (result.status === 'completed' || result.status === 'step-limit' || result.status === 'repetition' || result.status === 'needs-user-action') {
         if (!activeRun.stepCommitted && (result.segments.length > 0 || result.text)) {
           const assistantMessage = assistantMessageFromResult(result, runMode)
           if (!appendMessage(sessionId, assistantMessage)) throw new Error('Failed to persist assistant message')
@@ -836,7 +854,7 @@ function handleSend(
         await onEvent({ type: 'message-deferred', sessionId, runId, pendingMessageId: steer.message.id, reason: 'no-next-step' })
       }
       await emitQueueUpdated(transport, sessionId, runId)
-      if (terminalDone && (result.status === 'completed' || result.status === 'step-limit' || result.status === 'repetition')) {
+      if (terminalDone && (result.status === 'completed' || result.status === 'step-limit' || result.status === 'repetition' || result.status === 'needs-user-action')) {
         mergeFinalUsageIntoLastAssistant(sessionId, result.usage)
         await transport.send({ type: 'message-end', sessionId, runId, messageId: result.messageId, usage: result.usage }).catch(() => undefined)
       }
@@ -847,6 +865,10 @@ function handleSend(
           const current = scheduler?.read(activeRun.continuation.id)
           if (scheduler && current && current.status === 'running' && current.continuationRunId === runId) scheduler.complete(current.id, current.revision)
         }
+      } else if (result.status === 'needs-user-action') {
+        activeRun.terminalReason = 'needs-user-action'
+        activeRun.allowQueueDrain = false
+        finishRunActivity(activeRun, 'needs-user-action', 'Tool outcome requires user review')
       } else if (result.status === 'repetition') {
         activeRun.terminalReason = 'error'
         finishRunActivity(activeRun, 'failed', result.error)
