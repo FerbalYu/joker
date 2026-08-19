@@ -44,6 +44,15 @@ import { RuntimeQualificationService } from '../generated-tools/runtime-qualific
 import { getJokerHomeDir } from '../store/paths'
 import { requestExplicitApproval } from '../agent/approval'
 
+const GENERATED_TOOLS_CHANNELS = [
+  'generated-tools:list', 'generated-tools:get', 'generated-tools:job-status', 'generated-tools:enable',
+  'generated-tools:edit', 'generated-tools:remove', 'generated-tools:export', 'generated-tools:disable',
+  'generated-tools:reenable', 'generated-tools:rollback', 'generated-tools:revalidate', 'generated-tools:continuations',
+  'generated-tools:qualification-start', 'generated-tools:qualification-cancel'
+] as const
+
+let disposeGeneratedToolsIpc: (() => void) | undefined
+
 function operationView(operation: import('../generated-tools/qualification-operation-store').QualificationOperationRecord): import('../../shared/generated-tools-management').GeneratedToolsQualificationOperationView {
   return {
     attemptId: operation.attemptId,
@@ -151,7 +160,8 @@ export function createGeneratedToolsMutationHandlers(): GeneratedToolsMutationHa
 export function registerGeneratedToolsIpc(
   readModel = createGeneratedToolsReadModel(),
   mutationHandlers = createGeneratedToolsMutationHandlers()
-): void {
+): () => void {
+  disposeGeneratedToolsIpc?.()
   ipcMain.handle('generated-tools:list', (): GeneratedToolsListResult => readModel.list())
   ipcMain.handle(
     'generated-tools:get',
@@ -244,4 +254,9 @@ export function registerGeneratedToolsIpc(
       return { success: false, error: { code: 'read-failed', message: error instanceof Error ? error.message : 'Unable to cancel ToolForge verification' } }
     }
   })
+  disposeGeneratedToolsIpc = () => {
+    for (const channel of GENERATED_TOOLS_CHANNELS) ipcMain.removeHandler(channel)
+    disposeGeneratedToolsIpc = undefined
+  }
+  return disposeGeneratedToolsIpc
 }

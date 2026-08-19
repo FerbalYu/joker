@@ -23,15 +23,10 @@ import { runPackagedGeneratedToolQualification } from './generated-tools/runtime
 import { runPackagedGeneratedToolFixtureQualification } from './generated-tools/runtime/packaged-fixture-qualification'
 import { runPackagedGate2Qualification } from './generated-tools/runtime/packaged-gate2-qualification'
 import { runPackagedGate4EditQualification } from './generated-tools/runtime/packaged-gate4-edit-qualification'
-import { ForgeService } from './generated-tools/forge-service'
-import { PromotionService } from './generated-tools/promotion-service'
-import { setDefaultForgeService, setDefaultPromotionService, stopDefaultForgeService } from './generated-tools/forge-service-runtime'
-import { ContinuationScheduler } from './generated-tools/continuation-scheduler'
-import { setDefaultContinuationScheduler } from './generated-tools/continuation-scheduler-runtime'
 import { installSummarizeTaskJsonFixture } from './generated-tools/fixture'
-import { RuntimeQualificationService } from './generated-tools/runtime-qualification-service'
-import { setDefaultRuntimeQualificationService, stopDefaultRuntimeQualificationService } from './generated-tools/runtime-qualification-service-runtime'
 import { getJokerHomeDir } from './store/paths'
+import { startNodeRuntime, stopNodeRuntime } from './runtime'
+import { createGeneratedToolsCordisPlugin } from './generated-tools/cordis-plugin'
 
 function migrateLegacyJokerState(legacyStateRoot: string, targetStateRoot: string): void {
   if (!existsSync(legacyStateRoot)) return
@@ -63,6 +58,7 @@ function configureLocalRuntimePaths(): void {
 configureLocalRuntimePaths()
 
 let shuttingDown = false
+let disposeGeneratedToolsIpc: (() => void) | undefined
 
 const STREAM_QA_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>JOKER Stream QA</title></head><body><main id="status">stream QA loading</main><script>
 (function () {
@@ -222,19 +218,11 @@ app.whenReady().then(async () => {
   if (await runPackagedGeneratedToolFixtureQualification()) return
   if (await runPackagedGate2Qualification()) return
   if (await runPackagedGate4EditQualification()) return
+  const nodeRuntime = await startNodeRuntime([
+    createGeneratedToolsCordisPlugin({ jokerHome: getJokerHomeDir() })
+  ])
+  console.info(`[node-runtime] listening at ${nodeRuntime.url}`)
   const jokerHome = getJokerHomeDir()
-  const qualificationService = new RuntimeQualificationService({ jokerHome })
-  qualificationService.recover()
-  setDefaultRuntimeQualificationService(qualificationService)
-  const promotionService = new PromotionService({ jokerHome })
-  const forgeService = new ForgeService({ jokerHome, activationDriver: promotionService.advance.bind(promotionService) })
-  const continuationScheduler = new ContinuationScheduler({ jokerHome })
-  setDefaultForgeService(forgeService)
-  setDefaultPromotionService(promotionService)
-  setDefaultContinuationScheduler(continuationScheduler)
-  continuationScheduler.recover()
-  await promotionService.recover()
-  forgeService.start()
   if (process.env['JOKER_INSTALL_TOOLFORGE_FIXTURE'] === '1') {
     installSummarizeTaskJsonFixture(jokerHome, Date.now(), {
       fixtureRoot: app.isPackaged
@@ -252,7 +240,7 @@ app.whenReady().then(async () => {
   registerMarkdownIpc()
   registerImageConfigIpc()
   registerGeneratedImageIpc()
-  registerGeneratedToolsIpc()
+  disposeGeneratedToolsIpc = registerGeneratedToolsIpc()
   registerProjectIpc()
   registerToolForgeTrustIpc()
   await registerApprovalIpc()
@@ -278,8 +266,10 @@ app.on('before-quit', (event) => {
   if (shuttingDown) return
   event.preventDefault()
   shuttingDown = true
-  stopDefaultRuntimeQualificationService()
-  void stopDefaultForgeService().finally(() => app.quit())
+  void stopNodeRuntime().finally(() => {
+    disposeGeneratedToolsIpc?.()
+    app.quit()
+  })
 })
 
 app.on('window-all-closed', () => {

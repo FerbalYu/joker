@@ -7,6 +7,7 @@ import { assembleGeneratedToolVersion } from './version-assembler'
 import { createPromotionJournal, readPromotionJournal, readPromotionJournalByIdempotencyKey, readPromotionJournals, updatePromotionJournal } from './promotion-journal-store'
 import { isAuthorizingPromotionApprovalReceipt, readPromotionApprovalReceipt, writePromotionApprovalReceipt } from './promotion-approval-store'
 import { promoteGeneratedTool, readGeneratedToolRegistry, registerGeneratedToolVersion, ToolForgeCasError } from './registry'
+import type { ContinuationScheduler } from './continuation-scheduler'
 import { getDefaultContinuationScheduler } from './continuation-scheduler-runtime'
 
 export interface PromoteGeneratedToolInput {
@@ -31,6 +32,7 @@ export interface PromoteGeneratedToolResult {
 
 export interface PromotionServiceOptions {
   jokerHome: string
+  continuationScheduler?: ContinuationScheduler
   now?: () => number
   phaseCheckpoint?: (phase: GeneratedToolPromotionJournal['phase'], journal: GeneratedToolPromotionJournal) => void
 }
@@ -120,9 +122,11 @@ function isRecoverablePromotionPhase(phase: GeneratedToolPromotionJournal['phase
 
 export class PromotionService {
   private readonly now: () => number
+  private readonly continuationScheduler: ContinuationScheduler | undefined
 
   constructor(private readonly options: PromotionServiceOptions) {
     this.now = options.now ?? Date.now
+    this.continuationScheduler = options.continuationScheduler
   }
 
   private checkpoint(journal: GeneratedToolPromotionJournal): void {
@@ -169,7 +173,7 @@ export class PromotionService {
           })))
           continue
         }
-        const continuation = getDefaultContinuationScheduler()?.read(`continuation-${journal.id}`)
+        const continuation = (this.continuationScheduler ?? getDefaultContinuationScheduler())?.read(`continuation-${journal.id}`)
         journal = updatePromotionJournal(this.options.jokerHome, journal.id, journal.revision, (current) => ({
           ...current,
           revision: current.revision + 1,
@@ -362,7 +366,7 @@ export class PromotionService {
         phase = updatePromotionJournal(this.options.jokerHome, phase.id, phase.revision, (item) => ({ ...item, revision: item.revision + 1, phase: 'pointer-switched', registryRevision: promoted.revision, capabilityRevision: promoted.capabilityRevision.revision, versionId: assembled.version.id, versionNumber: assembled.version.version, updatedAt: this.now() }))
         this.checkpoint(phase)
       }
-      const scheduler = getDefaultContinuationScheduler()
+      const scheduler = this.continuationScheduler ?? getDefaultContinuationScheduler()
       if (!scheduler) throw new Error('Continuation scheduler is unavailable; promotion cannot complete safely')
       const existingContinuation = scheduler.read(`continuation-${promotionId}`)
       const continuation = existingContinuation ?? scheduler.ensureReady({

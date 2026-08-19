@@ -1,4 +1,5 @@
 import type { RuntimeQualificationService } from './runtime-qualification-service'
+import { getCordisQualificationService } from './cordis-runtime'
 
 let defaultRuntimeQualificationService: RuntimeQualificationService | null = null
 
@@ -7,7 +8,7 @@ export function setDefaultRuntimeQualificationService(service: RuntimeQualificat
 }
 
 export function getDefaultRuntimeQualificationService(): RuntimeQualificationService | undefined {
-  return defaultRuntimeQualificationService ?? undefined
+  return getCordisQualificationService() ?? defaultRuntimeQualificationService ?? undefined
 }
 
 export function stopDefaultRuntimeQualificationService(): void {

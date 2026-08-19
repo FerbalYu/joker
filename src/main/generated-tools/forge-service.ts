@@ -16,7 +16,10 @@ import {
   resumeAndValidateGeneratedToolCandidate,
   resumeInterruptedForgeJob
 } from './validator-recovery'
+import { GeneratedToolsEventBus } from './event-bus'
+import { startTraceSpan, type TraceSink } from './trace'
 import { validateGeneratedToolCandidate } from './validator'
+import { assertForgeJobTransition } from './forge-state-machine'
 
 const DEFAULT_MAX_CONCURRENCY = 1
 
@@ -50,6 +53,8 @@ export interface ForgeServiceOptions {
   createValidationRunId?: () => string
   activationDriver?: ForgeActivationDriver
   maxConcurrency?: number
+  events?: GeneratedToolsEventBus
+  traceSink?: TraceSink
 }
 
 export interface ForgeController {
@@ -114,11 +119,15 @@ export class ForgeService implements ForgeController {
   private readonly now: () => number
   private readonly maker: ForgeServiceMaker
   private readonly maxConcurrency: number
+  private readonly events?: GeneratedToolsEventBus
+  private readonly traceSink?: TraceSink
   private stopping = false
 
   constructor(private readonly options: ForgeServiceOptions) {
     this.now = options.now ?? Date.now
     this.maxConcurrency = Math.max(1, Math.floor(options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY))
+    this.events = options.events
+    this.traceSink = options.traceSink
     this.maker = options.maker ?? ((input) => runForgeAgent(input))
   }
 
@@ -151,6 +160,7 @@ export class ForgeService implements ForgeController {
     const job = readForgeJob(this.options.jokerHome, jobId)
     if (!job || (!['queued', 'interrupted', 'awaiting-policy'].includes(job.status))) return false
     this.pending.add(jobId)
+    this.events?.emit('forge.job.queued', { jobId: job.id, toolId: job.toolId, status: job.status })
     queueMicrotask(() => this.drain())
     return true
   }
@@ -201,6 +211,17 @@ export class ForgeService implements ForgeController {
   }
 
   private async runJob(jobId: string, signal: AbortSignal): Promise<void> {
+    const span = startTraceSpan(this.traceSink, 'forge.job', { jobId })
+    try {
+      await this.runJobInternal(jobId, signal)
+      span.end('ok')
+    } catch (error) {
+      span.end('error', error)
+      throw error
+    }
+  }
+
+  private async runJobInternal(jobId: string, signal: AbortSignal): Promise<void> {
     let job = readForgeJob(this.options.jokerHome, jobId)
     if (!job || job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') return
 
@@ -219,6 +240,7 @@ export class ForgeService implements ForgeController {
     }
 
     if (job.status === 'queued') {
+      assertForgeJobTransition(job.status, 'planning')
       job = updateForgeJob(this.options.jokerHome, job.id, job.revision, (current) => ({
         ...current,
         revision: current.revision + 1,
@@ -227,9 +249,11 @@ export class ForgeService implements ForgeController {
         updatedAt: Math.max(current.updatedAt, this.now()),
         currentPhase: 'planning'
       }))
+      this.events?.emit('forge.job.phase', { jobId: job.id, toolId: job.toolId, from: 'queued', to: 'planning' })
     }
 
     if (job.status === 'planning') {
+      assertForgeJobTransition(job.status, 'building')
       job = updateForgeJob(this.options.jokerHome, job.id, job.revision, (current) => ({
         ...current,
         revision: current.revision + 1,
@@ -240,6 +264,7 @@ export class ForgeService implements ForgeController {
     }
 
     if (job.status === 'building') {
+      assertForgeJobTransition(job.status, 'validating')
       await this.maker({
         jokerHome: this.options.jokerHome,
         jobId: job.id,
@@ -291,9 +316,11 @@ export class ForgeService implements ForgeController {
       }
     }
 
+    if (!job) return
     if (job.status === 'awaiting-policy') {
       if (!this.options.activationDriver) return
       await this.options.activationDriver(job.id)
+      this.events?.emit('forge.job.completed', { jobId: job.id, toolId: job.toolId, status: 'completed' })
     }
   }
 
@@ -306,6 +333,7 @@ export class ForgeService implements ForgeController {
         return
       }
       const message = error instanceof Error ? error.message : String(error)
+      this.events?.emit('forge.job.failed', { jobId, toolId: job.toolId, error: message.slice(0, 2_000) })
       updateForgeJob(this.options.jokerHome, job.id, job.revision, (current) => failedJob(current, this.now(), message))
     } catch (persistError) {
       const latest = readForgeJob(this.options.jokerHome, jobId)

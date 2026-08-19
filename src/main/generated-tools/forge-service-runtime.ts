@@ -1,5 +1,6 @@
 import type { ForgeController, ForgeService } from './forge-service'
 import type { PromotionService } from './promotion-service'
+import { getCordisForgeController, getCordisPromotionService } from './cordis-runtime'
 
 let defaultPromotionService: PromotionService | null = null
 let defaultForgeService: ForgeService | null = null
@@ -9,7 +10,7 @@ export function setDefaultPromotionService(service: PromotionService | null): vo
 }
 
 export function getDefaultPromotionService(): PromotionService | undefined {
-  return defaultPromotionService ?? undefined
+  return getCordisPromotionService() ?? defaultPromotionService ?? undefined
 }
 
 
@@ -18,7 +19,7 @@ export function setDefaultForgeService(service: ForgeService | null): void {
 }
 
 export function getDefaultForgeController(): ForgeController | undefined {
-  return defaultForgeService ?? undefined
+  return getCordisForgeController() ?? defaultForgeService ?? undefined
 }
 
 export async function stopDefaultForgeService(): Promise<void> {

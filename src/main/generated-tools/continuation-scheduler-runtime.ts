@@ -1,4 +1,5 @@
 import type { ContinuationScheduler } from './continuation-scheduler'
+import { getCordisContinuationScheduler } from './cordis-runtime'
 
 let defaultContinuationScheduler: ContinuationScheduler | null = null
 
@@ -7,5 +8,5 @@ export function setDefaultContinuationScheduler(scheduler: ContinuationScheduler
 }
 
 export function getDefaultContinuationScheduler(): ContinuationScheduler | undefined {
-  return defaultContinuationScheduler ?? undefined
+  return getCordisContinuationScheduler() ?? defaultContinuationScheduler ?? undefined
 }
